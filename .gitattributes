@@ -1,0 +1,15 @@
+# Path-based git attributes
+# https://www.kernel.org/pub/software/scm/git/docs/gitattributes.html
+
+# Keep development-only files out of a source archive.
+/.claude            export-ignore
+/.editorconfig      export-ignore
+/.gitattributes     export-ignore
+/.github            export-ignore
+/.gitignore         export-ignore
+/CLAUDE.md          export-ignore
+/box.json           export-ignore
+/phpstan.neon.dist  export-ignore
+/phpunit.xml.dist   export-ignore
+/rector.php         export-ignore
+/tests              export-ignore

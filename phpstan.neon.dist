@@ -1,0 +1,15 @@
+includes:
+    - phar://phpstan.phar/conf/bleedingEdge.neon
+
+parameters:
+    level: max
+    # This is an application rather than a package, so its own config directory is the one
+    # Larastan measures `env()` calls against.
+    configDirectories:
+        - config
+    paths:
+        - app
+        - config
+        - tests
+        - rector.php
+    tmpDir: build/phpstan

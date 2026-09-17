@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: House style for issues
+    url: https://github.com/robot-council/core/blob/main/.claude/skills/writing-issues/SKILL.md
+    about: The source of truth for issue titles, sections, acceptance criteria, and labels. The templates here are only its skeletons.

@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""
+Generate a GitHub Release note body for `robot-council/core` per the
+`writing-release-notes` skill: em-dash-title-ready, milestone lead + optional
+breaking-change callout, a closed heading vocabulary, and one linked bullet per
+change (a `[#N]` PR link, or a backticked short SHA for a direct commit).
+
+It reads first-parent git history for a ref range and resolves each change to a
+clean, bucketed bullet -- pulling PR titles live from the GitHub API (via `gh`),
+so it depends on nothing but `git`, `gh`, and Python 3.
+
+Because PR titles are held to house style by the `writing-pull-requests`
+skill, the live titles are already clean; this tool only strips residual noise
+(Conventional-Commit prefixes, `[skip ci]` litter, merge-order hints, redundant
+`(#NNN)` refs), drops `&`, and applies the Oxford comma. Acronym casing applies only to a
+direct commit's subject, never to a PR title, which is used as written.
+Changelog pull requests (`Update CHANGELOG for vX.Y.Z`) are skipped.
+
+Usage:
+  gen_release_notes.py [options] <prev-ref> <new-ref>
+
+Example (cut v0.3.0 from the previous tag):
+  python3 .claude/skills/writing-release-notes/gen_release_notes.py \\
+      v0.2.0 v0.3.0 \\
+      --lead "One-sentence milestone theme." \\
+      --breaking "rename the \\`foo\\` config key to \\`bar\\` in a published config." \\
+      --breaking-item "Rename the \\`foo\\` config key to \\`bar\\` [#12](...)." \\
+      > body.md
+  gh release create v0.3.0 --title 'v0.3.0 — Theme' --notes-file body.md --verify-tag
+
+Options:
+  --repo O/R          GitHub repo (default: robot-council/core)
+  --lead TEXT         one-sentence milestone lead (recommended; else a TODO placeholder)
+  --breaking TEXT     impact/action for the "**Breaking change** —" callout paragraph
+  --breaking-item T   an itemized "## Breaking changes" bullet (repeatable)
+  --exclude N         PR number to omit from the auto-buckets (repeatable)
+  --footer TEXT       trailing italic footer line (e.g. a retroactive-tag note)
+"""
+import argparse, json, re, subprocess, sys
+
+DEFAULT_REPO = "robot-council/core"
+
+
+def sh(args):
+    return subprocess.run(args, capture_output=True, text=True).stdout
+
+
+# ---- prose helpers -------------------------------------------------------
+
+def noamp(s):
+    """Replace '&' with 'and'; add an Oxford comma when it closes a comma-list."""
+    def repl(m):
+        return ", and " if "," in s[:m.start()] else " and "
+    return re.sub(r"\s*&\s*", repl, s)
+
+
+SKIPCI = re.compile(r"\s*\[\s*(?:skip[\s-]*ci|ci[\s-]*skip|no[\s-]*ci)\s*\]", re.I)
+
+
+def scrub(s):
+    """Strip build-directive litter like '[skip ci]' and collapse whitespace."""
+    return re.sub(r"\s{2,}", " ", SKIPCI.sub("", s)).strip()
+
+
+_ACRO = {"composer": "Composer", "json-ld": "JSON-LD", "cli": "CLI",
+         "php": "PHP", "css": "CSS", "scss": "SCSS", "ci": "CI", "api": "API", "pcov": "PCOV",
+         "mcp": "MCP", "laravel": "Laravel", "larastan": "Larastan",
+         "phpstan": "PHPStan", "rector": "Rector", "vite": "Vite", "ssr": "SSR", "ssg": "SSG",
+         "seo": "SEO"}
+# A key counts only as a standalone word. One touching `.`, `/`, `-`, or `_` is part of a
+# name -- `rector.php`, `composer.json`, `src/Rector`, `laravel-ray` -- and a name keeps its
+# spelling. So does anything inside a backticked code span, which fix_acro() skips.
+_ACRO_RE = re.compile(
+    r"(?<![\w./-])(" + "|".join(re.escape(k) for k in _ACRO) + r")(?![\w/-]|\.\w)", re.I)
+
+
+def fix_acro(s):
+    # Even-indexed segments are outside backticks; odd-indexed ones are code spans.
+    segments = s.split("`")
+    for i in range(0, len(segments), 2):
+        segments[i] = _ACRO_RE.sub(lambda m: _ACRO.get(m.group(0).lower(), m.group(0)), segments[i])
+    return "`".join(segments)
+
+
+def clean_title(t, recase=True):
+    """Normalize a title into a house-style bullet title.
+
+    `recase` is for a direct commit's subject only. A PR title is already held to house style
+    by `writing-pull-requests`, and the skill requires it as written, so acronym casing would
+    only damage it: a lowercase `php` preset name becomes `PHP`.
+    """
+    t = re.sub(r"^(feat|fix|perf|chore|docs|build|ci|test|style|refactor)(\([^)]*\))?:\s*", "", t)
+    t = re.sub(r"\s*\((?:merge (?:after|before) #\d+)\)", "", t, flags=re.I)
+    t = re.sub(r"\s*\(#\d+(?:\s*[,&–-]\s*#?\d+)*\)", "", t)
+    t = fix_acro(t.strip()) if recase else t.strip()
+    return (t[0].upper() + t[1:]) if t and t[0].islower() else t
+
+
+# ---- routing (which bucket) ---------------------------------------------
+
+SEC = re.compile(
+    r"\b(xss|ssrf|csp|hsts|xxe|redos|egress|nonce|secret|credentials?|"
+    r"impersonat\w*|sanitiz\w*|clickjack\w*)\b", re.I)
+
+# A Conventional-Commit prefix is STRIPPED, never routed on. The title conventions in
+# `writing-pull-requests` forbid these outright, so a prefix here is legacy litter -- and
+# routing on it would mean no title the conventions produce could ever match.
+CC_PREFIX = re.compile(
+    r"^(?:feat|fix|docs|build|ci|test|chore|style|refactor|perf|revert)(?:\([^)]*\))?!?:\s*", re.I)
+
+# Labels that decide a category on their own, read from the issue a pull request closes.
+# `development` is deliberately absent: it is the default for all code work and spans every
+# bucket, so it discriminates nothing.
+LABEL_MAINT = {"build", "documentation"}
+LABEL_SEC = {"security"}
+
+# A change confined to these is tooling or prose whatever its title says. Top-level
+# dotfiles (`.editorconfig`, `.gitattributes`, `.gitignore`) count too; see _is_maint.
+MAINT_PREFIXES = (".github/", ".claude/", "tests/", "workbench/")
+MAINT_FILES = {"composer.json", "phpstan.neon.dist", "phpstan-baseline.neon", "phpunit.xml.dist", "rector.php",
+               "CHANGELOG.md", "CLAUDE.md", "README.md", "LICENSE.md"}
+
+# Published, consumer-visible surfaces of the package: what an application installing it
+# receives through config publishing, migrations, factories, views, and routes. A change
+# touching one is a product change, not maintenance. `src/` is deliberately absent: it
+# holds internals as well as the public API, so it flows through the fix-verb and
+# test-dominance rules below instead.
+USER_FACING_PREFIXES = ("config/", "database/", "resources/", "routes/")
+
+FIX_VERBS = re.compile(r"^(Fix|Resolve|Repair|Prevent|Guard|Restore|Correct|Harden|Stop|Avoid)\b")
+MAINT_VERBS = re.compile(
+    r"^(Migrate|Document|Adopt|Refactor|Refresh|Rework|Bump|Reformat|Consolidate|Deduplicate)\b")
+MAINT_WORDS = re.compile(
+    r"\btests?\b|paratest|test hygiene|test isolation|"
+    r"ci parity|\bcoverage\b|mutation|\bmutant\b|pcov|coverage driver|\bskill\b|worktree", re.I)
+
+
+def strip_cc_prefix(s):
+    """Remove a legacy Conventional-Commit prefix so it cannot affect routing."""
+    return CC_PREFIX.sub("", s.strip(), count=1)
+
+
+def _is_maint(path):
+    return (path.startswith(MAINT_PREFIXES) or path in MAINT_FILES
+            or ("/" not in path and path.startswith(".")))
+
+
+def _all_maint(paths):
+    return bool(paths) and all(_is_maint(p) for p in paths)
+
+
+def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0):
+    """Route a change to one of: sec | maint | fix | new.
+
+    A cascade, and the ORDER carries the correctness. A maintenance change whose title
+    opens with a fix-verb (`Correct the ...`, `Stop two ...`) is routed correctly only
+    because its label is consulted first.
+    """
+    labels = {l.lower() for l in labels}
+    t = strip_cc_prefix(title)
+    combo = strip_cc_prefix(subject) + " || " + t
+    low = combo.lower()
+
+    # 1. Security, by label or vocabulary.
+    if labels & LABEL_SEC:
+        return "sec"
+    if (SEC.search(combo) or "ssl verif" in low or "security header" in low or "x-powered-by" in low
+            or "password protection" in low or "internal-network" in low or "internal network" in low
+            or (("escap" in low) and re.search(r"script|json-ld|xss|html", low))):
+        return "sec"
+
+    # 2. A category-bearing label on the linked issue. Pull requests usually carry no labels
+    #    of their own, so these come from the issue the PR closes.
+    if labels & LABEL_MAINT:
+        return "maint"
+
+    # 3. A consumer-visible surface makes it a product change regardless of how test-heavy it is.
+    if any(p.startswith(USER_FACING_PREFIXES) for p in paths):
+        return "new"
+
+    # 4. A fix, by its opening verb.
+    if FIX_VERBS.match(t):
+        return "fix"
+
+    # 5. Confined to tooling, prose, or the dependency manifest.
+    if _all_maint(paths):
+        return "maint"
+
+    # 6. Test-dominant diff: the production edit is incidental to the coverage it enables.
+    #    Safe only here, below rule 3 -- standalone it claims product work that ships tests.
+    if test_lines > other_lines:
+        return "maint"
+
+    if MAINT_VERBS.match(t) or "update dependencies" in t.lower() or MAINT_WORDS.search(t):
+        return "maint"
+
+    return "new"
+
+
+GLOBAL_SKIP = [
+    re.compile(r"^Merge branch ", re.I), re.compile(r"^Merge remote-tracking", re.I),
+    # A changelog pull request (`Update CHANGELOG for vX.Y.Z`) records a release rather than
+    # belonging to one. Matched against the raw subject and the resolved PR title alike.
+    re.compile(r"^Update CHANGELOG\b"),
+]
+
+_pr_cache = {}
+_PR_BATCH = 50
+
+
+def prime_pr_cache(nums, repo):
+    """Fetch every pull request's title and its CLOSING ISSUE's labels in ONE query.
+
+    Batched rather than one call per pull request for two reasons: it replaces N round
+    trips with one, and the labels are usually not on the pull request at all. Measured
+    in `UAMS-Web/uams-statamic` over a 2026-09-14 range, 24 of 24 pull requests carried no
+    labels of their own. So the category signal has to come from the issue each pull
+    request closes, which `closingIssuesReferences` answers directly rather than by
+    pattern-matching a body for `Closes #N`.
+    """
+    nums = [n for n in dict.fromkeys(nums) if n not in _pr_cache]
+    if not nums:
+        return
+    owner, name = repo.split("/", 1)
+
+    # Chunked, and the partial-data handling below is the load-bearing half. A subject's
+    # `#N` is not always a pull request -- an issue reference resolves to nothing -- and
+    # ONE such alias makes the whole query exit non-zero. GraphQL still returns `data`
+    # with that alias null and the rest populated, so the response is parsed regardless
+    # of the exit code. Gating on `returncode == 0` would discard every good title over
+    # one bad reference and emit a full set of bullets with no links, which looks like a
+    # complete release note.
+    for start in range(0, len(nums), _PR_BATCH):
+        batch = nums[start:start + _PR_BATCH]
+        fields = " ".join(
+            f'p{n}: pullRequest(number:{n}){{title '
+            f'closingIssuesReferences(first:5){{nodes{{labels(first:20){{nodes{{name}}}}}}}}}}'
+            for n in batch)
+        q = f'query {{repository(owner:"{owner}",name:"{name}"){{{fields}}}}}'
+        r = subprocess.run(["gh", "api", "graphql", "-f", f"query={q}"],
+                           capture_output=True, text=True)
+        try:
+            data = (json.loads(r.stdout).get("data") or {}).get("repository") or {}
+        except (json.JSONDecodeError, AttributeError):
+            data = {}
+        for n in batch:
+            node = data.get(f"p{n}")
+            if not node:
+                # Not a pull request, or unreachable: resolve() falls back to the subject.
+                _pr_cache[n] = (None, ())
+                continue
+            labels = tuple(
+                l["name"]
+                for iss in (node.get("closingIssuesReferences") or {}).get("nodes", [])
+                for l in (iss.get("labels") or {}).get("nodes", []))
+            _pr_cache[n] = (node.get("title") or None, labels)
+
+
+def pr_title(num, repo):
+    if num not in _pr_cache:
+        prime_pr_cache([num], repo)
+    return _pr_cache.get(num, (None, ()))[0]
+
+
+def pr_labels(num):
+    return _pr_cache.get(num, (None, ()))[1]
+
+
+def diff_signals(sha):
+    """(paths, test_lines, other_lines) for a commit -- from git, costing no API call."""
+    out = sh(["git", "show", "--numstat", "--pretty=format:", sha])
+    paths, test_lines, other_lines = [], 0, 0
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        added, _removed, path = parts
+        paths.append(path)
+        n = int(added) if added.isdigit() else 0
+        if path.startswith("tests/"):
+            test_lines += n
+        else:
+            other_lines += n
+    return paths, test_lines, other_lines
+
+
+def resolve(subject, repo):
+    """Return (pr_number_or_None, title, link)."""
+    m = re.match(r"Merge pull request #(\d+)", subject)
+    nums = re.findall(r"#(\d+)", subject)
+    pr = int(m.group(1)) if m else (int(nums[-1]) if nums else None)
+    if pr:
+        t = pr_title(pr, repo)
+        if t:
+            return pr, t, f"[#{pr}](https://github.com/{repo}/pull/{pr})"
+    t = re.sub(r"\s*\(#\d+[^)]*\)\s*$", "", subject).strip()
+    t = re.sub(r"\s*\(#\d+\)\s*$", "", t).strip()
+    return None, t, ""
+
+
+def main():
+    # Guarantee UTF-8 on stdout before anything writes to it, including argparse's
+    # own --help. The generator interpolates contributor-supplied text (--lead,
+    # --breaking, --footer) and live PR titles, so a character absent from the
+    # locale's encoding would otherwise raise UnicodeEncodeError -- after every
+    # section is assembled, into a redirect, on the release path.
+    #
+    # The getattr guard is load-bearing: a test harness that swaps sys.stdout for
+    # io.StringIO has no reconfigure and needs none, since it holds str and never
+    # encodes.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(encoding="utf-8", errors="strict")
+
+    ap = argparse.ArgumentParser(description="Generate a release-note body (writing-release-notes skill).")
+    ap.add_argument("prev", help="previous ref/tag (use '-' for repo root)")
+    ap.add_argument("new", help="new ref/tag being released")
+    ap.add_argument("--repo", default=DEFAULT_REPO)
+    ap.add_argument("--lead", default=None)
+    ap.add_argument("--breaking", default=None, help="impact/action for the breaking-change callout")
+    ap.add_argument("--breaking-item", action="append", default=[], help="a '## Breaking changes' bullet")
+    ap.add_argument("--exclude", action="append", default=[], type=int,
+                    help="PR number to omit from the auto-buckets (already covered elsewhere; repeatable)")
+    ap.add_argument("--footer", default=None)
+    a = ap.parse_args()
+
+    # PRs itemized in a breaking bullet (or explicitly excluded) must not also auto-list in a bucket.
+    excl = set(a.exclude) | {int(n) for item in a.breaking_item for n in re.findall(r"#(\d+)", item)}
+
+    rng = a.new if a.prev in ("-", "", "root") else f"{a.prev}..{a.new}"
+    log = sh(["git", "log", rng, "--first-parent", "--format=%H%x1f%s"]).splitlines()
+
+    # One batched query for every pull request in the range, before any bullet is built.
+    prime_pr_cache(
+        [int(n) for line in log if "\x1f" in line
+         for n in re.findall(r"#(\d+)", line.split("\x1f", 1)[1])],
+        a.repo)
+
+    buckets = {"new": [], "fix": [], "sec": [], "maint": []}
+    for line in log:
+        if "\x1f" not in line:
+            continue
+        sha, s = line.split("\x1f", 1)
+        s = s.strip()
+        if not s or any(r.search(s) for r in GLOBAL_SKIP):
+            continue
+        pr, title, link = resolve(s, a.repo)
+        if not title or (pr is not None and pr in excl) or any(r.search(title) for r in GLOBAL_SKIP):
+            continue
+        if pr is None:  # direct commit -> link the short SHA
+            link = f"[`{sha[:7]}`](https://github.com/{a.repo}/commit/{sha})"
+        disp = scrub(clean_title(title, recase=pr is None))
+        if not disp:
+            continue
+        paths, test_lines, other_lines = diff_signals(sha)
+        b = bucket(s, title, pr_labels(pr) if pr else (), paths, test_lines, other_lines)
+        bullet = f"- {noamp(disp)} {link}".rstrip()
+        if bullet not in buckets[b]:
+            buckets[b].append(bullet)
+
+    parts = [noamp(a.lead) if a.lead else "TODO: one-sentence milestone lead."]
+    if a.breaking:
+        parts += ["", noamp(f"**Breaking change** — {a.breaking}")]
+
+    def section(title, items):
+        if items:
+            parts.extend(["", f"## {title}", *items])
+
+    if a.breaking_item:
+        parts += ["", "## Breaking changes", *[f"- {noamp(b)}" for b in a.breaking_item]]
+    section("What's new", buckets["new"])
+    section("What's fixed", buckets["fix"])
+    section("Security", buckets["sec"])
+    section("Maintenance and tooling", buckets["maint"])
+    if a.footer:
+        parts += ["", f"_{a.footer}_"]
+
+    sys.stdout.write("\n".join(parts).rstrip() + "\n")
+
+
+if __name__ == "__main__":
+    main()
