@@ -4,13 +4,13 @@
 
 The command line for [Robot Council](https://github.com/robot-council/core), a coordination service for fleets of AI coding agents. It is a [Laravel Zero](https://laravel-zero.com) application, and it sits beside the package the way `statamic/cli` sits beside `statamic/cms`.
 
-Three commands, designed in [#1](https://github.com/robot-council/cli/issues/1):
+Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) and [#13](https://github.com/robot-council/cli/issues/13):
 
 - **`robot-council enroll`** — enroll this machine. It requests a device code, prints the user code and the verification URL, and polls until a developer approves. The credential it receives is stored in the OS keychain or a user-only file, and never printed.
 - **`robot-council mcp`** — the stdio MCP bridge. An agent harness launches it, and it serves the coordination tools over stdio while renewing its own session token, so a token expiring needs no restart and no human.
 - **`robot-council api`** — the fallback for anything the bridge does not cover.
 
-Scaffolding a fleet service with `robot-council new` is designed in [#13](https://github.com/robot-council/cli/issues/13) and not built yet.
+- **`robot-council new`** — create a fleet service in this directory, the way `statamic new` creates a site.
 
 ## Requirements
 
@@ -28,6 +28,18 @@ composer global require robot-council/cli:dev-main
 Put Composer's global `vendor/bin` on your `PATH` — `composer global config bin-dir --absolute` prints it — and `robot-council` is available everywhere, which is what the harness setups below assume.
 
 **Verified 2026-09-18** on macOS 26.6.2 with PHP 8.4, into a throwaway `COMPOSER_HOME`: the install exits 0, `vendor/bin/robot-council` is written, and `robot-council list` shows `about`, `api`, `enroll`, and `mcp`.
+
+## Creating a fleet service
+
+```bash
+robot-council new my-fleet
+```
+
+It creates a Laravel application in the current directory, requires `robot-council/core`, runs the package's installer, and migrates. Then it prints the exact OAuth callback URL to paste into GitHub, takes the client ID and secret back, and asks who may sign in.
+
+**The allowlist is asked for as logins and stored as numeric IDs.** The service checks numeric GitHub account IDs, because a login can be renamed and then claimed by somebody else -- but nobody should have to go and find a number, so each login is resolved once, here, and the mapping is printed before it is written.
+
+`--app-url` overrides where the application will be served, which decides the callback URL; it defaults to Herd's `http://<name>.test`. `--skip-github` scaffolds without asking anything.
 
 ## Getting a machine onto a fleet
 
