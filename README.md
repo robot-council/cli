@@ -10,9 +10,24 @@ Three commands, designed in [#1](https://github.com/robot-council/cli/issues/1):
 - **`robot-council mcp`** — the stdio MCP bridge. An agent harness launches it, and it serves the coordination tools over stdio while renewing its own session token, so a token expiring needs no restart and no human.
 - **`robot-council api`** — the fallback for anything the bridge does not cover.
 
+Scaffolding a fleet service with `robot-council new` is designed in [#13](https://github.com/robot-council/cli/issues/13) and not built yet.
+
 ## Requirements
 
 - PHP 8.4 or later
+
+## Installing
+
+Not published on Packagist yet, so point Composer at this repository and install it globally:
+
+```bash
+composer global config repositories.robot-council vcs https://github.com/robot-council/cli.git
+composer global require robot-council/cli:dev-main
+```
+
+Put Composer's global `vendor/bin` on your `PATH` — `composer global config bin-dir --absolute` prints it — and `robot-council` is available everywhere, which is what the harness setups below assume.
+
+**Verified 2026-09-18** on macOS 26.6.2 with PHP 8.4, into a throwaway `COMPOSER_HOME`: the install exits 0, `vendor/bin/robot-council` is written, and `robot-council list` shows `about`, `api`, `enroll`, and `mcp`.
 
 ## Getting a machine onto a fleet
 
@@ -38,7 +53,9 @@ claude mcp add robot-council \
   -- robot-council mcp
 ```
 
-**Verified 2026-09-18**, on Claude Code 2.1.236 and macOS 26.6.2, against a live fleet: `claude mcp list` reported `robot-council` as `Connected`, and a raw `initialize` plus `tools/list` over the same command served 15 tools with nothing but protocol on stdout.
+**Verified 2026-09-18**, on Claude Code 2.1.236 and macOS 26.6.2, against a live fleet: `claude mcp list` reported `robot-council` as `Connected`, and a raw `initialize` plus `tools/list` over the same command served all 18 tools with nothing but protocol on stdout.
+
+**`tools/list` paginates, and the first page is 15.** It returns a `nextCursor` — base64 of `{"offset":15}` — and the remaining three (`events_narrate`, `directive_post`, `presence_heartbeat`) come back only when that cursor is passed. A first page read as a total looks exactly like a complete answer, and the number that would reveal otherwise is the one the page does not carry. This is recorded because it was gotten wrong here first, and read as a stale deployment.
 
 Two controls ran beside it, because a health check that answers `Connected` for anything answers nothing: the same command at a path that does not exist failed with `ENOENT`, and **the real binary with `ROBOT_COUNCIL_SERVICE` omitted failed with `CONNECTION_CLOSED`**. The second is the one that matters — it is the same binary, missing only the variable, so the passing reading is evidence the variable reached the process and a session started on the service.
 
