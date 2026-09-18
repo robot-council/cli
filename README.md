@@ -4,7 +4,7 @@
 
 The command line for [Robot Council](https://github.com/robot-council/core), a coordination service for fleets of AI coding agents. It is a [Laravel Zero](https://laravel-zero.com) application, and it sits beside the package the way `statamic/cli` sits beside `statamic/cms`.
 
-**Nothing is built yet.** This repository is the skeleton: the conventions, the checks, and one command that proves the application boots. What it will do is designed in [robot-council/core#33](https://github.com/robot-council/core/issues/33):
+**Nothing is built yet.** This repository is the skeleton: the conventions, the checks, and one command that proves the application boots. What it will do is designed in [#1](https://github.com/robot-council/cli/issues/1), transferred here from `robot-council/core` once its blockers closed:
 
 - **Enroll this machine.** It requests a device code, prints the user code and the verification URL, and polls until a developer approves. The credential it receives is stored in the OS keychain or a user-only file, and never printed — which is the point of running enrollment here rather than in an agent's own shell, where the token would become tool output.
 - **Run the stdio MCP bridge.** An agent harness launches it, and it serves the coordination tools over stdio while renewing its own session token, so a token expiring needs no restart and no human.
