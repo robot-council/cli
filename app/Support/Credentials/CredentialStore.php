@@ -1,0 +1,72 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Support\Credentials;
+
+/**
+ * Where an installation credential lives between runs.
+ *
+ * **Be precise about what this buys, because the obvious claim is false.** None of these stores
+ * puts the credential beyond an agent's reach. The macOS Keychain trusts the application that
+ * created an item -- which is `/usr/bin/security` itself, so any later `security
+ * find-generic-password -w` reads it back without a prompt; that is exactly how `put()` verifies
+ * its own write. The file store is mode 0600 in the user's own home, so anything running as that
+ * user reads it with `cat`. An agent with shell access, running as the developer, can reach every
+ * one of them.
+ *
+ * What this design actually delivers is narrower and still worth having: **the credential never
+ * enters a transcript.** It is obtained by a command a human runs, and it is never printed, never
+ * passed as a command-line argument, and never written where a repository would pick it up. An
+ * agent would have to go looking; it will not encounter the token by reading back through its own
+ * context.
+ *
+ * Putting a credential genuinely beyond a same-user process needs something this command line
+ * cannot provide on its own -- a keychain ACL naming one binary, or a separate user. If that is
+ * ever wanted, it is a different design rather than a stricter implementation of this one.
+ *
+ * Keyed by the service's base URL, so a machine enrolled against two deployments holds two
+ * credentials rather than overwriting one with the other.
+ */
+interface CredentialStore
+{
+    /**
+     * Whether this store can be used on this machine right now.
+     *
+     * Checked rather than assumed from the operating system: a Linux box without `secret-tool`
+     * installed is Linux all the same, and falling back is better than failing.
+     */
+    public function available(): bool;
+
+    /**
+     * Where a developer would look for what this store wrote, in words.
+     *
+     * Printed after a successful enrollment, so that "it is stored" is a claim a person can check
+     * rather than take on faith.
+     */
+    public function describe(): string;
+
+    /**
+     * Store the credential for one service.
+     *
+     * @param  string  $service  The service's base URL, which is the key.
+     * @param  Credential  $credential  The credential. Implementations must keep it out of argv.
+     *
+     * @throws CredentialStoreFailed When the value could not be stored and read back.
+     */
+    public function put(string $service, Credential $credential): void;
+
+    /**
+     * The credential for one service, or null when none is stored.
+     *
+     * @param  string  $service  The service's base URL.
+     */
+    public function get(string $service): ?Credential;
+
+    /**
+     * Remove the credential for one service, if there is one.
+     *
+     * @param  string  $service  The service's base URL.
+     */
+    public function forget(string $service): void;
+}

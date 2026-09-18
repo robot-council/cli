@@ -25,9 +25,10 @@ it('says what the command line is and where its design lives', function (): void
         ->toContain('coordination service for fleets of AI coding agents')
         ->toContain('stdio MCP bridge')
 
-        // The issues a reader needs, because nothing here is built yet
+        // The issues a reader needs. `#33` moved to this repository as `#1` when its blockers
+        // closed, so a reader following the old number lands in the wrong tracker.
         ->toContain('robot-council/core#14')
-        ->toContain('#33');
+        ->toContain('#1');
 });
 
 it('registers the command under its own name', function (): void {
