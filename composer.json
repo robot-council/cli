@@ -20,7 +20,8 @@
     "require": {
         "php": "^8.4",
         "laravel-zero/foundation": "^13.23",
-        "laravel-zero/framework": "^13.0"
+        "laravel-zero/framework": "^13.0",
+        "laravel/agent-detector": "^2.0"
     },
     "require-dev": {
         "driftingly/rector-laravel": "^2.6.2",

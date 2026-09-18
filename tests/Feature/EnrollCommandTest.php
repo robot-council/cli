@@ -1,0 +1,299 @@
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Enrolling this machine, and where the credential ends up.
+ *
+ * **The assertions that matter most are the negative ones.** This command exists because a token
+ * obtained inside an agent's shell becomes tool output, and tool output becomes transcript. So the
+ * tests that earn their place are the ones searching captured output for the credential, rather
+ * than reading the code and agreeing with it.
+ *
+ * @command  vendor/bin/pest --compact tests/Feature/EnrollCommandTest.php
+ */
+
+use App\Support\Credentials\Credentials;
+use Carbon\CarbonInterval;
+use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Sleep;
+use Tests\Fixtures\RecordingStore;
+
+const SERVICE = 'https://fleet.example.test';
+const CREDENTIAL = 'rcouncil_1|SuPeRsEcReTcReDeNtIaLvAlUe0123456789abcdef';
+
+/**
+ * Every file under a directory, at any depth.
+ *
+ * @return list<string> The paths.
+ */
+function filesUnder(string $directory): array
+{
+    /** @var list<string> $found */
+    $found = [];
+
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($directory, FilesystemIterator::SKIP_DOTS)
+    );
+
+    /** @var SplFileInfo $file */
+    foreach ($iterator as $file) {
+        $found[] = $file->getPathname();
+    }
+
+    sort($found);
+
+    return $found;
+}
+
+/**
+ * Bind a recording store in place of whatever this machine would really use.
+ */
+function recordingStore(bool $fails = false): RecordingStore
+{
+    $store = new RecordingStore($fails);
+
+    app()->instance(Credentials::class, new Credentials([$store]));
+
+    return $store;
+}
+
+/**
+ * The service's two responses, with the approval arriving after `$pending` polls.
+ *
+ * @param  int  $pending  How many times the exchange answers `authorization_pending` first.
+ * @param  array<string, mixed>|null  $tokenOverride  A different credential body, where a test needs one.
+ */
+function fakeService(int $pending = 0, ?array $tokenOverride = null): void
+{
+    $exchanges = array_fill(0, $pending, Http::response(['error' => 'authorization_pending'], 400));
+    $exchanges[] = Http::response($tokenOverride ?? [
+        'token' => CREDENTIAL,
+        'abilities' => ['sessions:start'],
+        'granted_abilities' => ['tasks:create', 'tasks:claim', 'events:post'],
+        'expires_in' => 2592000,
+    ], 201);
+
+    Http::fake([
+        '*/api/device/code' => Http::response([
+            'device_code' => 'a-device-code',
+            'user_code' => 'HFTGPSTW',
+            'verification_uri' => SERVICE.'/robot-council/enroll',
+            'expires_in' => 600,
+            'interval' => 5,
+        ], 201),
+        '*/api/device/token' => Http::sequence($exchanges),
+    ]);
+}
+
+beforeEach(function (): void {
+    Sleep::fake();
+
+    // A fake that stops matching otherwise makes a REAL request, so a test can pass by reaching
+    // the network rather than by exercising what it claims to
+    Http::preventStrayRequests();
+});
+
+it('prints the user code and where to approve it, and nothing else of substance', function (): void {
+    fakeService();
+    recordingStore();
+
+    expect(Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'claude']))->toBe(0);
+
+    $output = Artisan::output();
+
+    expect($output)->toContain('HFTGPSTW')
+        ->toContain(SERVICE.'/robot-council/enroll');
+});
+
+it('never puts the credential on stdout or stderr', function (): void {
+    fakeService();
+    $store = recordingStore();
+
+    Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'claude']);
+
+    // Searched for in the captured output rather than argued from the source. The control is the
+    // line below: the same value IS in the store, so a run that stored nothing could not pass this
+    // pair by printing nothing.
+    expect(Artisan::output())->not->toContain(CREDENTIAL)
+        ->and($store->stored[SERVICE]->reveal())->toBe(CREDENTIAL);
+});
+
+it('writes nothing anywhere inside a repository', function (): void {
+    fakeService();
+    recordingStore();
+
+    // A real temporary repository, entered for the run, as the ticket asks. `scandir` on the
+    // working directory was the first version of this and could not see a write one level down --
+    // measured: a file created in an existing subdirectory left `array_diff` empty while the file
+    // demonstrably existed. This walks the tree instead.
+    $repository = sys_get_temp_dir().'/rc-repo-'.bin2hex(random_bytes(6));
+
+    mkdir($repository.'/src', 0700, true);
+
+    $previous = getcwd();
+
+    chdir($repository);
+
+    $before = filesUnder($repository);
+
+    try {
+        Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'claude']);
+    } finally {
+        chdir($previous ?: sys_get_temp_dir());
+    }
+
+    $after = filesUnder($repository);
+
+    expect(array_diff($after, $before))->toBeEmpty();
+
+    // Not `rm -rf`, which is not a command under Windows PHP
+    $leftovers = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($repository, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST
+    );
+
+    /** @var SplFileInfo $leftover */
+    foreach ($leftovers as $leftover) {
+        $leftover->isDir() ? rmdir($leftover->getPathname()) : unlink($leftover->getPathname());
+    }
+
+    rmdir($repository);
+});
+
+it('sends the hash of the verifier, never the verifier, and a reduced label', function (): void {
+    fakeService();
+    recordingStore();
+
+    Artisan::call('enroll', [
+        '--service' => SERVICE,
+        '--harness' => 'Claude Code',
+        '--machine-label' => 'Josh laptop!!.local',
+    ]);
+
+    Http::assertSent(function (Request $request): bool {
+        if (! str_contains($request->url(), '/api/device/code')) {
+            return true;
+        }
+
+        /** @var array<string, mixed> $body */
+        $body = $request->data();
+
+        // The challenge is a SHA-256, so 64 hex characters, and the verifier itself never leaves
+        // this process -- which is the whole point of PKCE here
+        expect($body['code_challenge'])->toMatch('/^[0-9a-f]{64}$/')
+
+            // Reduced BEFORE it is sent, so the service never has to refuse it
+            ->and($body['harness'])->toBe('claudecode')
+            ->and($body['machine_label'])->toBe('Joshlaptop');
+
+        return true;
+    });
+});
+
+it('lets --harness override what detection would have said', function (): void {
+    fakeService();
+    recordingStore();
+
+    // Detection reads environment variables a harness sets. The flag has to win, because a
+    // developer correcting a wrong guess should not have to argue with it.
+    putenv('CLAUDECODE=1');
+
+    Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'codex']);
+
+    putenv('CLAUDECODE');
+
+    Http::assertSent(function (Request $request): bool {
+        if (str_contains($request->url(), '/api/device/code')) {
+            /** @var array<string, mixed> $body */
+            $body = $request->data();
+
+            expect($body['harness'])->toBe('codex');
+        }
+
+        return true;
+    });
+});
+
+it('refuses a service that is not reached over https', function (): void {
+    recordingStore();
+
+    $code = Artisan::call('enroll', ['--service' => 'http://fleet.example.test', '--harness' => 'claude']);
+
+    // A thirty-day bearer token and the PKCE verifier both cross this connection
+    expect($code)->toBe(1)
+        ->and(Artisan::output())->toContain('https');
+});
+
+it('allows http only for a loopback address', function (): void {
+    fakeService();
+    $store = recordingStore();
+
+    // A developer running core locally has no certificate, and cleartext to their own machine
+    // carries nothing off the host
+    expect(Artisan::call('enroll', ['--service' => 'http://127.0.0.1:8000', '--harness' => 'claude']))->toBe(0)
+        ->and($store->stored)->toHaveKey('http://127.0.0.1:8000');
+});
+
+it('polls while the developer has not decided yet', function (): void {
+    fakeService(pending: 3);
+    $store = recordingStore();
+
+    expect(Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'claude']))->toBe(0)
+        ->and($store->stored)->toHaveKey(SERVICE);
+
+    // `authorization_pending` is the flow working, not a failure, and the interval slept is the one
+    // the service asked for rather than a number this command chose
+    Sleep::assertSlept(fn (CarbonInterval $duration): bool => $duration->totalSeconds === 5.0, times: 3);
+});
+
+it('stops rather than polling a code that is dead', function (string $error, string $expected): void {
+    Http::fake([
+        '*/api/device/code' => Http::response([
+            'device_code' => 'a-device-code',
+            'user_code' => 'HFTGPSTW',
+            'verification_uri' => SERVICE.'/robot-council/enroll',
+            'expires_in' => 600,
+            'interval' => 5,
+        ], 201),
+        '*/api/device/token' => Http::response(['error' => $error], 400),
+    ]);
+
+    $store = recordingStore();
+
+    $code = Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'claude']);
+    $output = Artisan::output();
+
+    expect($code)->toBe(1)
+        ->and($output)->toContain($expected)
+        ->and($store->stored)->toBeEmpty();
+
+    Sleep::assertNeverSlept();
+})->with([
+    'denied' => ['access_denied', 'denied'],
+    'expired' => ['expired_token', 'expired'],
+]);
+
+it('refuses to run without a service to enroll against', function (): void {
+    recordingStore();
+
+    expect(Artisan::call('enroll', ['--harness' => 'claude']))->toBe(1)
+        ->and(Artisan::output())->toContain('--service');
+});
+
+it('reports a store that could not hold the credential, without printing it', function (): void {
+    fakeService();
+    recordingStore(fails: true);
+
+    $code = Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'claude']);
+
+    // Captured ONCE: `Artisan::output()` drains its buffer, so a second call reads empty and an
+    // assertion made against it passes for that reason rather than for the right one
+    $output = Artisan::output();
+
+    expect($code)->toBe(1)
+        ->and($output)->not->toContain(CREDENTIAL)
+        ->and($output)->toContain('could not be stored');
+});
