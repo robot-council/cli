@@ -290,3 +290,53 @@ it('stops when asked, leaving the loop for the caller to clean up after', functi
     // Stopped before forwarding anything
     expect(trim((string) stream_get_contents($out)))->toBeEmpty();
 });
+
+it('heartbeats while it sits idle, so the sweep does not take its work', function (): void {
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/agent/heartbeat' => Http::response('', 200),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200),
+    ]);
+
+    $out = tmpfile();
+
+    // Due on the first pass. The default is a minute, read from `time()` inside a loop that blocks
+    // on `stream_select`, so nothing outside the loop can move the clock and a test at the default
+    // would have to sit through a real one.
+    new Bridge(startedSession(), BRIDGE_SERVICE, heartbeatSeconds: 0)
+        ->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1}\n"), $out, fn (string $m): null => null);
+
+    $heartbeats = 0;
+
+    Http::assertSent(function (Request $request) use (&$heartbeats): bool {
+        if (str_ends_with($request->url(), '/agent/heartbeat')) {
+            $heartbeats++;
+
+            // The session token, never the installation credential: a heartbeat is an ordinary
+            // agent request and goes out on the same credential every other one does
+            expect($request->hasHeader('Authorization', 'Bearer '.FIRST_TOKEN))->toBeTrue();
+        }
+
+        return true;
+    });
+
+    expect($heartbeats)->toBeGreaterThan(0);
+});
+
+it('sends no heartbeat before one is due, which is what makes the test above mean something', function (): void {
+    // The negative control, kept as a test rather than run once by hand. Without it, the assertion
+    // above would pass just as happily against a bridge that heartbeats on every single pass --
+    // which would be a bridge hammering the service at the message rate, not a working schedule.
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/agent/heartbeat' => Http::response('', 200),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200),
+    ]);
+
+    $out = tmpfile();
+
+    new Bridge(startedSession(), BRIDGE_SERVICE)
+        ->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1}\n"), $out, fn (string $m): null => null);
+
+    Http::assertNotSent(fn (Request $request): bool => str_ends_with($request->url(), '/agent/heartbeat'));
+});

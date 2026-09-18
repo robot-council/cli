@@ -59,10 +59,18 @@ final class Bridge
     /**
      * @param  Session  $session  The started session this bridge forwards through.
      * @param  string  $service  The service's base URL.
+     * @param  int  $heartbeatSeconds  How long to wait between heartbeats.
+     *
+     * The interval is a parameter rather than only a constant because otherwise nothing can show
+     * that an idle bridge heartbeats at all: the schedule is read from `time()` inside a loop that
+     * blocks on `stream_select`, so a test cannot advance the clock from outside it and would have
+     * to sit through a real minute. Passing 0 makes the first pass due, which is what the tests do.
+     * Nothing in this application passes anything but the default.
      */
     public function __construct(
         private readonly Session $session,
         private readonly string $service,
+        private readonly int $heartbeatSeconds = self::HEARTBEAT_SECONDS,
     ) {}
 
     /**
@@ -97,7 +105,7 @@ final class Bridge
      */
     public function run($in, $out, callable $diagnostic): void
     {
-        $this->nextHeartbeat = time() + self::HEARTBEAT_SECONDS;
+        $this->nextHeartbeat = time() + $this->heartbeatSeconds;
 
         stream_set_blocking($in, false);
 
@@ -254,7 +262,7 @@ final class Bridge
         if (time() >= $this->nextHeartbeat) {
             $this->session->heartbeat();
 
-            $this->nextHeartbeat = time() + self::HEARTBEAT_SECONDS;
+            $this->nextHeartbeat = time() + $this->heartbeatSeconds;
         }
 
         if ($this->session->expiringWithin(self::RENEW_WITHIN_SECONDS) && time() >= $this->nextRenewAttempt) {
