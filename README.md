@@ -57,21 +57,41 @@ launches this binary as a child process, so a command that took a secret and pos
 party would be an exfiltration path sitting in an executable agents already run. Use the host's own
 tooling. On Laravel Cloud that is:
 
-```bash
-read -rsp 'Slack webhook URL: ' URL && printf '%s' "$URL" |
-  cloud secret:create --name=ROBOT_COUNCIL_SLACK_WEBHOOK_URL
-unset URL
+**Enter these one at a time, not as a pasted block.** The reason is the first line: `read` takes its
+input from standard input, and when a multi-line block is pasted, standard input *is* the rest of the
+paste. Pasted together, `read` swallows the following line and stores it as part of the value.
 
-cloud environment-secret:attach production <the id it printed>
-cloud deploy
+```bash
+read -rs URL
 ```
 
-`read -rsp` does not echo and keeps the value out of shell history; piping it to stdin keeps it out
-of the process list, which `--value=` would not. The last line matters: a secret reaches the running
-application only on the next deploy.
+Run that alone, then paste the URL and press Enter. Check it before sending it anywhere:
+
+```bash
+printf 'len=%s starts=%s\n' "${#URL}" "${URL:0:12}"
+```
+
+`starts=https://hook` and a length around 78. The prefix is not the secret part, so this is safe to
+read aloud, and it is the step that catches a value that arrived with something on the front of it.
+
+```bash
+printf '%s' "$URL" | cloud secret:create --name=ROBOT_COUNCIL_SLACK_WEBHOOK_URL; unset URL
+cloud environment-secret:attach production <the id it printed> -n
+cloud deploy -n
+```
+
+`read -rs` does not echo and keeps the value out of shell history; piping it to stdin keeps it out of
+the process list, which `--value=` would not. `-n` skips the CLI's own interactive prompts. The last
+line matters: a secret reaches the running application only on the next deploy.
 
 **Type the id, not the angle brackets.** `<the id>` at a shell prompt is input redirection, and the
 shell answers `No such file or directory` for a file named after whatever is inside them.
+
+**A webhook the service cannot reach fails as a retrying job, not as silence.** The mirror bounds
+retries by a one-hour deadline rather than an attempt count, so a wrong value leaves jobs pending and
+writes `robot-council could not reach the Slack webhook.` to the log -- without the URL in it. Read
+the log rather than the channel: an empty channel looks the same whether the mirror is off, broken,
+or working and nobody has narrated.
 
 The same two values are all the service needs: `ROBOT_COUNCIL_SLACK_WEBHOOK_URL` for the event
 mirror, and the GitHub OAuth client id and secret, which `robot-council new` writes to `.env` when
