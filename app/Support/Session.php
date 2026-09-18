@@ -53,6 +53,14 @@ final class Session
     private ?int $feedCursor = null;
 
     /**
+     * When the current token stops working, as a Unix timestamp.
+     *
+     * Derived from the `expires_in` the service returned, which is a duration rather than an
+     * instant precisely so a machine whose clock is wrong still behaves.
+     */
+    private ?int $expiresAt = null;
+
+    /**
      * Start the session.
      *
      * @param  string|null  $projectId  The repository or workspace, when the caller names one.
@@ -86,6 +94,8 @@ final class Session
         $this->id = $body['session_id'];
         $this->token = new Credential($body['token']);
         $this->feedCursor = \is_int($body['feed_cursor'] ?? null) ? $body['feed_cursor'] : null;
+
+        $this->expiresAt = \is_int($body['expires_in'] ?? null) ? time() + $body['expires_in'] : null;
     }
 
     /**
@@ -126,6 +136,83 @@ final class Session
 
         $this->id = null;
         $this->token = null;
+    }
+
+    /**
+     * Replace this session's token with a fresh one, keeping the same session.
+     *
+     * The service's `renew` endpoint takes the installation credential, not the session token --
+     * deliberately, since the token belonging to a process that just died is the one thing that may
+     * no longer work. It also deliberately returns no `feed_cursor`: a renewal must not move where
+     * the session is reading.
+     *
+     * @throws RuntimeException When the session cannot be renewed.
+     */
+    public function renew(): void
+    {
+        if ($this->id === null) {
+            throw new RuntimeException('The session has not been started.');
+        }
+
+        $response = $this->http
+            ->acceptJson()
+            ->asJson()
+            ->withToken($this->installation->reveal())
+            ->post($this->service.'/robot-council/api/sessions/'.$this->id.'/renew');
+
+        if (! $response->successful()) {
+            throw new RuntimeException(sprintf('The session could not be renewed (HTTP %d).', $response->status()));
+        }
+
+        $body = $response->json();
+
+        if (! \is_array($body) || ! \is_string($body['token'] ?? null)) {
+            throw new RuntimeException('The service renewed the session but returned no token.');
+        }
+
+        $this->token = new Credential($body['token']);
+
+        $this->expiresAt = \is_int($body['expires_in'] ?? null)
+            ? time() + $body['expires_in']
+            : null;
+    }
+
+    /**
+     * Tell the service this session is still alive.
+     *
+     * Without it the presence sweep marks an idle session `stale` and then `gone`, and `core`
+     * releases whatever it was holding -- so a bridge sitting quietly between tool calls would have
+     * its work handed to somebody else.
+     */
+    public function heartbeat(): void
+    {
+        if (! $this->token instanceof Credential) {
+            return;
+        }
+
+        try {
+            $this->http
+                ->acceptJson()
+                ->asJson()
+                ->withToken($this->token->reveal())
+                ->post($this->service.'/robot-council/api/agent/heartbeat');
+        } catch (\Throwable) {
+            // A missed heartbeat is recoverable -- the next one lands, and the sweep's threshold is
+            // minutes rather than seconds. Failing the whole bridge over one would be worse.
+        }
+    }
+
+    /**
+     * Whether the token is close enough to expiry to be worth replacing now.
+     *
+     * Renewing early rather than on a 401 means an ordinary tool call does not pay for the round
+     * trip, and the 401 path stays as the backstop for a token revoked rather than expired.
+     *
+     * @param  int  $within  How many seconds of remaining life counts as "soon".
+     */
+    public function expiringWithin(int $within): bool
+    {
+        return $this->expiresAt !== null && $this->expiresAt - time() <= $within;
     }
 
     /**
