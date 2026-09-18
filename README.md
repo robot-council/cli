@@ -49,6 +49,34 @@ robot-council enroll --service=https://your-fleet.example.com
 
 It prints a code and a URL. A developer signed in to that fleet opens the URL, enters the code, and approves; enrollment finishes on its own. Then wire a harness to the bridge, below.
 
+## Giving the service its secrets
+
+**This command line does not handle them, on purpose.** Every credential it touches stays on the
+machine or goes to the fleet that machine is enrolled against, and nowhere else -- and a harness
+launches this binary as a child process, so a command that took a secret and posted it to a third
+party would be an exfiltration path sitting in an executable agents already run. Use the host's own
+tooling. On Laravel Cloud that is:
+
+```bash
+read -rsp 'Slack webhook URL: ' URL && printf '%s' "$URL" |
+  cloud secret:create --name=ROBOT_COUNCIL_SLACK_WEBHOOK_URL
+unset URL
+
+cloud environment-secret:attach production <the id it printed>
+cloud deploy
+```
+
+`read -rsp` does not echo and keeps the value out of shell history; piping it to stdin keeps it out
+of the process list, which `--value=` would not. The last line matters: a secret reaches the running
+application only on the next deploy.
+
+**Type the id, not the angle brackets.** `<the id>` at a shell prompt is input redirection, and the
+shell answers `No such file or directory` for a file named after whatever is inside them.
+
+The same two values are all the service needs: `ROBOT_COUNCIL_SLACK_WEBHOOK_URL` for the event
+mirror, and the GitHub OAuth client id and secret, which `robot-council new` writes to `.env` when
+it scaffolds. Everything else is ordinary configuration.
+
 ## Wiring the bridge into a harness
 
 **A harness never receives the credential.** Its configuration carries the service URL and nothing else — the bridge reads the credential itself, from the keychain, in its own process. That is the reason the bridge exists rather than the harness speaking to the service directly: a token in harness configuration is a token in every transcript that configuration is dumped into, and agents dump their configuration.
