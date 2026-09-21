@@ -301,6 +301,19 @@ it('stores a service key that would be an injection if anything parsed it', func
     expect($this->store->get($hostile)?->reveal())->toBe(WINDOWS_TOKEN);
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
+it('holds the blob ceiling at the size the API actually stops at', function (): void {
+    // **The other two boundary tests cannot catch this one, by construction.** Both derive their
+    // sizes from `MAX_BLOB_BYTES`, which keeps the store and its tests from drifting apart -- and
+    // means lowering the constant to 2000 leaves them green while the store needlessly refuses
+    // credentials Credential Manager would have taken. Surfaced by a mutation run, which reported
+    // the constant as uncovered.
+    //
+    // 2560 is `CRED_MAX_CREDENTIAL_BLOB_SIZE`, measured on 2026-09-21 with the guard bypassed:
+    // 2560 bytes round-tripped through `CredWriteW` and 2561 failed inside it. It is an external
+    // fact rather than a choice, which is why it is written here as a literal.
+    expect(intConstantOf('MAX_BLOB_BYTES'))->toBe(2560);
+});
+
 it('refuses a credential longer than Credential Manager accepts, saying so', function (): void {
     $ceiling = intConstantOf('MAX_BLOB_BYTES');
 
