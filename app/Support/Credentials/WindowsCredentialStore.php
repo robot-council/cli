@@ -103,19 +103,25 @@ final class WindowsCredentialStore implements CredentialStore
     public const string INTERPRETER = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe';
 
     /**
-     * The longest command line this store may build, in characters.
+     * The most of the Windows environment block this store will take for itself, in UTF-16 code
+     * units.
      *
-     * **This is a guard against a silent downgrade, not a style rule.** The script travels as one
-     * inline argument, and Symfony wraps every Windows command in `cmd.exe`, whose limit is 8191
-     * -- measured on 2026-09-21 at 8039 passing and 8043 failing. Exceeding it fails with exit 1
-     * and nothing on either stream, which `probe()` reads as "unavailable", which drops the
-     * machine to the plaintext file store without a word.
+     * **The resource this guards is not the one it looks like.** The script is passed as an inline
+     * argument, but it never reaches the command line: `prepareWindowsCommandLine()` rewrites any
+     * quoted argument containing `!LF!` or `""` into an environment variable and leaves `!uid!`
+     * behind for delayed expansion. Measured on 2026-09-21 by reading `Win32_Process.CommandLine`
+     * of a live call -- the `cmd.exe` line is **259 characters**, and the script is not in it.
      *
-     * The escaped command line currently measures 6524 characters, 81% of this. A test asserts it
-     * stays under, so the script outgrowing the ceiling is a red suite rather than a quiet
-     * fallback.
+     * So the 8191-character command-line limit is nowhere near, and what the script actually
+     * consumes is the environment block, which Windows caps at 32767 UTF-16 code units and which
+     * Symfony checks in `validateWindowsEnvBlockSize()`. The machine's own environment shares that
+     * budget: about 5,500 code units on the machine this was written on, against roughly 5,900 for
+     * the hoisted script.
+     *
+     * This bounds what the store takes, so the script growing cannot quietly squeeze a machine
+     * with a large environment over the limit. A test asserts it.
      */
-    public const int COMMAND_LINE_CEILING = 8039;
+    public const int ENVIRONMENT_BUDGET = 8192;
 
     /**
      * The largest blob `CredWriteW` accepts, in bytes.
@@ -468,21 +474,23 @@ final class WindowsCredentialStore implements CredentialStore
     /**
      * Run one operation, and hand back the finished process.
      *
-     * **The script travels as one inline argument, and writes nothing to disk.** It used to go to a
-     * temporary file, which meant the directory came from `TMP` -- measured on 2026-09-21,
-     * setting `TMP` to a directory of the caller's choosing makes `sys_get_temp_dir()` return that
-     * directory -- and left a window
-     * between writing the file and `powershell.exe` opening it. Passing the script inline removes
-     * the file, the directory, and the window together. Nothing is written anywhere, so there is
-     * no longer a path for anyone to redirect.
+     * **The script travels as one inline argument rather than a temporary file.** As a file its
+     * directory came from `TMP` -- measured on 2026-09-21, setting `TMP` to a directory of the
+     * caller's choosing makes `sys_get_temp_dir()` return it -- and there was a window between
+     * writing the file and `powershell.exe` opening it, during which it could be replaced. Inline
+     * removes the script file and that window.
      *
-     * `-EncodedCommand` is still not used, and the reason is a measured ceiling. Symfony's
-     * `Process` ends `prepareWindowsCommandLine()` by wrapping every Windows command in
-     * `cmd.exe /V:ON /E:ON /D /C (…)`, whatever `bypass_shell` says, so `cmd.exe`'s 8191
-     * characters apply rather than `CreateProcess`'s 32767 -- bisected at 8039 passing and 8043
-     * failing, with **exit 1 and nothing on either stream**. Base64 of UTF-16 inflates this script
-     * to 15,684 characters; as plain text it escapes to 6,524, which fits. See
-     * `COMMAND_LINE_CEILING` for the guard that keeps it fitting.
+     * **It does not make the call write nothing.** `Symfony\Component\Process\Process` redirects
+     * the child's stdout and stderr into `sf_proc_NN.out` and `.err` under `sys_get_temp_dir()`,
+     * as its documented workaround for PHP bug #51800, and those are appended to the command line
+     * rather than being this store's doing. What changed here is the script, not every file.
+     *
+     * `-EncodedCommand` is still not used. Base64 of UTF-16 inflates this script to 15,684
+     * characters, and because that form contains none of `"`, `!`, `%`, `^` or a newline it is
+     * **not** hoisted into an environment variable -- it stays in the `cmd.exe` line and meets the
+     * 8191-character limit, bisected on 2026-09-21 at 8039 passing and 8043 failing, with exit 1
+     * and nothing on either stream. The inline form is hoisted instead, which is why it fits and
+     * why `ENVIRONMENT_BUDGET` rather than a command-line length is what guards it.
      *
      * **`-ExecutionPolicy Bypass` is gone, and its absence is load-bearing rather than tidy.**
      * Execution policy governs script *files*, not `-Command`. Measured: under both `Restricted`
@@ -519,10 +527,7 @@ final class WindowsCredentialStore implements CredentialStore
         #[SensitiveParameter]
         ?string $input = null,
     ): Process {
-        $process = new Process(
-            [$this->powershell(), '-NoProfile', '-NonInteractive', '-Command', self::SCRIPT],
-            timeout: self::TIMEOUT_SECONDS,
-        );
+        $process = new Process($this->arguments(), timeout: self::TIMEOUT_SECONDS);
 
         // Environment rather than argv: these are not secret, but they are caller-controlled, and
         // an environment variable has no quoting for a service URL to break out of. It also keeps
@@ -537,8 +542,32 @@ final class WindowsCredentialStore implements CredentialStore
             $process->setInput($input);
         }
 
-        $process->run();
+        // **Starting the process can raise a `LogicException`, which every caller would miss.**
+        // `Process::start()` calls `validateWindowsEnvBlockSize()`, and the hoisted script is part
+        // of what it measures, so a machine with a large environment of its own is refused with
+        // `Symfony\…\InvalidArgumentException` -- which extends `\InvalidArgumentException`, not
+        // `RuntimeException`. `ApiCommand` and `McpCommand` catch only `RuntimeException` around
+        // the credential, so it would travel past both to Collision. Rewritten here into the one
+        // exception type every caller of this class already handles.
+        try {
+            $process->run();
+        } catch (Throwable $throwable) {
+            throw new CredentialStoreFailed('Windows Credential Manager could not be reached.', $throwable->getCode(), $throwable);
+        }
 
         return $process;
+    }
+
+    /**
+     * The command this store runs, as `Process` takes it.
+     *
+     * Public so a test can assert on it without running anything: that the interpreter is the
+     * literal one, that the script is passed inline, and that no `-File` path is handed over.
+     *
+     * @return non-empty-list<string> The interpreter and its arguments.
+     */
+    public function arguments(): array
+    {
+        return [$this->powershell(), '-NoProfile', '-NonInteractive', '-Command', self::SCRIPT];
     }
 }

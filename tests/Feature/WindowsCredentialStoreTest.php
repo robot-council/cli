@@ -25,7 +25,6 @@ declare(strict_types=1);
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\CredentialStoreFailed;
 use App\Support\Credentials\WindowsCredentialStore;
-use Symfony\Component\Process\Process;
 
 const WINDOWS_TOKEN = 'rcouncil_1|SuPeRsEcReTvAlUe0123456789abcdef';
 
@@ -90,14 +89,12 @@ function requiresCredentialManager(): bool
  */
 function hasWindowsPowerShell(): bool
 {
-    $root = getenv('SystemRoot');
-
-    if (! is_string($root) || $root === '') {
-        $root = 'C:\Windows';
-    }
-
-    return PHP_OS_FAMILY === 'Windows'
-        && is_executable(rtrim($root, '\\/').'\System32\WindowsPowerShell\v1.0\powershell.exe');
+    // **Asks about the path the store actually uses.** This used to rebuild it from `SystemRoot`,
+    // a copy of the code the store deleted -- so on a machine with Windows somewhere other than
+    // `C:\Windows` it answered true while `available()` answered false, and the test that asserts
+    // the store IS available ran and failed. That is the configuration the store documents as
+    // degrading gracefully to `UserFileStore`; a red suite is not graceful.
+    return PHP_OS_FAMILY === 'Windows' && is_executable(WindowsCredentialStore::INTERPRETER);
 }
 
 beforeEach(function (): void {
@@ -327,66 +324,20 @@ it('stores a credential exactly at the ceiling', function (): void {
     expect($this->store->get($this->service)?->reveal())->toBe($token);
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
-it('writes no script anywhere, even where `TMP` is pointed', function (): void {
-    $decoy = sys_get_temp_dir().'/rc-tmp-decoy-'.bin2hex(random_bytes(6));
+it('passes the script inline, with no file path and no execution-policy flag', function (): void {
+    $arguments = new WindowsCredentialStore()->arguments();
 
-    mkdir($decoy, 0700, true);
-
-    // **Driven in a subprocess, because PHP caches `sys_get_temp_dir()` on first use.** Redirecting
-    // `TMP` inside this process does not move it -- an earlier version of this test asserted the
-    // redirection had taken and went red, which is the only reason an empty decoy directory here
-    // means anything. A fresh process reads `TMP` fresh.
-    $service = $this->service;
-    $code = <<<'PHP'
-        require $argv[1].'/vendor/autoload.php';
-        foreach (['Credential', 'CredentialStore', 'CredentialStoreFailed', 'WindowsCredentialStore'] as $class) {
-            require $argv[1].'/app/Support/Credentials/'.$class.'.php';
-        }
-        fwrite(STDOUT, sys_get_temp_dir()."\n");
-        (new App\Support\Credentials\WindowsCredentialStore)->get($argv[2]);
-        PHP;
-
-    $child = new Process(
-        [PHP_BINARY, '-r', $code, \dirname(__DIR__, 2), $service],
-        timeout: WindowsCredentialStore::TIMEOUT_SECONDS * 2,
-    );
-
-    $child->setEnv(['TMP' => $decoy, 'TEMP' => $decoy]);
-    $child->run();
-
-    try {
-        // Control: the child really did see the decoy as its temporary directory. Without this,
-        // an empty decoy is indistinguishable from a redirect that never took. Compared with
-        // separators normalized, because `sys_get_temp_dir()` hands back backslashes on Windows
-        // and the directory was built with a forward slash -- a difference in spelling, not in
-        // which directory was meant.
-        $normalize = static fn (string $path): string => str_replace('\\', '/', $path);
-
-        expect($normalize(trim($child->getOutput())))->toBe($normalize($decoy))
-            ->and($child->getExitCode())->toBe(0);
-
-        // **Positive control.** An empty result from a glob that could never match is the same
-        // shape as a real absence, so show it finding a planted script before reading anything
-        // into the real one.
-        $planted = $decoy.'/robot-council-'.bin2hex(random_bytes(6)).'.ps1';
-        touch($planted);
-
-        expect(glob($decoy.'/*.ps1') ?: [])->toContain($planted);
-
-        unlink($planted);
-
-        // The script used to be written to a temporary file, so a caller could choose the directory
-        // it landed in and could replace it between the write and `powershell.exe` opening it. It
-        // is now one inline argument, so no script is written at any path.
-        //
-        // Scoped to `.ps1` rather than asserting the directory is empty: `Symfony\…\Process` keeps
-        // its own `sf_proc_*` pipe files here, which belong to it rather than to this store.
-        expect(glob($decoy.'/*.ps1') ?: [])->toBeEmpty();
-    } finally {
-        array_map(unlink(...), glob($decoy.'/*') ?: []);
-        rmdir($decoy);
-    }
-})->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
+    // **This replaced a test that could not fail.** The old one redirected `TMP` in a subprocess,
+    // ran a `get()`, and then looked for a leftover `.ps1`. The implementation it was written to
+    // kill removed its own file in a `finally`, and the child had exited before the glob ran, so
+    // an empty result was what both implementations produced. Asserting on the command instead
+    // does discriminate: restoring the file-based version turns this red.
+    expect($arguments[0])->toBe(WindowsCredentialStore::INTERPRETER)
+        ->and($arguments)->toContain('-Command')
+        ->and($arguments)->not->toContain('-File')
+        ->and($arguments)->not->toContain('-ExecutionPolicy')
+        ->and(end($arguments))->toBe(constantOf('SCRIPT'));
+});
 
 it('pipes the credential into a literal interpreter path, whatever `SystemRoot` says', function (): void {
     $previous = getenv('SystemRoot');
@@ -411,30 +362,17 @@ it('pipes the credential into a literal interpreter path, whatever `SystemRoot` 
     }
 });
 
-it('builds a command line that stays under the ceiling', function (): void {
-    // **The failure this guards against is silent.** The script travels as one inline argument,
-    // and Symfony wraps every Windows command in `cmd.exe`, which refuses past about 8191
-    // characters by exiting 1 with nothing on either stream. `probe()` reads that as
-    // "unavailable", and the machine drops to the plaintext file store without a word. A script
-    // that grows past the ceiling should be a red suite instead.
-    $escape = static function (string $argument): string {
-        if (! preg_match('/[()%!^"<>&|\s[\]=;*?\'$]/', $argument)) {
-            return $argument;
-        }
+it('keeps the script within the environment budget it is allowed', function (): void {
+    // **The resource is the environment block, not the command line.** Symfony rewrites a quoted
+    // argument containing `!LF!` or `""` into an environment variable and leaves `!uid!` in the
+    // command line -- measured on 2026-09-21 by reading `Win32_Process.CommandLine` of a live
+    // call, which was 259 characters with the script nowhere in it. So a command-line length guard
+    // measured a string `proc_open` never receives; this measures what the script really costs.
+    //
+    // Going over the 32767-unit block makes `Process::start()` throw, and on a machine whose own
+    // environment is large the store's share is what tips it over.
+    $arguments = new WindowsCredentialStore()->arguments();
+    $script = end($arguments);
 
-        return '"'.str_replace(['"', '^', '%', '!', "\n"], ['""', '"^^"', '"^%"', '"^!"', '!LF!'], $argument).'"';
-    };
-
-    $arguments = [
-        WindowsCredentialStore::INTERPRETER,
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        constantOf('SCRIPT'),
-    ];
-
-    // `cmd.exe /V:ON /E:ON /D /C (...)` is what Symfony wraps every Windows command in.
-    $length = \strlen('C:\\WINDOWS\\system32\\cmd.exe /V:ON /E:ON /D /C ('.implode(' ', array_map($escape, $arguments)).')');
-
-    expect($length)->toBeLessThan(WindowsCredentialStore::COMMAND_LINE_CEILING);
+    expect(\strlen($script))->toBeLessThan(WindowsCredentialStore::ENVIRONMENT_BUDGET);
 });
