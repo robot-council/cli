@@ -1,6 +1,12 @@
 # Path-based git attributes
 # https://www.kernel.org/pub/software/scm/git/docs/gitattributes.html
 
+# Store every text file as LF, and check it out as LF on every platform. Git for Windows installs
+# core.autocrlf=true, which lands the working tree as CRLF -- and Pint's line_ending fixer then
+# reports every file in the repository as a style failure, 45 of them, which CI never sees because
+# the pint job runs on ubuntu. text=auto leaves anything Git detects as binary alone.
+* text=auto eol=lf
+
 # Keep development-only files out of a source archive.
 /.claude            export-ignore
 /.editorconfig      export-ignore
