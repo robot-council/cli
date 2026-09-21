@@ -36,6 +36,21 @@ use App\Support\Credentials\CredentialStoreFailed;
 use App\Support\Credentials\KeychainStore;
 
 /**
+ * Narrow a value that may be null, so `bin2hex()` is given a string or the test fails saying so.
+ *
+ * @param  mixed  $value  The value to narrow.
+ * @return string The value, as a string.
+ */
+function stringValue(mixed $value): string
+{
+    if (! is_string($value)) {
+        throw new RuntimeException(sprintf('Expected a string, got %s.', get_debug_type($value)));
+    }
+
+    return $value;
+}
+
+/**
  * Whether this machine cannot reach the Keychain, which is what the gated tests skip on.
  *
  * Memoized, because it shells out and every gated test asks.
@@ -155,43 +170,68 @@ it('round-trips a credential byte for byte, whatever is in it', function (string
     'quotes and backticks' => ['a"b\'c`d'],
     'a shell expansion that must stay literal' => ['$(whoami) ${HOME} %PATH%'],
     'base64 padding' => ['aGVsbG8gd29ybGQ='],
+
+    // Everything below round-trips only since #41 replaced `-w` with `-g`. Each one broke a
+    // different part of the old read: the first two were pinned here as limitations, and the rest
+    // are the shapes a parser of `-g`'s output can get wrong.
+    'leading and trailing spaces' => ['  padded  '],
+    'multibyte text' => ["caf\u{e9} na\u{ef}ve \u{6f22}\u{5b57} \u{1f512}"],
+    'a backslash, which forces the hex form' => ['ab\\cd'],
+    'a double quote, which `security` does not escape' => ['ab"cd'],
+    'quotes at both ends' => ['"quoted"'],
+    'a value that looks like the hex form' => ['0xDEADBEEF'],
+    'a value impersonating the whole hex line' => ['0x636166  "caf"'],
+    'a single space' => [' '],
 ])->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
 
-it('refuses a credential containing a non-ASCII byte rather than storing it wrong', function (): void {
-    // **Pinning a limitation, not a guarantee -- #41.** `security -w` prints a hex dump of the
-    // whole password, with no `0x` prefix, whenever it holds any byte above 0x7F. Measured:
-    // `caf<U+00E9>` comes back as the ten ASCII characters `636166c3a9`, and one high byte anywhere
-    // is enough. `put()` reads back and compares, so this direction refuses; `get()` on an entry
-    // that is already there does not, and returns the hex.
-    //
-    // This row was in the byte-for-byte dataset above and passed for the wrong reason: it was
-    // written `'caf\u{e9}'` in SINGLE quotes, where PHP does not interpolate the escape, so it
-    // carried nine ASCII bytes under a name claiming otherwise. Double-quoting it is what exposed
-    // the defect.
-    $key = $this->service;
+it('round-trips the two shapes that used to be refused, which is what #41 changed', function (): void {
+    // These were pinned here as limitations when `KeychainStoreTest` was written, because `get()`
+    // read `security -w`: it trimmed the credential's own whitespace along with the newline
+    // `security` adds, and it returned a hex dump for any byte above 0x7F. Both refused loudly on
+    // the way in, since `put()` reads back and compares -- so this test asserting they now STORE
+    // is the same test inverted rather than a new one.
+    $padded = '  padded  ';
+    $nonAscii = "caf\u{e9}";
 
-    expect(fn () => $this->store->put($key, new Credential("caf\u{e9} na\u{ef}ve \u{6f22}\u{5b57} \u{1f512}")))
-        ->toThrow(CredentialStoreFailed::class);
+    $this->store->put($this->service, new Credential($padded));
+    $this->store->put($this->other, new Credential($nonAscii));
+
+    expect($this->store->get($this->service)?->reveal())->toBe($padded)
+        ->and($this->store->get($this->other)?->reveal())->toBe($nonAscii);
+
+    // And the bytes really are what went in, not something that merely compares equal after a
+    // round of encoding
+    expect(bin2hex(stringValue($this->store->get($this->other)?->reveal())))->toBe(bin2hex($nonAscii));
 })->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
 
-it('refuses a credential with surrounding whitespace rather than storing it wrong', function (): void {
-    // **Pinning a limitation, not a guarantee.** `get()` calls `trim()` on the raw secret, which
-    // strips the newline `security` appends AND any whitespace belonging to the credential:
-    // measured, `'  padded  '` is stored intact and read back as `'padded'`. `put()` reads back and
-    // compares, so this direction fails loudly -- which is why it is written as a refusal here and
-    // why the byte-for-byte dataset above carries no padded row.
-    //
-    // The quiet direction has no test because it cannot be reached through this class: an entry
-    // already carrying whitespace comes back short from `get()` with nothing reporting it.
-    // Tracked in #41 alongside the non-ASCII defect above, which is the same expression. When that
-    // lands, both tests invert and both rows return to the dataset above.
-    $key = $this->service;
+it('refuses a credential that is only whitespace or carries a newline', function (): void {
+    // #41 asked for a defined outcome for the empty and newline cases rather than an accident.
+    // Measured: all three are refused on the way in, because `put()` reads back and compares --
+    // the value travels down the retype prompt as `$token\n$token\n`, so a newline inside it
+    // breaks that protocol, and an empty value is stored as no password at all.
+    $cases = ["\n", '', "ab\ncd"];
 
-    expect(fn () => $this->store->put($key, new Credential('  padded  ')))
-        ->toThrow(CredentialStoreFailed::class);
+    foreach ($cases as $index => $token) {
+        $key = $this->service.'-nl-'.$index;
 
-    // And it stored nothing usable, rather than storing a corrupted value
-    expect($this->store->get($key)?->reveal())->not->toBe('  padded  ');
+        $this->written[] = $key;
+
+        // `CredentialStoreFailed::class` needs its import to mean anything. Without one, PHP does
+        // not error -- `::class` on an unresolved name yields the bare literal `'CredentialStoreFailed'`
+        // -- so the assertion silently compares against the wrong string. Pint removes an import the
+        // moment the last test using it goes, which is how this file lost it.
+        expect(fn () => $this->store->put($key, new Credential($token)))
+            ->toThrow(CredentialStoreFailed::class);
+
+        // And nothing usable was left behind under that key
+        expect($this->store->get($key))->toBeNull();
+    }
+
+    // The control: a credential with no newline in it stores through the same method, so the
+    // refusals above are about the value rather than about `put()` being broken.
+    $this->store->put($this->other, new Credential('rcouncil_1|ORDINARY'));
+
+    expect($this->store->get($this->other)?->reveal())->toBe('rcouncil_1|ORDINARY');
 })->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
 
 it('returns null for a key it holds nothing for', function (): void {
