@@ -49,6 +49,8 @@ robot-council enroll --service=https://your-fleet.example.com
 
 It prints a code and a URL. A developer signed in to that fleet opens the URL, enters the code, and approves; enrollment finishes on its own. Then wire a harness to the bridge, below.
 
+`robot-council enroll --help` lists the other options.
+
 ## Giving the service its secrets
 
 **This command line does not handle them, on purpose.** Every credential it touches stays on the
