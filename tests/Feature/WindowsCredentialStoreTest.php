@@ -304,19 +304,23 @@ it('stores a service key that would be an injection if anything parsed it', func
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
 it('refuses a credential longer than Credential Manager accepts, saying so', function (): void {
-    // The ceiling is `CRED_MAX_CREDENTIAL_BLOB_SIZE`, and it was measured rather than read: with
-    // the guard bypassed on 2026-09-21, 2560 bytes round-tripped and 2561 failed inside
-    // `CredWriteW`. Without the guard the caller gets "could not be stored" from the read-back,
-    // which is true and says nothing about why.
-    expect(fn () => $this->store->put($this->service, new Credential(str_repeat('x', 2561))))
-        ->toThrow(CredentialStoreFailed::class, '2560 bytes');
-})->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
+    $ceiling = intConstantOf('MAX_BLOB_BYTES');
+
+    // **Deliberately not gated, while its neighbour below is.** The guard is the first statement
+    // in `put()` and nothing above it touches the store -- `put()` never calls `available()` -- so
+    // this is pure PHP and runs on every platform. Gating it put the guard's only test behind a
+    // working Credential Manager, which meant neither ubuntu cell exercised it.
+    expect(fn () => $this->store->put($this->service, new Credential(str_repeat('x', $ceiling + 1))))
+        ->toThrow(CredentialStoreFailed::class, (string) $ceiling);
+});
 
 it('stores a credential exactly at the ceiling', function (): void {
-    $token = str_repeat('x', 2560);
+    $token = str_repeat('x', intConstantOf('MAX_BLOB_BYTES'));
 
-    // The other side of the boundary, so the guard is pinned to where the API actually stops
-    // rather than to a round number somebody chose.
+    // The other side of the same boundary, and this one does need the API: `CRED_MAX_CREDENTIAL_
+    // BLOB_SIZE` was measured rather than read, with the guard bypassed on 2026-09-21, and 2560
+    // round-tripped where 2561 failed inside `CredWriteW`. One side of the boundary is a guard,
+    // the other is the API, which is why only this one is gated.
     $this->store->put($this->service, new Credential($token));
 
     expect($this->store->get($this->service)?->reveal())->toBe($token);
