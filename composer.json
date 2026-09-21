@@ -49,6 +49,7 @@
         "analyse": "vendor/bin/phpstan analyse",
         "test": "vendor/bin/pest",
         "test-coverage": "vendor/bin/pest --coverage",
+        "test:mutate": "vendor/bin/pest --mutate --path=app",
         "format": "vendor/bin/pint",
         "refactor": "vendor/bin/rector",
         "test:refactor": "vendor/bin/rector --dry-run"

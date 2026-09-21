@@ -108,9 +108,25 @@ final class Credentials
      * presenting one installation's credential is exactly the confusion harness keying exists to
      * end.
      *
+     * **And the removal is verified, because `forget()` cannot report failing.** It returns `void`
+     * in every implementation and none of them inspects what it ran: `KeychainStore` and
+     * `SecretToolStore` discard the exit code deliberately, since a missing item exits non-zero and
+     * that is the state being asked for, and `WindowsCredentialStore` discards it too. So a delete
+     * that did not happen is indistinguishable from one that did, from here. `put()` above already
+     * reads back and compares rather than trusting its own write; this is the same discipline
+     * applied to the other half, and #32 is the ticket that asked for it.
+     *
+     * The claimed credential is **not** rolled back when the check fails. It is correctly stored
+     * under the harness that asked, and undoing it would leave a machine with nothing while the
+     * legacy entry it could not remove is still there. What is wrong is the leftover, so that is
+     * what the message names.
+     *
      * @param  string  $service  The fleet's base URL.
      * @param  string  $harness  The harness claiming it.
      * @return Credential|null What was claimed, or null when there was nothing to claim.
+     *
+     * @throws CredentialStoreFailed When the legacy entry is still readable after being forgotten,
+     *                               which would leave it claimable by a second harness.
      */
     public function adopt(string $service, string $harness): ?Credential
     {
@@ -122,8 +138,27 @@ final class Credentials
 
         $store = $this->store();
 
+        $legacy = CredentialKey::legacy($service);
+
         $store->put(CredentialKey::for($service, $harness), $credential);
-        $store->forget(CredentialKey::legacy($service));
+        $store->forget($legacy);
+
+        // Read back rather than trust the delete. On a store whose backend refused -- an antivirus
+        // product holding the script, a policy change mid-session, a locked keychain -- this is the
+        // only thing between a silent success and two harnesses presenting one installation's
+        // credential.
+        if ($store->get($legacy) instanceof Credential) {
+            // Both sentences are asserted, so dropping either fails a test. Their ORDER is not:
+            // swapping them leaves a message carrying the same two facts, and pinning the order
+            // would make the test brittle to rewording while protecting nothing.
+            // @pest-mutate-ignore: ConcatSwitchSides
+            throw new CredentialStoreFailed(sprintf(
+                'The credential was claimed for `%s`, but the one stored before harnesses were told apart could not be removed from %s. '
+                .'Remove it by hand before another harness claims it too.',
+                $harness,
+                $store->describe()
+            ));
+        }
 
         return $credential;
     }
@@ -142,6 +177,16 @@ final class Credentials
     {
         $store = $this->store();
 
+        // `array_values` is load-bearing for the DECLARED type rather than for this method's one
+        // caller, which does `implode()` and cannot tell the difference. `array_filter` preserves
+        // keys, so dropping it returns `array<int<0, max>, string>` where the signature promises
+        // `list<string>` -- measured: `composer analyse` fails on exactly that, and the suite stays
+        // green. Killing this mutant with a test would duplicate a check another gate already makes
+        // better, so it is annotated instead, which is what the survivor criterion asks for.
+        //
+        // The marker carries no prose on its own line: v5.0.2 captures the rest of that line and
+        // compares it against mutator names, so a trailing explanation silently suppresses nothing.
+        // @pest-mutate-ignore: UnwrapArrayValues
         return array_values(array_filter(
             $harnesses,
             static fn (string $harness): bool => $store->get(CredentialKey::for($service, $harness)) instanceof Credential

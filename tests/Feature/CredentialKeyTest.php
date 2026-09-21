@@ -18,6 +18,8 @@ declare(strict_types=1);
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\CredentialKey;
 use App\Support\Credentials\Credentials;
+use App\Support\Credentials\CredentialStore;
+use App\Support\Credentials\CredentialStoreFailed;
 use App\Support\Credentials\UserFileStore;
 
 const KEYED_FLEET = 'https://fleet.example.test';
@@ -121,7 +123,117 @@ it('claims a legacy credential for one named harness', function (): void {
 });
 
 it('claims nothing when there is nothing to claim', function (): void {
+    // And it does not throw on the way. The verification added for #32 reads the legacy key back
+    // after forgetting it, and this path forgets nothing -- so a check written as "is the legacy
+    // key absent" rather than "was it removed" would refuse a machine that simply has no legacy
+    // credential, which is almost every machine.
     expect(keyedCredentials()->adopt(KEYED_FLEET, 'claude'))->toBeNull();
+});
+
+it('refuses to report a claim when the legacy credential could not be removed', function (): void {
+    // `CredentialStore::forget()` returns `void` and no implementation inspects what it ran --
+    // `KeychainStore` and `SecretToolStore` discard the exit code deliberately, because a missing
+    // item exits non-zero and that is the state being asked for. So a delete that did not happen
+    // is indistinguishable from one that did, and `adopt()` used to return as though the legacy
+    // entry were gone. A second harness could then claim the same credential.
+    $store = new class implements CredentialStore
+    {
+        /** @var array<string, string> */
+        public array $entries = [];
+
+        public function available(): bool
+        {
+            return true;
+        }
+
+        public function describe(): string
+        {
+            return 'a store whose deletes do not take';
+        }
+
+        public function put(string $service, Credential $credential): void
+        {
+            $this->entries[$service] = $credential->reveal();
+        }
+
+        public function get(string $service): ?Credential
+        {
+            return isset($this->entries[$service]) ? new Credential($this->entries[$service]) : null;
+        }
+
+        // The defect, in one line: it reports nothing and removes nothing.
+        public function forget(string $service): void {}
+    };
+
+    $store->put(CredentialKey::legacy(KEYED_FLEET), new Credential(KEYED_CLAUDE_TOKEN));
+
+    $credentials = new Credentials([$store]);
+
+    try {
+        $credentials->adopt(KEYED_FLEET, 'claude');
+
+        $message = null;
+    } catch (CredentialStoreFailed $credentialStoreFailed) {
+        $message = $credentialStoreFailed->getMessage();
+    }
+
+    // Asserted before the fragments, so removing the guard fails as "expected null not to be null"
+    // rather than as `InvalidExpectationValue` from `toContain()` on a null -- red either way, but
+    // only one of them says what went wrong.
+    expect($message)->not->toBeNull();
+
+    // Both halves, because they do different jobs and a mutation that drops the second one leaves
+    // a message that still reads as an error while telling the operator nothing to do about it.
+    expect($message)->toContain('could not be removed')
+        ->toContain('Remove it by hand')
+        ->toContain('a store whose deletes do not take');
+
+    // The claim itself is kept rather than rolled back: it is correctly stored under the harness
+    // that asked, and undoing it would leave the machine with nothing while the legacy entry it
+    // could not remove is still there.
+    expect($store->get(CredentialKey::for(KEYED_FLEET, 'claude'))?->reveal())->toBe(KEYED_CLAUDE_TOKEN)
+        ->and($store->get(CredentialKey::legacy(KEYED_FLEET))?->reveal())->toBe(KEYED_CLAUDE_TOKEN);
+});
+
+it('reports a claim when the delete does take, against the same fake', function (): void {
+    // The control for the test above. Without it, an `adopt()` that threw unconditionally would
+    // satisfy the refusal and be entirely broken -- and the two fakes differ in exactly one
+    // method, so the difference in outcome is attributable to that method and nothing else.
+    $store = new class implements CredentialStore
+    {
+        /** @var array<string, string> */
+        public array $entries = [];
+
+        public function available(): bool
+        {
+            return true;
+        }
+
+        public function describe(): string
+        {
+            return 'a store whose deletes take';
+        }
+
+        public function put(string $service, Credential $credential): void
+        {
+            $this->entries[$service] = $credential->reveal();
+        }
+
+        public function get(string $service): ?Credential
+        {
+            return isset($this->entries[$service]) ? new Credential($this->entries[$service]) : null;
+        }
+
+        public function forget(string $service): void
+        {
+            unset($this->entries[$service]);
+        }
+    };
+
+    $store->put(CredentialKey::legacy(KEYED_FLEET), new Credential(KEYED_CLAUDE_TOKEN));
+
+    expect(new Credentials([$store])->adopt(KEYED_FLEET, 'claude')?->reveal())->toBe(KEYED_CLAUDE_TOKEN)
+        ->and($store->get(CredentialKey::legacy(KEYED_FLEET)))->toBeNull();
 });
 
 it('cannot be confused by a separator in either half of the key', function (): void {
