@@ -116,7 +116,7 @@ So the only secret-adjacent thing below is a URL, and each harness is configured
 
 **Put `ROBOT_COUNCIL_HARNESS` beside it.** One machine holds one credential per harness, so the bridge has to know which harness it is. It asks `--harness`, then `ROBOT_COUNCIL_HARNESS`, then `laravel/agent-detector` — and **refuses if none of them answers**, rather than presenting whichever credential happens to be there. Detection works where a harness exports a variable the detector knows; naming it in the configuration costs one line and does not depend on that.
 
-Pass `--project=<repository or workspace>` as well where one harness works several checkouts, so the fleet can tell the sessions apart.
+Pass `--project` as well where one harness works several checkouts, so the fleet can tell the sessions apart. See [naming a project](#naming-a-project) for what to put in it.
 
 ### Claude Code
 
@@ -185,6 +185,59 @@ env = { ROBOT_COUNCIL_SERVICE = "https://your-fleet.example.com", ROBOT_COUNCIL_
 ### Solo
 
 **Not run, and nothing about it was checked.** Solo is not installed on the machine this was written on. The expectation recorded in [#6](https://github.com/robot-council/cli/issues/6) is that it is configured through whichever harness it launches, which would make the Claude Code section above the whole of it — but that is an expectation, not a measurement, and no Solo documentation was read to support it.
+
+### Naming a project
+
+`--project` is a **label on a session**, not a filesystem path. It does not decide which credential is used — that is the harness — and the service never resolves it to anything. Its whole job is to let a fleet tell one checkout's sessions from another's.
+
+**Write it as `<org>/<repo>/<worktree>`:**
+
+```
+UAMS-Web/uams-statamic/a
+UAMS-Web/wordpress-importer/ci
+```
+
+Leave the last segment off for a checkout that is not a worktree.
+
+#### Why it is written out rather than derived
+
+A folder name is the obvious source and the wrong one, for three reasons, all of them measurable:
+
+- **It loses the organization.** `uams-statamic` alone is not a repository; two organizations can both have one.
+- **It is whatever that machine called the directory.** A worktree at `uams-statamic-a` on one machine and `statamic-a` on another reports two projects for one thing, which defeats the comparison the label exists for.
+- **A path does not fit.** `ProjectId` accepts `[A-Za-z0-9._/-]` — forward slash is in it, **backslash is not** — so `C:\Users\Josh\Herd\uams-statamic-a` is refused by the service outright. A configuration that interpolates `${workspaceFolder}` fails at the far end, mid-wire-up, rather than where it was written.
+
+One more for anyone tempted to derive it with a script: worktrees are often **siblings** of the primary checkout, so `…\uams-statamic` is a string prefix of `…\uams-statamic-a`. A prefix comparison matches the wrong one; anchor on the separator.
+
+#### The length bound, and what to do when a name is long
+
+`ProjectId` allows **128 characters**. The shape above fits comfortably for ordinary names — the examples are 24 and 30 — but GitHub permits a 39-character organization and a 100-character repository, and those do not fit. Measured on 2026-09-21:
+
+| value | length | verdict |
+| --- | --- | --- |
+| `UAMS-Web/uams-statamic/a` | 24 | accepted |
+| 39-char org, 85-char repo, 2-char worktree | 128 | accepted |
+| 39-char org, 86-char repo, 2-char worktree | 129 | **refused** |
+| 39-char org, 100-char repo, worktree | 142 | **refused** |
+
+For a repository whose full name does not fit, drop the organization and use `<repo>/<worktree>`. Be consistent across machines: the label is only useful if every machine writes the same one for the same checkout.
+
+#### Where it goes
+
+After `mcp`, as an argument to the bridge rather than an environment variable — one harness config serves one checkout, so it belongs beside the command.
+
+**Verified 2026-09-21** on Claude Code 2.1.236 against a live fleet:
+
+```bash
+claude mcp add robot-council \
+  -e ROBOT_COUNCIL_SERVICE=https://your-fleet.example.com \
+  -e ROBOT_COUNCIL_HARNESS=claude \
+  -- robot-council mcp --project=UAMS-Web/uams-statamic/a
+```
+
+That wrote `"args": ["mcp", "--project=UAMS-Web/uams-statamic/a"]` and `claude mcp list` reported `Connected`.
+
+For Cursor and Codex the flag goes in the same place — the `args` array, after `"mcp"`. **Not run for either**: neither harness was launched with a `--project` on the machine this was written on, and the existing sections say which harnesses have been run and which have not.
 
 ### When the bridge refuses
 
