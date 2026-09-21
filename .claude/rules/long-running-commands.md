@@ -83,7 +83,7 @@ A command that may run for minutes gets an **explicit bound inside the command i
 
 ## Validate the sweep before you trust its silence
 
-**An empty result from a blind sweep is byte-identical to an empty result from a quiet machine.** Before reading "nothing found" as an absence, **show the sweep finding a process you know exists.** This is the process-sweep case of [`an-empty-result-is-not-evidence`](an-empty-result-is-not-evidence.md), and these six causes are its fullest treatment. Only the first is a selection error, and the last two are not detection failures at all:
+**An empty result from a blind sweep is byte-identical to an empty result from a quiet machine.** Before reading "nothing found" as an absence, **show the sweep finding a process you know exists.** This is the process-sweep case of [`an-empty-result-is-not-evidence`](an-empty-result-is-not-evidence.md), and these seven causes are its fullest treatment. The first is a selection error; two of them are not detection failures at all; and the last is not a query problem in any sense, which is why it needs its own remedy below:
 
 | Cause | Measured | Why it returns clean |
 | --- | --- | --- |
@@ -93,8 +93,13 @@ A command that may run for minutes gets an **explicit bound inside the command i
 | `grep -v grep` (all platforms) | 4 matches, then 0 | Drops every process whose command line contains `grep`, which watchers and waiters often do. Use the split-string idiom from step 3 instead. |
 | A GNU flag on BSD `pgrep` (macOS) | published `0`, actual `3` | `pgrep -c` does not exist on macOS (exit 2, verified on 26.6.2). `pgrep -fc … 2>/dev/null \|\| echo 0` swallows the usage error and prints a reassuring `0`. |
 | The predicate matched the wrong surface | a live foreign process in the output | A shell running a script carries only the script's *path*; the behavior lived inside the file. |
+| **Polling slower than the process lives** (all platforms) | **0 hits across 70 sweeps over 25 seconds**, against a control that was genuinely running | One `Get-CimInstance Win32_Process` query costs about 350ms and the target process lived about 20ms, so it fell between polls every time. **No rewrite of the query reaches this.** |
 
-Rows 2 through 6 were measured in `UAMS-Web/uams-statamic` sessions.
+Every row but the last was measured in `UAMS-Web/uams-statamic` sessions; the last on Windows 11 Pro 26200 on 2026-09-21, hunting a credential in process command lines for `robot-council/cli#35`.
+
+**The last row is a different kind of failure, and it needs a different kind of fix.** The other six are answered by changing the query — widen the selection, read a surface you can, drop the self-matching filter. A poll that is slower than its subject is answered by **removing the timing variable instead of tightening the predicate**: start the subject with its stdin redirected and unwritten so it blocks and can be read at leisure, hold the control alive the same way, then read each command line directly and distinguish an unreadable one from a genuine absence. An event subscription is not the fix either — `Register-CimIndicationEvent` on `__InstanceCreationEvent … WITHIN 0.05` caught 1 of 1 processes in one run and **0 of 5** in the next, because WMI polls rather than hooks.
+
+**And it breaks the positive control itself, which is the part worth carrying away.** The control in that measurement was a process with the same lifetime as the subject, sampled by the same loop — so it passed nothing, and its silence looked exactly like the subject's. **A control sampled by the same instrument, at the same cadence, inherits that instrument's blindness.** A control is only evidence when it differs from the measurement in the one variable being tested, which for a timing failure means it has to be held still.
 
 **A passing control shows DETECTION, not COVERAGE.** On one machine at one instant, `pgrep -f` found 3 of a class and passed its positive control, while `ps -Aww … | grep` found 7. The defensible statement is "at least three, possibly seven." So the control has a second half:
 
