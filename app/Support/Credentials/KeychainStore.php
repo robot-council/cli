@@ -148,6 +148,17 @@ final class KeychainStore implements CredentialStore
     /**
      * One `password:` line's value, in whichever of the three forms it arrived in.
      *
+     * **A credential that is empty, a single newline, or carries an embedded newline cannot be
+     * stored at all**, and so never reaches here. Measured: `put()` raises `CredentialStoreFailed`
+     * for each, because the value travels down the retype prompt as `$token\n$token\n` and a
+     * newline inside it breaks that protocol, while an empty value produces `password: ` with no
+     * quotes, which this reads as no credential. `get()` answers null for all three.
+     *
+     * **`WindowsCredentialStore` also calls `trim()`, and is right to.** It trims base64, where
+     * surrounding whitespace is not significant and `base64_decode()` recovers the exact bytes.
+     * The defect fixed here was trimming a RAW secret. A sweep that "fixes" the other store would
+     * be removing a guard that does no harm.
+     *
      * @param  string  $line  Everything after `password: `.
      * @return string|null The password, or null when the line carries none.
      */

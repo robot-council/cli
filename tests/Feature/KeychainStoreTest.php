@@ -32,6 +32,7 @@ declare(strict_types=1);
  */
 
 use App\Support\Credentials\Credential;
+use App\Support\Credentials\CredentialStoreFailed;
 use App\Support\Credentials\KeychainStore;
 
 /**
@@ -201,6 +202,36 @@ it('round-trips the two shapes that used to be refused, which is what #41 change
     // And the bytes really are what went in, not something that merely compares equal after a
     // round of encoding
     expect(bin2hex(stringValue($this->store->get($this->other)?->reveal())))->toBe(bin2hex($nonAscii));
+})->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
+
+it('refuses a credential that is only whitespace or carries a newline', function (): void {
+    // #41 asked for a defined outcome for the empty and newline cases rather than an accident.
+    // Measured: all three are refused on the way in, because `put()` reads back and compares --
+    // the value travels down the retype prompt as `$token\n$token\n`, so a newline inside it
+    // breaks that protocol, and an empty value is stored as no password at all.
+    $cases = ["\n", '', "ab\ncd"];
+
+    foreach ($cases as $index => $token) {
+        $key = $this->service.'-nl-'.$index;
+
+        $this->written[] = $key;
+
+        // `CredentialStoreFailed::class` needs its import to mean anything. Without one, PHP does
+        // not error -- `::class` on an unresolved name yields the bare literal `'CredentialStoreFailed'`
+        // -- so the assertion silently compares against the wrong string. Pint removes an import the
+        // moment the last test using it goes, which is how this file lost it.
+        expect(fn () => $this->store->put($key, new Credential($token)))
+            ->toThrow(CredentialStoreFailed::class);
+
+        // And nothing usable was left behind under that key
+        expect($this->store->get($key))->toBeNull();
+    }
+
+    // The control: a credential with no newline in it stores through the same method, so the
+    // refusals above are about the value rather than about `put()` being broken.
+    $this->store->put($this->other, new Credential('rcouncil_1|ORDINARY'));
+
+    expect($this->store->get($this->other)?->reveal())->toBe('rcouncil_1|ORDINARY');
 })->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
 
 it('returns null for a key it holds nothing for', function (): void {
