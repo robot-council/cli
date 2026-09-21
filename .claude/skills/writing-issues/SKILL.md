@@ -332,6 +332,28 @@ gh api "search/issues?q=repo:robot-council/core+<class of problem or label>&per_
 
 **`gh issue list` and `gh search issues` exclude pull requests; the REST search endpoint above does not.** That matters because a fix often ships as a pull request with no issue behind it, so the wrapper hides exactly the in-flight work the check exists to find — in `UAMS-Web/uams-statamic` (2026-09-05) a wrapper search returned the issue and never the pull request implementing it. The `.pull_request` key is what distinguishes the two kinds, hence the `PR`/`iss` prefix. The endpoint cannot phrase-match and it indexes comments; see [`github-api-budget`](../../rules/github-api-budget.md).
 
+**Everything above guards against a query that is too NARROW. None of it guards against a query that did not RUN.** Those produce the same output, and the second one is the easier mistake: a malformed `--jq` expression prints its parse error to stderr, `gh` exits non-zero, and a pipeline ending in `|| echo "(none)"` prints exactly what a genuinely clean check prints. Observed while filing against `robot-council/cli` on 2026-09-21, where the check read:
+
+```
+=== duplicate check ===
+  (none)
+```
+
+Two issues were filed on the strength of that line. Re-run afterwards with a working parser the check was genuinely clean — so no duplicate was filed, but that was luck rather than method, and the same output would have appeared had there been ten.
+
+**So show the query finding something, in the same invocation, before reading it finding nothing.** A term certain to appear in the repository is enough, and it costs one call:
+
+```bash
+# The control and the question, same endpoint, same --jq, same quoting. A zero on the first line
+# means the instrument is broken and the second line says nothing about the world.
+for q in "robot-council" "<symptom or feature>"; do
+  printf '%s -> ' "$q"
+  gh api "search/issues?q=repo:robot-council/core+$q&per_page=100" --jq '"matches: \(.total_count)"'
+done
+```
+
+Read the control's total first. If it is `0`, or the line is missing entirely, stop — nothing below it is evidence. This is [`an-empty-result-is-not-evidence`](../../rules/an-empty-result-is-not-evidence.md) applied to the duplicate check; that rule owns the general form and the reasoning, and is not restated here.
+
 Vary the terms across the symptom, the affected file/class/config key, and the class of problem —
 one query rarely surfaces a differently-worded duplicate. For work that spans repositories, search
 the other repository too (swap the `repo:` qualifier). If anything plausibly covers the concept:
