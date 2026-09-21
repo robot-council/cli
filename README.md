@@ -49,6 +49,15 @@ robot-council enroll --service=https://your-fleet.example.com
 
 It prints a code and a URL. A developer signed in to that fleet opens the URL, enters the code, and approves; enrollment finishes on its own. Then wire a harness to the bridge, below.
 
+**Enroll once per harness, not once per machine.** A credential belongs to one harness, so a machine running both Claude Code and Cursor enrolls twice:
+
+```bash
+robot-council enroll --service=https://your-fleet.example.com --harness=claude
+robot-council enroll --service=https://your-fleet.example.com --harness=cursor
+```
+
+Re-enrolling a harness **replaces** that harness's credential and leaves the others alone. Worktrees do not need one each: several checkouts under one harness share its credential and are told apart by `--project`.
+
 `robot-council enroll --help` lists the other options.
 
 ## Giving the service its secrets
@@ -105,15 +114,28 @@ it scaffolds. Everything else is ordinary configuration.
 
 So the only secret-adjacent thing below is a URL, and each harness is configured the same way: launch `robot-council mcp` as a stdio server, with `ROBOT_COUNCIL_SERVICE` in its environment.
 
-Pass `--project=<repository or workspace>` as well where one harness works several checkouts, so the fleet can tell the sessions apart.
+**Put `ROBOT_COUNCIL_HARNESS` beside it.** One machine holds one credential per harness, so the bridge has to know which harness it is. It asks `--harness`, then `ROBOT_COUNCIL_HARNESS`, then `laravel/agent-detector` — and **refuses if none of them answers**, rather than presenting whichever credential happens to be there. Detection works where a harness exports a variable the detector knows; naming it in the configuration costs one line and does not depend on that.
+
+Pass `--project` as well where one harness works several checkouts, so the fleet can tell the sessions apart. See [naming a project](#naming-a-project) for what to put in it.
 
 ### Claude Code
 
 ```bash
 claude mcp add robot-council \
   -e ROBOT_COUNCIL_SERVICE=https://your-fleet.example.com \
+  -e ROBOT_COUNCIL_HARNESS=claude \
   -- robot-council mcp
 ```
+
+**Verified 2026-09-21**, on Claude Code 2.1.236 and macOS 26.6.2, against a live fleet, with three configurations differing only in that variable:
+
+| `ROBOT_COUNCIL_HARNESS` | `claude mcp list` |
+| --- | --- |
+| `claude` | `Connected` |
+| *omitted* | `Connected` — Claude Code exports a variable the detector reads, so detection alone is enough here |
+| `cursor`, which this machine has not enrolled | `Failed to connect` |
+
+So for **this** harness the variable is belt and braces rather than required. It is in the command above anyway, because it is the line that stops working depending on somebody else's environment, and because the third row is what a wrong value looks like: a clean refusal rather than somebody else's credential.
 
 **Verified 2026-09-18**, on Claude Code 2.1.236 and macOS 26.6.2, against a live fleet: `claude mcp list` reported `robot-council` as `Connected`, and a raw `initialize` plus `tools/list` over the same command served all 18 tools with nothing but protocol on stdout.
 
@@ -139,6 +161,8 @@ If `robot-council` is not on your `PATH`, give the absolute path to the executab
 }
 ```
 
+Add `"ROBOT_COUNCIL_HARNESS": "cursor"` to that `env` block. **Here the recommendation is stronger than for Claude Code**: Cursor is detected by `CURSOR_AGENT`, a variable documented for its terminal agent, and whether the editor exports it to MCP stdio children has not been measured. Naming it removes the question.
+
 **Verified 2026-09-21**, on Cursor 3.7.21 and Windows 11 Pro 25H2 (build 26200.8875), against a live fleet: the block above (without a `type` field) is the shape that launched. Cursor's [MCP docs](https://cursor.com/docs/mcp) put `command`, `args`, and `env` under `mcpServers.<id>` for stdio servers, and name `~/.cursor/mcp.json` (global) and `.cursor/mcp.json` (project) as the config locations. The same page's STDIO field table lists `type: "stdio"` as required while its examples omit it; the run that connected omitted it.
 
 After enroll with `--harness=cursor`, Settings → Tools & MCP showed the server connected. Reloading it there closed the old stdio process and started a new one: the fleet's agents list marked the previous session `gone` and showed a new `active` session for the same machine, harness `cursor`, last seen within seconds. That is the control that matters — the dashboard reading changes with the reload, so the variable reached the process and a session started on the service.
@@ -153,7 +177,7 @@ If `robot-council` is not on the `PATH` Cursor inherits, point `command` at `php
 [mcp_servers.robot-council]
 command = "robot-council"
 args = ["mcp"]
-env = { ROBOT_COUNCIL_SERVICE = "https://your-fleet.example.com" }
+env = { ROBOT_COUNCIL_SERVICE = "https://your-fleet.example.com", ROBOT_COUNCIL_HARNESS = "codex" }
 ```
 
 **Not run.** Codex is not installed on the machine this was written on, so nothing above launched a bridge. What *was* checked, on 2026-09-18, is the spelling: `command`, `args`, and `env` are the key names OpenAI's [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) gives under `mcp_servers.<id>`. That reference carries no combined example, so the arrangement of those keys into the block above is this project's, and the claim here is about three key names and the table they sit under, not about a working setup. Send a correction if it does not launch.
@@ -161,6 +185,91 @@ env = { ROBOT_COUNCIL_SERVICE = "https://your-fleet.example.com" }
 ### Solo
 
 **Not run, and nothing about it was checked.** Solo is not installed on the machine this was written on. The expectation recorded in [#6](https://github.com/robot-council/cli/issues/6) is that it is configured through whichever harness it launches, which would make the Claude Code section above the whole of it — but that is an expectation, not a measurement, and no Solo documentation was read to support it.
+
+### Naming a project
+
+`--project` is a **label on a session**, not a filesystem path. It does not decide which credential is used — that is the harness — and the service never resolves it to anything. Its whole job is to let a fleet tell one checkout's sessions from another's.
+
+**Write it as `<org>/<repo>/<worktree>`:**
+
+```
+UAMS-Web/uams-statamic/a
+UAMS-Web/wordpress-importer/ci
+```
+
+Leave the last segment off for a checkout that is not a worktree.
+
+#### Why it is written out rather than derived
+
+A folder name is the obvious source and the wrong one, for three reasons, all of them measurable:
+
+- **It loses the organization.** `uams-statamic` alone is not a repository; two organizations can both have one.
+- **It is whatever that machine called the directory.** A worktree at `uams-statamic-a` on one machine and `statamic-a` on another reports two projects for one thing, which defeats the comparison the label exists for.
+- **A path does not fit.** `ProjectId` accepts `[A-Za-z0-9._/-]` — forward slash is in it, **backslash is not** — so `C:\Users\Josh\Herd\uams-statamic-a` is refused by the service outright. A configuration that interpolates `${workspaceFolder}` fails at the far end, mid-wire-up, rather than where it was written.
+
+One more for anyone tempted to derive it with a script: worktrees are often **siblings** of the primary checkout, so `…\uams-statamic` is a string prefix of `…\uams-statamic-a`. A prefix comparison matches the wrong one; anchor on the separator.
+
+#### The length bound, and what to do when a name is long
+
+`ProjectId` allows **128 characters**. The shape above fits comfortably for ordinary names — the examples are 24 and 30 — but GitHub permits a 39-character organization and a 100-character repository, and those do not fit. Measured on 2026-09-21:
+
+| value | length | verdict |
+| --- | --- | --- |
+| `UAMS-Web/uams-statamic/a` | 24 | accepted |
+| 39-char org, 85-char repo, 2-char worktree | 128 | accepted |
+| 39-char org, 86-char repo, 2-char worktree | 129 | **refused** |
+| 39-char org, 100-char repo, worktree | 142 | **refused** |
+
+For a repository whose full name does not fit, drop the organization and use `<repo>/<worktree>`. Be consistent across machines: the label is only useful if every machine writes the same one for the same checkout.
+
+#### Where it goes
+
+After `mcp`, as an argument to the bridge rather than an environment variable — one harness config serves one checkout, so it belongs beside the command.
+
+**Verified 2026-09-21** on Claude Code 2.1.236 against a live fleet:
+
+```bash
+claude mcp add robot-council \
+  -e ROBOT_COUNCIL_SERVICE=https://your-fleet.example.com \
+  -e ROBOT_COUNCIL_HARNESS=claude \
+  -- robot-council mcp --project=UAMS-Web/uams-statamic/a
+```
+
+That wrote `"args": ["mcp", "--project=UAMS-Web/uams-statamic/a"]` and `claude mcp list` reported `Connected`.
+
+For Cursor and Codex the flag goes in the same place — the `args` array, after `"mcp"`. **Not run for either**: neither harness was launched with a `--project` on the machine this was written on, and the existing sections say which harnesses have been run and which have not.
+
+### When the bridge refuses
+
+The bridge presents one harness's credential, so it will not run without knowing which harness it is. Three refusals, each naming what to do:
+
+```
+robot-council: Could not tell which harness this is, and a credential belongs to one.
+Enrolled here: cursor, claude. Pass --harness=<name>, or set ROBOT_COUNCIL_HARNESS
+in this harness's configuration.
+```
+
+Nothing named a harness and detection did not fire. The list is what this machine has enrolled, in the order the detector enumerates harnesses rather than the order they were enrolled.
+
+```
+robot-council: This machine is not enrolled as `cursor` against that fleet.
+Enrolled here: claude. Pass --harness=<name>, or set ROBOT_COUNCIL_HARNESS
+in this harness's configuration.
+```
+
+A harness was named and has no credential — a typo, or a harness not enrolled yet.
+
+```
+robot-council: Could not tell which harness this is, and a credential belongs to one.
+A credential stored before harnesses were told apart is here. Pass
+--harness=<the harness it was enrolled as> to claim it, or run `robot-council enroll` again.
+```
+
+**The upgrade case, and it needs one action per machine, once.** A machine enrolled before credentials were kept per harness has one filed under the fleet alone. It is not adopted automatically, because it belongs to whichever harness enrolled it and nothing here can know which — handing it to whoever asks first is the guess this design refuses. Naming the harness claims it, moving it under the harness's own key. **Nothing is lost and no re-enrollment is required.**
+
+All three were produced by running the bridge on 2026-09-21 rather than read off the source, which is why the second line of the first one says `cursor, claude`. All three go to stderr, prefixed `robot-council:`. `mcp`'s stdout is a protocol stream a harness parses, so nothing else ever goes there.
+
+**The list of enrolled harnesses is a lower bound.** It is built by asking about each harness `laravel/agent-detector` knows, because no credential store can list its keys, so a harness named by hand that the detector has never heard of will not appear in it.
 
 ### Any other harness
 

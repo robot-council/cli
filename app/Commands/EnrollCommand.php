@@ -129,7 +129,7 @@ final class EnrollCommand extends Command
             return self::FAILURE;
         }
 
-        return $this->store($credentials, $service, $credential);
+        return $this->store($credentials, $service, $harness, $credential);
     }
 
     /**
@@ -182,10 +182,11 @@ final class EnrollCommand extends Command
      *
      * @param  Credentials  $credentials  Where the credential will be put.
      * @param  string  $service  The service the credential is for.
+     * @param  string  $harness  The harness it belongs to, which is half of its key.
      * @param  array<string, mixed>  $credentialBody  What the service returned.
      * @return int The exit code.
      */
-    private function store(Credentials $credentials, string $service, array $credentialBody): int
+    private function store(Credentials $credentials, string $service, string $harness, array $credentialBody): int
     {
         $token = $this->stringValue($credentialBody['token'] ?? null);
 
@@ -207,7 +208,10 @@ final class EnrollCommand extends Command
         try {
             $store = $credentials->store();
 
-            $store->put($service, new Credential($token));
+            // Through `Credentials` rather than the store, because the key is its business:
+            // one credential per harness per fleet, so enrolling `cursor` beside `claude` adds a
+            // slot and re-enrolling `claude` replaces only that one
+            $credentials->put($service, $harness, new Credential($token));
         } catch (Throwable $throwable) {
             // Only our own exception type's message is repeated. A filesystem or driver message can
             // carry a path, and an unknown one could carry anything at all.
