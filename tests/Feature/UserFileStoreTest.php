@@ -137,22 +137,55 @@ it('reads a corrupt file as empty rather than throwing', function (): void {
     expect($this->store->get('https://fleet.example.test')?->reveal())->toBe(TOKEN);
 });
 
-it('is the store chosen when nothing else is available', function (): void {
-    // It reports itself available unconditionally, which is what makes it the fallback rather than
-    // one more thing that can be missing
-    expect((new UserFileStore)->available())->toBeTrue()
-        ->and(new Credentials([new UserFileStore])->store())->toBeInstanceOf(UserFileStore::class);
+it('reports itself available unconditionally, which is what makes it the fallback', function (): void {
+    expect((new UserFileStore)->available())->toBeTrue();
 });
 
-it('is not the store chosen on a machine whose own credential store works', function (): void {
-    $chosen = new Credentials(Credentials::candidates())->store();
+it('is the last candidate, behind every store that can be absent', function (): void {
+    // Pinned by class and by ORDER, on every platform. An earlier version of this test recomputed
+    // `store()`'s own rule from the same `available()` calls the production code makes and
+    // compared the two, which can only fail if the test's copy of the list diverges -- on ubuntu
+    // it asserted `UserFileStore === UserFileStore` and would have stayed green with
+    // `WindowsCredentialStore` removed from the candidates entirely.
+    expect(array_map(fn (CredentialStore $store): string => $store::class, Credentials::candidates()))
+        ->toBe([
+            KeychainStore::class,
+            SecretToolStore::class,
+            WindowsCredentialStore::class,
+            UserFileStore::class,
+        ]);
+});
 
-    // Asserted against what THIS machine reports rather than against its operating system name: a
-    // Mac without `/usr/bin/security`, or a Windows machine where Credential Manager cannot be
-    // reached, correctly falls through to the file. Pinning the expectation to `PHP_OS_FAMILY`
-    // instead would make the suite red on exactly the machines the fallback exists for.
-    $expected = collect([new KeychainStore, new SecretToolStore, new WindowsCredentialStore])
-        ->first(fn (CredentialStore $store): bool => $store->available()) ?? new UserFileStore;
+it('is passed over for the first store that reports itself available', function (): void {
+    // Fakes rather than the real candidates, so this asserts `store()`'s rule -- first available
+    // wins -- on every platform instead of asking the machine what it happens to have.
+    $fake = fn (bool $available): CredentialStore => new readonly class($available) implements CredentialStore
+    {
+        public function __construct(private bool $available) {}
 
-    expect($chosen)->toBeInstanceOf($expected::class);
+        public function available(): bool
+        {
+            return $this->available;
+        }
+
+        public function describe(): string
+        {
+            return 'a fake';
+        }
+
+        public function put(string $service, Credential $credential): void {}
+
+        public function get(string $service): ?Credential
+        {
+            return null;
+        }
+
+        public function forget(string $service): void {}
+    };
+
+    $unavailable = $fake(false);
+    $available = $fake(true);
+
+    expect(new Credentials([$unavailable, $available, new UserFileStore])->store())->toBe($available)
+        ->and(new Credentials([$unavailable, new UserFileStore])->store())->toBeInstanceOf(UserFileStore::class);
 });

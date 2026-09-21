@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Support\Credentials;
 
+use SensitiveParameter;
 use Symfony\Component\Process\Process;
+use Throwable;
 
 /**
  * Windows Credential Manager, through a `CredWriteW` call made from PowerShell.
@@ -76,16 +78,30 @@ final class WindowsCredentialStore implements CredentialStore
     private const int NOT_FOUND = 3;
 
     /**
-     * A target this store never writes, used to exercise the mechanism in `available()`.
+     * The prefix `available()` probes under, completed with fresh randomness on every probe.
      *
      * **It deliberately does not begin with `TARGET_PREFIX`.** A service key is an opaque string
      * that nothing here parses, so every target `target()` can produce is `TARGET_PREFIX` followed
      * by *anything* -- including a leading colon. A probe target sharing that prefix could
      * therefore be occupied by a real credential, and `available()` would read someone's stored
-     * token as a broken mechanism. `robot-council-probe:` is one character different and outside
-     * the whole keyspace.
+     * token as a broken mechanism.
+     *
+     * **The random suffix closes a second hole.** `probe()` requires "no such credential", so a
+     * fixed target is something anything running as this user could occupy -- one
+     * `cmdkey /generic:<the fixed target>` and `available()` reports false forever, silently
+     * downgrading the machine to `UserFileStore`, which on Windows checks no permissions at all.
+     * A target nobody can predict cannot be squatted.
      */
-    private const string PROBE_TARGET = 'robot-council-probe:availability';
+    private const string PROBE_PREFIX = 'robot-council-probe:';
+
+    /**
+     * What the temporary script is named, before a random suffix and the `.ps1` extension.
+     *
+     * A constant rather than a literal in `writeScript()` because the test that checks no script
+     * is left behind globs for it, and two copies of the string would let the store be renamed
+     * while the test kept comparing two empty sets and passing.
+     */
+    public const string SCRIPT_PREFIX = 'robot-council-';
 
     /**
      * The largest blob `CredWriteW` accepts, in bytes.
@@ -176,8 +192,11 @@ final class WindowsCredentialStore implements CredentialStore
                 }
                 finally
                 {
-                    // The blob is this process's only plaintext copy, so it is cleared rather than
-                    // just released back to a heap that the next allocation can read.
+                    // Zero the unmanaged copy rather than just releasing it to a heap the
+                    // next allocation can read. This is NOT every plaintext copy in the process:
+                    // the MemoryStream, the ASCII string and the byte[] that fed this buffer are
+                    // managed, uncleared, and movable by the GC. Clearing what can be cleared is
+                    // worth doing; believing it leaves no plaintext behind is not.
                     for (int i = 0; i < blob.Length; i++) { Marshal.WriteByte(blobPointer, i, 0); }
                     Marshal.FreeHGlobal(blobPointer);
                     Marshal.FreeCoTaskMem(targetPointer);
@@ -228,7 +247,7 @@ final class WindowsCredentialStore implements CredentialStore
                     int error = Marshal.GetLastWin32Error();
 
                     // Asking for a credential to be gone when it already is is the state requested,
-                    // not a failure. `!…Equals` for the reason given in `Read` above.
+                    // not a failure. Negated `.Equals` for the reason given in `Read` above.
                     if (!error.Equals(NOT_FOUND))
                     {
                         throw new InvalidOperationException("CredDeleteW failed with " + error);
@@ -331,17 +350,35 @@ final class WindowsCredentialStore implements CredentialStore
     }
 
     /**
-     * The Credential Manager target a service is filed under.
+     * The Credential Manager target a key is filed under.
      *
-     * Keyed on the service so a machine enrolled against two deployments holds two credentials,
+     * Keyed on the key so a machine enrolled against two deployments holds two credentials,
      * matching the other stores.
      *
-     * @param  string  $service  The service's base URL.
+     * **The digest is not decoration: Credential Manager matches target names case-insensitively,
+     * and the key is case-sensitive everywhere else.** Measured on 2026-09-21 against
+     * `advapi32.dll`, with a key stored under one casing and read back under another:
+     *
+     * ```
+     * put('https://example.test/FleetA|claude')
+     *   get('https://example.test/FleetA|claude') -> 'TOKEN-FOR-MIXED-CASE'
+     *   get('https://example.test/fleeta|claude') -> 'TOKEN-FOR-MIXED-CASE'   <- never enrolled
+     *   get('https://example.test/NothingHere|claude') -> null                <- control
+     * ```
+     *
+     * `UserFileStore` returns null for that middle row, so without this the Windows store alone
+     * would hand one fleet's bearer token to a different fleet whose URL differs only in case --
+     * and `put()`'s read-back is structurally blind to it, because it reads back the very entry it
+     * collapsed onto. Appending a case-sensitive digest of the exact key makes two keys that differ
+     * only in case land on two targets. The key stays in the target in readable form, so
+     * `cmdkey /list` is still greppable.
+     *
+     * @param  string  $service  The credential key, which nothing here parses.
      * @return string The target name.
      */
     public function target(string $service): string
     {
-        return self::TARGET_PREFIX.$service;
+        return sprintf('%s%s#%s', self::TARGET_PREFIX, $service, substr(hash('sha256', $service), 0, 16));
     }
 
     /**
@@ -381,11 +418,27 @@ final class WindowsCredentialStore implements CredentialStore
             return false;
         }
 
-        $probe = $this->run('read', self::PROBE_TARGET);
+        // **Nothing in a probe may throw.** The whole point is to answer "can this be used", and
+        // the machines it exists to protect are exactly the ones where the asking breaks:
+        // `writeScript()` raises when `TEMP` refuses a `.ps1`, `random_bytes()` can raise, and
+        // `Process::run()` raises `ProcessTimedOutException` rather than returning an exit code
+        // when the bound fires. `Credentials::store()` does not guard this call, and neither
+        // `ApiCommand` nor `McpCommand` catches anything but `RuntimeException`, so an escaping
+        // throwable would reach Collision instead of falling through to `UserFileStore`.
+        try {
+            $probe = $this->run('read', self::PROBE_PREFIX.bin2hex(random_bytes(16)));
+        } catch (Throwable) {
+            return false;
+        }
 
         // `NOT_FOUND` rather than merely "did not fail". Nothing is filed at this target, so a
         // working mechanism has exactly one right answer here, and demanding it rules out a call
         // that exited 0 without reaching `CredReadW` at all.
+        //
+        // What this does NOT exercise is the output path: the not-found branch writes nothing to
+        // stdout, so a host that prefixed or mangled output would pass here and then return null
+        // from every `get()`. Writing a sentinel to prove the read path would mean writing to the
+        // user's real credential store on every probe, which is a worse trade.
         return $probe->getExitCode() === self::NOT_FOUND;
     }
 
@@ -420,10 +473,25 @@ final class WindowsCredentialStore implements CredentialStore
      *                            Credential Manager UI shows and nothing here reads back.
      * @param  string|null  $input  What to write on the process's stdin, which is how the
      *                              credential travels and the reason it is in no command line.
+     *                              **Marked sensitive, and that attribute is load-bearing.** PHP
+     *                              captures function arguments into every exception trace while
+     *                              `zend.exception_ignore_args` is `0`, which is its default and
+     *                              what this machine runs, and Collision prints string arguments
+     *                              up to 1000 characters. `Credential` keeps the token out of
+     *                              `put()`'s frame by being an object; this parameter would have
+     *                              put it straight back into the next frame down, base64-encoded,
+     *                              which is transport encoding and not protection. Verified: with
+     *                              the attribute the frame renders
+     *                              `Object(SensitiveParameterValue)`, without it the token.
      * @return Process The finished process.
      */
-    private function run(string $operation, string $target, string $username = '', ?string $input = null): Process
-    {
+    private function run(
+        string $operation,
+        string $target,
+        string $username = '',
+        #[SensitiveParameter]
+        ?string $input = null,
+    ): Process {
         $script = $this->writeScript();
 
         try {
@@ -468,7 +536,7 @@ final class WindowsCredentialStore implements CredentialStore
     {
         $directory = rtrim(sys_get_temp_dir(), '/'.\DIRECTORY_SEPARATOR);
 
-        $path = sprintf('%s%s%s.ps1', $directory, \DIRECTORY_SEPARATOR, 'robot-council-'.bin2hex(random_bytes(16)));
+        $path = sprintf('%s%s%s%s.ps1', $directory, \DIRECTORY_SEPARATOR, self::SCRIPT_PREFIX, bin2hex(random_bytes(16)));
 
         if (file_put_contents($path, self::SCRIPT) === false) {
             throw new CredentialStoreFailed(sprintf('Could not write the Credential Manager script to `%s`.', $path));

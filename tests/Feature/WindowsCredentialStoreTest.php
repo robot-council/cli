@@ -5,18 +5,19 @@ declare(strict_types=1);
 /**
  * Windows Credential Manager, reached through `CredWriteW`.
  *
- * Split deliberately in two. The **structural** tests run everywhere and guard the properties that
- * would be lost by a plausible simplification -- the credential arriving on stdin rather than in an
- * argument, and the service key being carried rather than parsed. The **round-trip** tests need a
- * machine with a working Credential Manager and are gated on the store saying so, in the same way
- * this suite has never written to a real Keychain or Secret Service.
+ * Split deliberately in two. The **structural** tests run everywhere and guard properties that a
+ * plausible simplification would take away -- the credential arriving on stdin rather than in an
+ * argument, the token staying out of exception traces, and the key being carried rather than
+ * parsed. The **round-trip** tests need a machine with a working Credential Manager and are gated
+ * on the store saying so, in the same way this suite has never written to a real Keychain or
+ * Secret Service.
  *
  * What is NOT here, and is not pretended to be: proof that the token never reaches a process's
  * argv. A watcher polling `Win32_Process` was measured on 2026-09-21 to miss a sub-second process
  * entirely -- a positive control of `cmdkey /pass:<sentinel>` returned zero hits across 70 sweeps
  * -- so an in-suite version of that check would go green whether or not the property held. It is
- * verified instead by a deterministic experiment recorded on the pull request, where both processes
- * are held open and read directly.
+ * verified instead by a deterministic experiment recorded on the pull request, where both
+ * processes are held open and their command lines read directly.
  *
  * @command  vendor/bin/pest --compact tests/Feature/WindowsCredentialStoreTest.php
  */
@@ -28,22 +29,38 @@ use App\Support\Credentials\WindowsCredentialStore;
 const WINDOWS_TOKEN = 'rcouncil_1|SuPeRsEcReTvAlUe0123456789abcdef';
 
 /**
- * A private constant of the store, read out of the class rather than copied into the test.
+ * A constant of the store, read out of the class rather than copied into the test.
  *
  * Reflection rather than reading the source file, because the source file is the wrong instrument
- * here: the class docblock discusses `cmdkey` at length to explain why it is not used, so a scan of
- * the file could never assert that the script does not call it.
+ * here: the class docblock discusses `cmdkey` at length to explain why it is not used, so a scan
+ * of the file could never assert that the script does not call it.
  *
  * @param  string  $name  The constant to read.
  * @return string Its value.
  */
 function constantOf(string $name): string
 {
-    $reflection = new ReflectionClass(WindowsCredentialStore::class);
-    $value = $reflection->getConstant($name);
+    $value = new ReflectionClass(WindowsCredentialStore::class)->getConstant($name);
 
     if (! is_string($value)) {
         throw new RuntimeException(sprintf('`WindowsCredentialStore::%s` is not a string.', $name));
+    }
+
+    return $value;
+}
+
+/**
+ * An integer constant of the store, narrowed rather than cast.
+ *
+ * @param  string  $name  The constant to read.
+ * @return int Its value.
+ */
+function intConstantOf(string $name): int
+{
+    $value = new ReflectionClass(WindowsCredentialStore::class)->getConstant($name);
+
+    if (! is_int($value)) {
+        throw new RuntimeException(sprintf('`WindowsCredentialStore::%s` is not an int.', $name));
     }
 
     return $value;
@@ -64,34 +81,83 @@ function requiresCredentialManager(): bool
     return ! $available;
 }
 
+/**
+ * Whether this machine has the interpreter the store needs.
+ *
+ * Deliberately not `PHP_OS_FAMILY === 'Windows'`: the point of the test that uses it is to assert
+ * the store IS available wherever it could be, so its own condition must not be the store's.
+ */
+function hasWindowsPowerShell(): bool
+{
+    $root = getenv('SystemRoot');
+
+    if (! is_string($root) || $root === '') {
+        $root = 'C:\Windows';
+    }
+
+    return PHP_OS_FAMILY === 'Windows'
+        && is_executable(rtrim($root, '\\/').'\System32\WindowsPowerShell\v1.0\powershell.exe');
+}
+
 beforeEach(function (): void {
     $this->store = new WindowsCredentialStore;
     $this->service = 'https://fleet-'.bin2hex(random_bytes(6)).'.example.test';
     $this->other = 'https://other-'.bin2hex(random_bytes(6)).'.example.test';
+
+    // Every key a test writes goes in here, and `afterEach` removes exactly these. A hard-coded
+    // pair used to be the cleanup, so a test that wrote anything else left it in the developer's
+    // real Credential Manager -- including the hostile-key test, whose residue read
+    // `robot-council:https://x.test"; Start-Process calc.exe; #`.
+    $this->written = [$this->service, $this->other];
 });
 
 afterEach(function (): void {
-    // Credential Manager is the developer's real one. Anything this suite wrote comes back out,
+    // Credential Manager is the developer's real one, so anything this suite wrote comes back out
     // whether the test passed or not. No guard on the properties being set: PHPUnit skips
     // `tearDown` when `setUp` throws, so reaching here means `beforeEach` finished.
     if (requiresCredentialManager()) {
         return;
     }
 
-    $this->store->forget($this->service);
-    $this->store->forget($this->other);
+    foreach ($this->written as $key) {
+        $this->store->forget($key);
+    }
 });
 
-it('is unavailable off Windows, so a Mac or a Linux box never tries it', function (): void {
-    $store = new WindowsCredentialStore;
+it('keeps the credential out of every exception trace frame', function (): void {
+    // **The defect this guards against has been paid for once already.** `Credential` exists
+    // because Collision printed `UserFileStore::put("https://…", "rcouncil_1|…")` to stdout, and
+    // its docblock says carrying the token in an object removes it from every frame on every
+    // failure path. Passing it onward as a plain `string` parameter puts it straight back, and
+    // base64 is transport encoding rather than protection. PHP captures arguments into traces
+    // whenever `zend.exception_ignore_args` is `0`, which is its default.
+    $input = new ReflectionMethod(WindowsCredentialStore::class, 'run')->getParameters()[3];
 
-    expect($store->available())->toBeFalse();
-})->skipOnWindows();
+    expect($input->getName())->toBe('input')
+        ->and($input->getAttributes(SensitiveParameter::class))->not->toBeEmpty();
+});
+
+it('is unavailable where `powershell.exe` is not', function (): void {
+    // Named for what it proves. The operating-system check in `probe()` is belt-and-braces: on a
+    // Mac or a Linux box the Windows interpreter path does not exist either, so this stays green
+    // with that check deleted. The executable check is the mechanism that actually decides.
+    expect(new WindowsCredentialStore()->available())->toBeFalse();
+})->skip(hasWindowsPowerShell(...), 'This machine has the interpreter, so the store should be available.');
+
+it('is available on a machine that has the interpreter', function (): void {
+    // **This is the test that fails when the whole feature silently stops working.** Every
+    // round-trip test below is gated on `available()`, so a mechanism broken anywhere -- a changed
+    // exit code, an environment variable the script no longer receives, a renamed operation --
+    // turns the behavioral half of this file into skips, and a suite of skips reads exactly like a
+    // suite of passes. Without this assertion nothing anywhere says the store should work.
+    expect(new WindowsCredentialStore()->available())->toBeTrue();
+})->skip(fn (): bool => ! hasWindowsPowerShell(), 'No Windows PowerShell on this machine.');
 
 it('takes the credential on stdin and never in an argument', function (): void {
-    // The simplification this guards against is `cmdkey /generic:… /pass:<token>`, which is shorter
-    // than everything in that constant and puts the token where any process on the machine can read
-    // it. If somebody reaches for it, this goes red.
+    // Scoped to the script, which is what is checked: a `cmdkey` call added elsewhere in the class
+    // would not be caught here. The simplification this guards against is
+    // `cmdkey /generic:… /pass:<token>`, shorter than everything in that constant and putting the
+    // token where any process on the machine can read it.
     expect(constantOf('SCRIPT'))->toContain('OpenStandardInput')
         ->and(constantOf('SCRIPT'))->not->toContain('cmdkey');
 });
@@ -101,7 +167,23 @@ it('reads its target from the environment rather than building it into the scrip
     // carrying a quote into arbitrary PowerShell, and an environment variable has no quoting to
     // break out of.
     expect(constantOf('SCRIPT'))->toContain('$env:ROBOT_COUNCIL_TARGET')
-        ->and(constantOf('SCRIPT'))->toContain('$env:ROBOT_COUNCIL_OPERATION');
+        ->and(constantOf('SCRIPT'))->toContain('$env:ROBOT_COUNCIL_OPERATION')
+        ->and(constantOf('SCRIPT'))->toContain('$env:ROBOT_COUNCIL_USERNAME');
+});
+
+it('agrees with its script about which exit code means "no such credential"', function (): void {
+    // `NOT_FOUND` and the script's `exit` literal are coupled by nothing but this test. Change
+    // either alone and `available()` returns false on every machine, every gated test below skips,
+    // and the suite is green.
+    expect(constantOf('SCRIPT'))->toContain(sprintf('exit %d', intConstantOf('NOT_FOUND')));
+});
+
+it('probes a target no service key can ever produce', function (): void {
+    // `available()` reads a target under this prefix and requires "no such credential". If a real
+    // credential could sit there -- which it could, for a service key of `:availability-probe`,
+    // back when the probe target was `TARGET_PREFIX` plus a colon -- then a machine enrolled
+    // against that key would have its own token read as a broken mechanism.
+    expect(constantOf('PROBE_PREFIX'))->not->toStartWith(WindowsCredentialStore::TARGET_PREFIX);
 });
 
 it('carries the service key without parsing it', function (): void {
@@ -110,22 +192,30 @@ it('carries the service key without parsing it', function (): void {
     // Every one of these is a legal key as far as this store is concerned, and each would break
     // something that tried to split, quote, or normalize it.
     foreach ([':leading-colon', 'https://x.test/a b', 'with"quote', "with\nnewline", ''] as $service) {
-        expect($store->target($service))->toBe(WindowsCredentialStore::TARGET_PREFIX.$service);
+        expect($store->target($service))->toStartWith(WindowsCredentialStore::TARGET_PREFIX.$service);
     }
 });
 
-it('probes a target no service key can ever produce', function (): void {
-    // `available()` reads this target and requires "no such credential". If a real credential could
-    // sit there -- which it could, for a service key of `:availability-probe`, back when the probe
-    // target was the prefix plus a colon -- then a machine that had enrolled against that key would
-    // have its own token read as a broken mechanism, and silently fall through to the file store.
-    expect(constantOf('PROBE_TARGET'))->not->toStartWith(WindowsCredentialStore::TARGET_PREFIX);
+it('gives two keys that differ only in case two different targets', function (): void {
+    $store = new WindowsCredentialStore;
+
+    // **Credential Manager matches target names case-insensitively and the key is case-sensitive
+    // everywhere else.** Measured on 2026-09-21: with the bare key as the target, a credential
+    // stored under `…/FleetA|claude` was returned for `…/fleeta|claude`, which was never enrolled,
+    // while a key that genuinely was not stored returned null. `UserFileStore` returns null for
+    // that same pair. Without distinct targets this store alone hands one fleet's bearer token to
+    // another fleet whose URL differs only in case.
+    // **Compared with both sides lowercased, which is the whole point.** Comparing the targets as
+    // written asserts only that PHP string comparison is case-sensitive, which it is whatever this
+    // method does -- that version of this test passed with the digest removed. Credential Manager
+    // matches case-insensitively, so the property that matters is that the targets still differ
+    // once case is taken away.
+    expect(strtolower($store->target('https://x.test/FleetA|claude')))
+        ->not->toBe(strtolower($store->target('https://x.test/fleeta|claude')));
 });
 
 it('names Credential Manager, so a developer can go and look', function (): void {
-    $store = new WindowsCredentialStore;
-
-    expect($store->describe())
+    expect(new WindowsCredentialStore()->describe())
         ->toContain('Credential Manager')
         ->toContain('cmdkey /list');
 });
@@ -140,13 +230,34 @@ it('returns null for a service it holds nothing for', function (): void {
     expect($this->store->get($this->service))->toBeNull();
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
+it('does not answer for a key that differs only in case', function (): void {
+    $mixed = 'https://case-'.bin2hex(random_bytes(4)).'.example.test/FleetA|claude';
+    $lower = strtolower($mixed);
+
+    $this->written[] = $mixed;
+    $this->written[] = $lower;
+
+    $this->store->put($mixed, new Credential(WINDOWS_TOKEN));
+
+    // The regression test for the case-collapse above. Read under the other casing, this returned
+    // the stored token before `target()` appended a case-sensitive digest.
+    expect($this->store->get($mixed)?->reveal())->toBe(WINDOWS_TOKEN)
+        ->and($this->store->get($lower))->toBeNull();
+
+    // And the other direction: writing the lowercased key must not destroy the first.
+    $this->store->put($lower, new Credential('a-different-credential'));
+
+    expect($this->store->get($mixed)?->reveal())->toBe(WINDOWS_TOKEN)
+        ->and($this->store->get($lower)?->reveal())->toBe('a-different-credential');
+})->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
+
 it('keeps two services apart rather than overwriting one with the other', function (): void {
     $this->store->put($this->service, new Credential(WINDOWS_TOKEN));
     $this->store->put($this->other, new Credential('a-different-credential'));
 
     // A machine enrolled against two deployments holds two credentials, matching the other stores.
-    // Keyed on anything but the service, the second enrollment would log the machine out of the
-    // first and say nothing.
+    // Keyed on anything but the key, the second enrollment would log the machine out of the first
+    // and say nothing.
     expect($this->store->get($this->service)?->reveal())->toBe(WINDOWS_TOKEN)
         ->and($this->store->get($this->other)?->reveal())->toBe('a-different-credential');
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
@@ -185,11 +296,11 @@ it('round-trips a credential byte for byte, whatever is in it', function (string
 it('stores a service key that would be an injection if anything parsed it', function (): void {
     $hostile = 'https://x.test"; Start-Process calc.exe; #';
 
+    $this->written[] = $hostile;
+
     $this->store->put($hostile, new Credential(WINDOWS_TOKEN));
 
     expect($this->store->get($hostile)?->reveal())->toBe(WINDOWS_TOKEN);
-
-    $this->store->forget($hostile);
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
 it('refuses a credential longer than Credential Manager accepts, saying so', function (): void {
@@ -204,23 +315,35 @@ it('refuses a credential longer than Credential Manager accepts, saying so', fun
 it('stores a credential exactly at the ceiling', function (): void {
     $token = str_repeat('x', 2560);
 
-    // The other side of the boundary, so the guard is pinned to where the API actually stops rather
-    // than to a round number somebody chose.
+    // The other side of the boundary, so the guard is pinned to where the API actually stops
+    // rather than to a round number somebody chose.
     $this->store->put($this->service, new Credential($token));
 
     expect($this->store->get($this->service)?->reveal())->toBe($token);
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
 it('leaves no script behind in the temporary directory', function (): void {
-    $before = glob(sys_get_temp_dir().'/robot-council-*.ps1') ?: [];
+    $pattern = sys_get_temp_dir().'/'.WindowsCredentialStore::SCRIPT_PREFIX.'*.ps1';
+
+    // **Positive control first.** Two empty sets compare equal, so without showing this glob can
+    // match something the store would have written, "nothing left behind" and "this glob can never
+    // match" are the same result. The prefix comes from the class rather than a copy of the
+    // literal, so renaming it in the store makes this test red instead of vacuous.
+    $planted = sys_get_temp_dir().'/'.WindowsCredentialStore::SCRIPT_PREFIX.bin2hex(random_bytes(8)).'.ps1';
+    touch($planted);
+
+    expect(glob($pattern) ?: [])->toContain($planted);
+
+    unlink($planted);
+
+    $before = glob($pattern) ?: [];
 
     $this->store->put($this->service, new Credential(WINDOWS_TOKEN));
     $this->store->get($this->service);
     $this->store->forget($this->service);
 
-    $after = glob(sys_get_temp_dir().'/robot-council-*.ps1') ?: [];
-
-    // The script holds no credential, so a leak here is untidy rather than dangerous -- but it runs
-    // on every call, and a store that scatters a file per call would fill a temp directory.
-    expect($after)->toBe($before);
+    // The script holds no credential, so a leak here is untidy rather than dangerous -- but it is
+    // written on every call, and a store that scattered a file per call would fill a temp
+    // directory.
+    expect(glob($pattern) ?: [])->toBe($before);
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
