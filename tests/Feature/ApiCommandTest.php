@@ -34,12 +34,25 @@ function enrolled(): RecordingStore
 {
     $store = new RecordingStore;
 
-    $store->put(API_SERVICE, new Credential(INSTALLATION));
+    $store->put(API_SERVICE.'|claude', new Credential(INSTALLATION));
 
     app()->instance(Credentials::class, new Credentials([$store]));
 
     return $store;
 }
+
+beforeEach(function (): void {
+    // **Named rather than detected, in every test in this file.** `laravel/agent-detector` reads
+    // the environment, and this suite runs inside a harness on a developer's machine and inside
+    // none on CI -- measured: `claude` here, `NULL` with the harness variables cleared. A test
+    // left to ambient detection therefore passes on one side and fails on the other, and which
+    // side depends on who runs it.
+    putenv('ROBOT_COUNCIL_HARNESS=claude');
+});
+
+afterEach(function (): void {
+    putenv('ROBOT_COUNCIL_HARNESS');
+});
 
 /**
  * The service, with the call itself answering whatever a test needs.

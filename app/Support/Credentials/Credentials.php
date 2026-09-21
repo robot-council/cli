@@ -60,11 +60,6 @@ final class Credentials
     /**
      * Store one harness's credential for one fleet, replacing whatever that harness had.
      *
-     * **Written under the legacy bare-fleet key as well, for now.** No store can list its keys, so
-     * a reader that does not know which harness to ask for cannot find a composite one -- and
-     * `mcp` and `api` do not know yet, because choosing is `robot-council/cli#24`. Until it lands,
-     * the bare key is what keeps them working exactly as they do today, and this change is
-     * behavior-neutral rather than half a migration. #24 removes this second write.
      *
      * @param  string  $service  The fleet's base URL.
      * @param  string  $harness  The harness being enrolled.
@@ -72,10 +67,7 @@ final class Credentials
      */
     public function put(string $service, string $harness, Credential $credential): void
     {
-        $store = $this->store();
-
-        $store->put(CredentialKey::for($service, $harness), $credential);
-        $store->put(CredentialKey::legacy($service), $credential);
+        $this->store()->put(CredentialKey::for($service, $harness), $credential);
     }
 
     /**
@@ -109,8 +101,12 @@ final class Credentials
      * Claim a legacy credential for one harness, and return it.
      *
      * The one-time act a machine enrolled before `robot-council/cli#23` performs instead of
-     * re-enrolling. The legacy entry is left in place rather than removed, because until #24 lands
-     * it is still what `mcp` and `api` read; #24 removes both it and the second write above.
+     * re-enrolling.
+     *
+     * **The legacy entry is removed once it is claimed**, because a credential belongs to one
+     * installation. Leaving it would let a second harness claim the same one, and two harnesses
+     * presenting one installation's credential is exactly the confusion harness keying exists to
+     * end.
      *
      * @param  string  $service  The fleet's base URL.
      * @param  string  $harness  The harness claiming it.
@@ -124,9 +120,32 @@ final class Credentials
             return null;
         }
 
-        $this->store()->put(CredentialKey::for($service, $harness), $credential);
+        $store = $this->store();
+
+        $store->put(CredentialKey::for($service, $harness), $credential);
+        $store->forget(CredentialKey::legacy($service));
 
         return $credential;
+    }
+
+    /**
+     * Which of the given harnesses have a credential stored for one fleet.
+     *
+     * **Probed one at a time, because no store can list its keys.** That is a subprocess apiece on
+     * a keychain, so this is for a path that is already refusing and never for a hot one.
+     *
+     * @param  string  $service  The fleet's base URL.
+     * @param  list<string>  $harnesses  The harnesses to ask about.
+     * @return list<string> Those that have one, in the order given.
+     */
+    public function storedAmong(string $service, array $harnesses): array
+    {
+        $store = $this->store();
+
+        return array_values(array_filter(
+            $harnesses,
+            static fn (string $harness): bool => $store->get(CredentialKey::for($service, $harness)) instanceof Credential
+        ));
     }
 
     /**
