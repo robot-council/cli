@@ -343,18 +343,49 @@ final class WindowsCredentialStore implements CredentialStore
         }
     }
 
+    /**
+     * The credential for one service, or null when none is stored.
+     *
+     * **Null means "not enrolled", and nothing else.** A helper that exited for any other reason
+     * raises `CredentialStoreFailed` rather than being reported as an empty Credential Manager.
+     * That is a `RuntimeException`, which `ApiCommand` and `McpCommand` already catch around the
+     * credential and render as an error, so no caller needs changing for it.
+     *
+     * @param  string  $service  The credential key.
+     *
+     * @throws CredentialStoreFailed When the mechanism failed, as opposed to holding nothing.
+     */
     public function get(string $service): ?Credential
     {
         [$exitCode, $output] = $this->readThroughPipe($this->target($service));
 
-        // `NOT_FOUND` is the expected answer for a machine that is simply not enrolled; anything
-        // else non-zero is a broken mechanism, and both mean there is no credential to hand back.
-        if ($exitCode !== 0) {
+        // A machine that is simply not enrolled. The only answer that is not a fault.
+        if ($exitCode === self::NOT_FOUND) {
             return null;
+        }
+
+        // **Anything else non-zero is a broken mechanism, and saying so is the whole point of
+        // `NOT_FOUND` existing.** `probe()` already demands exactly that code; collapsing every
+        // other code into null here threw the distinction away at the one place a caller could act
+        // on it. Exit 1 is a refused `Add-Type` or a thrown script, exit 4 is the script's
+        // `default` branch, and neither means "no credential".
+        //
+        // `available()` is memoized for the life of the instance and one instance is resolved per
+        // command run, so the probe answers once, early -- a machine can pass it and then fail
+        // every later call. Reported as "not enrolled", the remedy an operator reaches for is to
+        // enroll again, which asks the service for a *new* credential and stores it through the
+        // same broken mechanism.
+        if ($exitCode !== 0) {
+            throw new CredentialStoreFailed(sprintf(
+                'Windows Credential Manager could not be read (the helper exited %d).',
+                $exitCode,
+            ));
         }
 
         $decoded = base64_decode(trim($output), true);
 
+        // Reached only if the helper exited 0 and wrote something unreadable, which the script has
+        // no path to do. Null rather than a throw, because there is nothing to name.
         if ($decoded === false || $decoded === '') {
             return null;
         }
