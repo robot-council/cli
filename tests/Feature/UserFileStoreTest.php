@@ -13,8 +13,11 @@ declare(strict_types=1);
 
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
+use App\Support\Credentials\CredentialStore;
 use App\Support\Credentials\KeychainStore;
+use App\Support\Credentials\SecretToolStore;
 use App\Support\Credentials\UserFileStore;
+use App\Support\Credentials\WindowsCredentialStore;
 
 const TOKEN = 'rcouncil_1|SuPeRsEcReTvAlUe0123456789abcdef';
 const OTHER = 'https://other.example.test';
@@ -65,13 +68,14 @@ it('writes the file so only its owner can read it', function (): void {
     expect(decoct($mode))->toBe('600');
 })->skip(
     PHP_OS_FAMILY === 'Windows',
-    'chmod only toggles the read-only bit on Windows, so this guarantee does not hold there -- see #7.'
+    'chmod only toggles the read-only bit on Windows, so this guarantee does not hold there.'
 );
 
 it('says plainly that the mode guarantee does not hold on Windows', function (): void {
-    // The skip above would otherwise be the only record that Windows -- the one platform that
-    // ALWAYS uses this store, since `WindowsCredentialStore` reports itself unavailable -- gets no
-    // mode guarantee at all. A skipped test is easy to read as "covered elsewhere". It is not.
+    // The skip above would otherwise be the only record that this store gives Windows no mode
+    // guarantee at all, and a skipped test is easy to read as "covered elsewhere". It is not.
+    // `WindowsCredentialStore` means a Windows machine usually never reaches this store -- but a
+    // machine where Credential Manager cannot be used lands here, with exactly this gap.
     $this->store->put('https://fleet.example.test', new Credential(TOKEN));
 
     expect($this->store->path())->toBeFile()
@@ -137,7 +141,18 @@ it('is the store chosen when nothing else is available', function (): void {
     // It reports itself available unconditionally, which is what makes it the fallback rather than
     // one more thing that can be missing
     expect((new UserFileStore)->available())->toBeTrue()
-        ->and(new Credentials(Credentials::candidates())->store())->toBeInstanceOf(
-            PHP_OS_FAMILY === 'Darwin' ? KeychainStore::class : UserFileStore::class
-        );
+        ->and(new Credentials([new UserFileStore])->store())->toBeInstanceOf(UserFileStore::class);
+});
+
+it('is not the store chosen on a machine whose own credential store works', function (): void {
+    $chosen = new Credentials(Credentials::candidates())->store();
+
+    // Asserted against what THIS machine reports rather than against its operating system name: a
+    // Mac without `/usr/bin/security`, or a Windows machine where Credential Manager cannot be
+    // reached, correctly falls through to the file. Pinning the expectation to `PHP_OS_FAMILY`
+    // instead would make the suite red on exactly the machines the fallback exists for.
+    $expected = collect([new KeychainStore, new SecretToolStore, new WindowsCredentialStore])
+        ->first(fn (CredentialStore $store): bool => $store->available()) ?? new UserFileStore;
+
+    expect($chosen)->toBeInstanceOf($expected::class);
 });
