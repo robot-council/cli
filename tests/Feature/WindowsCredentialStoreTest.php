@@ -25,6 +25,7 @@ declare(strict_types=1);
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\CredentialStoreFailed;
 use App\Support\Credentials\WindowsCredentialStore;
+use Symfony\Component\Process\Process;
 
 const WINDOWS_TOKEN = 'rcouncil_1|SuPeRsEcReTvAlUe0123456789abcdef';
 
@@ -217,6 +218,51 @@ it('names Credential Manager, so a developer can go and look', function (): void
         ->toContain('Credential Manager')
         ->toContain('cmdkey /list');
 });
+
+it('writes nothing to the temporary directory when it reads a credential', function (): void {
+    $decoy = sys_get_temp_dir().'/rc-read-decoy-'.bin2hex(random_bytes(6));
+
+    mkdir($decoy, 0700, true);
+
+    // **Driven in a subprocess, because PHP caches `sys_get_temp_dir()` on first use.** Redirecting
+    // `TMP` inside this process does not move it. A fresh process reads it fresh.
+    $code = <<<'PHP'
+        require $argv[1].'/vendor/autoload.php';
+        foreach (['Credential', 'CredentialStore', 'CredentialStoreFailed', 'WindowsCredentialStore'] as $class) {
+            require $argv[1].'/app/Support/Credentials/'.$class.'.php';
+        }
+        fwrite(STDOUT, sys_get_temp_dir()."\n");
+        (new App\Support\Credentials\WindowsCredentialStore)->get($argv[2]);
+        PHP;
+
+    $child = new Process(
+        [PHP_BINARY, '-r', $code, \dirname(__DIR__, 2), $this->service],
+        timeout: WindowsCredentialStore::TIMEOUT_SECONDS * 2,
+    );
+
+    $child->setEnv(['TMP' => $decoy, 'TEMP' => $decoy]);
+    $child->run();
+
+    try {
+        // Control: the child really did see the decoy as its temporary directory. Without it, an
+        // empty decoy is indistinguishable from a redirect that never took. Separators normalized,
+        // because `sys_get_temp_dir()` returns backslashes and the path was built with a slash.
+        $normalize = static fn (string $path): string => str_replace('\\', '/', $path);
+
+        expect($normalize(trim($child->getOutput())))->toBe($normalize($decoy))
+            ->and($child->getExitCode())->toBe(0);
+
+        // **This assertion discriminates, and a near-identical one elsewhere did not.** A reading
+        // credential store that used `Symfony\…\Process` here would leave `sf_proc_NN.out` and
+        // `.err` in this directory, because on Windows `Process` redirects a child's stdout into a
+        // file rather than a pipe. Reading through a real pipe leaves nothing. Swapping the
+        // mechanism back turns this red.
+        expect(scandir($decoy))->toBe(['.', '..']);
+    } finally {
+        array_map(unlink(...), glob($decoy.'/*') ?: []);
+        rmdir($decoy);
+    }
+})->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
 it('stores a credential and reads it back', function (): void {
     $this->store->put($this->service, new Credential(WINDOWS_TOKEN));
