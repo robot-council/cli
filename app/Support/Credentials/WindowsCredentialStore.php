@@ -16,9 +16,9 @@ use Throwable;
  * argv, where any process running as this user can read it out of
  * `Get-CimInstance Win32_Process`. That is the exposure `KeychainStore` goes to some trouble to
  * avoid on macOS, and Windows offers no stdin equivalent for `cmdkey` -- so `cmdkey` is not used at
- * all. The script below is handed to `powershell.exe` as a file, which carries no secret, and the
- * credential arrives on stdin. `run()` records why the script travels that way rather than as an
- * `-EncodedCommand`.
+ * all. The script below is handed to `powershell.exe` as one inline argument, carrying no secret,
+ * and the credential arrives on stdin. `run()` records why it travels that way rather than as a
+ * file or an `-EncodedCommand`.
  *
  * Measured on Windows 11 Pro 26200 on 2026-09-21, with the same token in both halves and the
  * subject process held open on stdin so the instrument's speed was not a variable:
@@ -95,13 +95,27 @@ final class WindowsCredentialStore implements CredentialStore
     private const string PROBE_PREFIX = 'robot-council-probe:';
 
     /**
-     * What the temporary script is named, before a random suffix and the `.ps1` extension.
+     * The interpreter the credential is piped into, named literally.
      *
-     * A constant rather than a literal in `writeScript()` because the test that checks no script
-     * is left behind globs for it, and two copies of the string would let the store be renamed
-     * while the test kept comparing two empty sets and passing.
+     * Public so a test can assert that a redirected `SystemRoot` does not move it. `powershell()`
+     * explains why nothing about this path comes from the environment.
      */
-    public const string SCRIPT_PREFIX = 'robot-council-';
+    public const string INTERPRETER = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe';
+
+    /**
+     * The longest command line this store may build, in characters.
+     *
+     * **This is a guard against a silent downgrade, not a style rule.** The script travels as one
+     * inline argument, and Symfony wraps every Windows command in `cmd.exe`, whose limit is 8191
+     * -- measured on 2026-09-21 at 8039 passing and 8043 failing. Exceeding it fails with exit 1
+     * and nothing on either stream, which `probe()` reads as "unavailable", which drops the
+     * machine to the plaintext file store without a word.
+     *
+     * The escaped command line currently measures 6524 characters, 81% of this. A test asserts it
+     * stays under, so the script outgrowing the ceiling is a red suite rather than a quiet
+     * fallback.
+     */
+    public const int COMMAND_LINE_CEILING = 8039;
 
     /**
      * The largest blob `CredWriteW` accepts, in bytes.
@@ -382,23 +396,32 @@ final class WindowsCredentialStore implements CredentialStore
     }
 
     /**
-     * Where `powershell.exe` is, built from `SystemRoot` rather than looked up on `PATH`.
+     * Where `powershell.exe` is: a literal path, taking nothing from the environment.
      *
-     * `PATH` is writable by the user and searched in order, so resolving there would let anything
-     * that dropped a `powershell.exe` earlier in it receive the credential on stdin.
-     * `KeychainStore` names `/usr/bin/security` absolutely for the same reason.
+     * **The credential is piped to whatever this returns, so the answer must not be something a
+     * caller can move.** `PATH` was never used, for the reason `KeychainStore` names
+     * `/usr/bin/security` absolutely. `SystemRoot` was, and it is no better: measured on
+     * 2026-09-21, `SystemRoot=C:\evil` makes `getenv('SystemRoot')` return `C:\evil`, so a planted
+     * `C:\evil\System32\WindowsPowerShell\v1.0\powershell.exe` would have received the token on
+     * stdin. `InstallationChoice` documents a harness's MCP configuration as setting variables in
+     * an `env` block for this process, which makes the environment a third-party input rather than
+     * only the user's.
+     *
+     * Writing under `C:\Windows\System32` needs administrator rights, which an actor who can only
+     * set an environment variable does not have -- so a literal path removes the vector rather
+     * than narrowing it.
+     *
+     * **The cost, stated rather than hidden: a Windows installed anywhere else is not supported.**
+     * That machine finds nothing executable here, `available()` returns false, and `UserFileStore`
+     * takes over -- which is exactly where it was before this store existed. A non-default
+     * `%SystemRoot%` is rare enough that reading it back to support them would reintroduce the
+     * vector for everyone else.
      *
      * @return string The absolute path, which may not exist -- `available()` is what checks.
      */
     private function powershell(): string
     {
-        $root = getenv('SystemRoot');
-
-        if (! \is_string($root) || $root === '') {
-            $root = 'C:\Windows';
-        }
-
-        return rtrim($root, '\\/').'\System32\WindowsPowerShell\v1.0\powershell.exe';
+        return self::INTERPRETER;
     }
 
     /**
@@ -420,7 +443,7 @@ final class WindowsCredentialStore implements CredentialStore
 
         // **Nothing in a probe may throw.** The whole point is to answer "can this be used", and
         // the machines it exists to protect are exactly the ones where the asking breaks:
-        // `writeScript()` raises when `TEMP` refuses a `.ps1`, `random_bytes()` can raise, and
+        // `random_bytes()` can raise, the environment block can be refused as too large, and
         // `Process::run()` raises `ProcessTimedOutException` rather than returning an exit code
         // when the bound fires. `Credentials::store()` does not guard this call, and neither
         // `ApiCommand` nor `McpCommand` catches anything but `RuntimeException`, so an escaping
@@ -445,27 +468,31 @@ final class WindowsCredentialStore implements CredentialStore
     /**
      * Run one operation, and hand back the finished process.
      *
-     * **The script travels as a file rather than as `-EncodedCommand`, and that is a measured
-     * ceiling rather than a preference.** Symfony's `Process` ends `prepareWindowsCommandLine()`
-     * by wrapping every Windows command in `cmd.exe /V:ON /E:ON /D /C (…)`, whatever
-     * `bypass_shell` says, so the limit that applies is `cmd.exe`'s 8191 characters and not
-     * `CreateProcess`'s 32767. Measured on 2026-09-21 by bisecting the length: a total command line
-     * of 8039 characters ran, 8043 did not, and the failure is **exit 1 with nothing on either
-     * stream** -- nothing anywhere says the command was too long. The same payloads ran through
-     * `proc_open()` directly and through `powershell.exe` invoked by hand, which is what pins the
-     * ceiling on the wrapper rather than on Windows. This script encodes to about 13,700
-     * characters, so it was never going to fit.
+     * **The script travels as one inline argument, and writes nothing to disk.** It used to go to a
+     * temporary file, which meant the directory came from `TMP` -- measured on 2026-09-21,
+     * setting `TMP` to a directory of the caller's choosing makes `sys_get_temp_dir()` return that
+     * directory -- and left a window
+     * between writing the file and `powershell.exe` opening it. Passing the script inline removes
+     * the file, the directory, and the window together. Nothing is written anywhere, so there is
+     * no longer a path for anyone to redirect.
      *
-     * The file holds no credential. It is written under the user's own temporary directory with a
-     * random name and removed once the call returns, and anything able to tamper with it in between
-     * already runs as this user -- the same boundary every store here operates inside.
+     * `-EncodedCommand` is still not used, and the reason is a measured ceiling. Symfony's
+     * `Process` ends `prepareWindowsCommandLine()` by wrapping every Windows command in
+     * `cmd.exe /V:ON /E:ON /D /C (…)`, whatever `bypass_shell` says, so `cmd.exe`'s 8191
+     * characters apply rather than `CreateProcess`'s 32767 -- bisected at 8039 passing and 8043
+     * failing, with **exit 1 and nothing on either stream**. Base64 of UTF-16 inflates this script
+     * to 15,684 characters; as plain text it escapes to 6,524, which fits. See
+     * `COMMAND_LINE_CEILING` for the guard that keeps it fitting.
      *
-     * `-ExecutionPolicy Bypass` is needed on this path, where an encoded command would not have
-     * needed it: `-File` runs a script, and a script is what execution policy governs. A Group
-     * Policy-enforced policy overrides the flag, and on such a machine `available()` sees the
-     * failure and `UserFileStore` takes over. That case was not reproduced here, since setting a
-     * machine policy needs rights this session did not have, so it is covered by the probe rather
-     * than by a measurement.
+     * **`-ExecutionPolicy Bypass` is gone, and its absence is load-bearing rather than tidy.**
+     * Execution policy governs script *files*, not `-Command`. Measured: under both `Restricted`
+     * and `AllSigned` this invocation ran and returned its verdict, while the same script as a
+     * `-File` was refused with "cannot be loaded". So the inline form works on locked-down
+     * machines where the file form could not, and a flag that reads like a bypass is no longer
+     * being requested.
+     *
+     * The script carries no credential either way -- that arrives on stdin -- so what moves here
+     * is the attack surface around the script, not around the token.
      *
      * @param  string  $operation  The script's operation: `read`, `write`, or `forget`.
      * @param  string  $target  The Credential Manager target to act on.
@@ -492,56 +519,26 @@ final class WindowsCredentialStore implements CredentialStore
         #[SensitiveParameter]
         ?string $input = null,
     ): Process {
-        $script = $this->writeScript();
+        $process = new Process(
+            [$this->powershell(), '-NoProfile', '-NonInteractive', '-Command', self::SCRIPT],
+            timeout: self::TIMEOUT_SECONDS,
+        );
 
-        try {
-            $process = new Process(
-                [$this->powershell(), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script],
-                timeout: self::TIMEOUT_SECONDS,
-            );
+        // Environment rather than argv: these are not secret, but they are caller-controlled, and
+        // an environment variable has no quoting for a service URL to break out of. It also keeps
+        // them clear of the `cmd.exe` wrapper above, which expands `!` on its own.
+        $process->setEnv([
+            'ROBOT_COUNCIL_OPERATION' => $operation,
+            'ROBOT_COUNCIL_TARGET' => $target,
+            'ROBOT_COUNCIL_USERNAME' => $username,
+        ]);
 
-            // Environment rather than argv: these are not secret, but they are caller-controlled,
-            // and an environment variable has no quoting for a service URL to break out of. It also
-            // keeps them clear of the `cmd.exe` wrapper above, which expands `!` on its own.
-            $process->setEnv([
-                'ROBOT_COUNCIL_OPERATION' => $operation,
-                'ROBOT_COUNCIL_TARGET' => $target,
-                'ROBOT_COUNCIL_USERNAME' => $username,
-            ]);
-
-            if ($input !== null) {
-                $process->setInput($input);
-            }
-
-            $process->run();
-
-            return $process;
-        } finally {
-            @unlink($script);
-        }
-    }
-
-    /**
-     * Put the script somewhere `powershell.exe` can open it.
-     *
-     * The name is random rather than derived from anything, so nothing can sit waiting at a path
-     * this is about to write. The `.ps1` extension is not decoration: `-File` refuses a script
-     * without one.
-     *
-     * @return string The path written.
-     *
-     * @throws CredentialStoreFailed When the script could not be written.
-     */
-    private function writeScript(): string
-    {
-        $directory = rtrim(sys_get_temp_dir(), '/'.\DIRECTORY_SEPARATOR);
-
-        $path = sprintf('%s%s%s%s.ps1', $directory, \DIRECTORY_SEPARATOR, self::SCRIPT_PREFIX, bin2hex(random_bytes(16)));
-
-        if (file_put_contents($path, self::SCRIPT) === false) {
-            throw new CredentialStoreFailed(sprintf('Could not write the Credential Manager script to `%s`.', $path));
+        if ($input !== null) {
+            $process->setInput($input);
         }
 
-        return $path;
+        $process->run();
+
+        return $process;
     }
 }
