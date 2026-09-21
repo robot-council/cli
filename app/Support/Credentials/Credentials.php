@@ -142,6 +142,16 @@ final class Credentials
     {
         $store = $this->store();
 
+        // `array_values` is load-bearing for the DECLARED type rather than for this method's one
+        // caller, which does `implode()` and cannot tell the difference. `array_filter` preserves
+        // keys, so dropping it returns `array<int<0, max>, string>` where the signature promises
+        // `list<string>` -- measured: `composer analyse` fails on exactly that, and the suite stays
+        // green. Killing this mutant with a test would duplicate a check another gate already makes
+        // better, so it is annotated instead, which is what the survivor criterion asks for.
+        //
+        // The marker carries no prose on its own line: v5.0.2 captures the rest of that line and
+        // compares it against mutator names, so a trailing explanation silently suppresses nothing.
+        // @pest-mutate-ignore: UnwrapArrayValues
         return array_values(array_filter(
             $harnesses,
             static fn (string $harness): bool => $store->get(CredentialKey::for($service, $harness)) instanceof Credential
