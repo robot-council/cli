@@ -345,15 +345,15 @@ final class WindowsCredentialStore implements CredentialStore
 
     public function get(string $service): ?Credential
     {
-        $read = $this->run('read', $this->target($service));
+        [$exitCode, $output] = $this->readThroughPipe($this->target($service));
 
         // `NOT_FOUND` is the expected answer for a machine that is simply not enrolled; anything
         // else non-zero is a broken mechanism, and both mean there is no credential to hand back.
-        if ($read->getExitCode() !== 0) {
+        if ($exitCode !== 0) {
             return null;
         }
 
-        $decoded = base64_decode(trim($read->getOutput()), true);
+        $decoded = base64_decode(trim($output), true);
 
         if ($decoded === false || $decoded === '') {
             return null;
@@ -399,6 +399,85 @@ final class WindowsCredentialStore implements CredentialStore
     public function target(string $service): string
     {
         return sprintf('%s%s#%s', self::TARGET_PREFIX, $service, substr(hash('sha256', $service), 0, 16));
+    }
+
+    /**
+     * Read one credential with the child's stdout on a real pipe.
+     *
+     * **This is the one call that does not go through `Symfony\Component\Process\Process`, and
+     * the reason is that on Windows `Process` cannot give it a pipe.** `WindowsPipes` redirects
+     * the child's stdout into `sf_proc_NN.out` under `sys_get_temp_dir()` -- its documented
+     * workaround for PHP bug #51800, where reading a large output from a pipe hangs -- and
+     * `getDescriptors()` offers no way out: `Process::getDescriptors()` builds the pipes with
+     * `!$outputDisabled || $hasCallback`, so a callback forces the file on rather than off, and
+     * disabling output makes the answer unreadable. This call returns the credential on stdout, so
+     * with `Process` it would land in a file, in a directory `TMP` selects, that outlives the
+     * process.
+     *
+     * The bug that workaround exists for does not reach this call, and that was measured rather
+     * than assumed. A credential is bounded by `MAX_BLOB_BYTES`, so the largest possible output is
+     * 3,416 base64 characters. Read through a real pipe on 2026-09-21: 64, 3,416, 8,192 and 65,536
+     * characters each came back complete in 222-642ms, with no file created anywhere.
+     *
+     * `put()`, `forget()` and `probe()` stay on `Process`, which keeps its timeout handling where
+     * it can be had. None of them returns a credential on stdout: the one `put()` sends travels on
+     * stdin, which `AbstractPipes` writes to a real pipe on every platform, and `probe()` reads a
+     * target nothing is filed at. `put()` reaches this method anyway, through the `get()` it calls
+     * to read its own write back.
+     *
+     * @param  string  $target  The Credential Manager target to read.
+     * @return array{0: int, 1: string} The exit code and what the child wrote on stdout.
+     */
+    private function readThroughPipe(string $target): array
+    {
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+
+        $handle = @proc_open(
+            $this->arguments(),
+            $descriptors,
+            $pipes,
+            null,
+            [
+                'ROBOT_COUNCIL_OPERATION' => 'read',
+                'ROBOT_COUNCIL_TARGET' => $target,
+                'ROBOT_COUNCIL_USERNAME' => '',
+            ] + $this->inheritedEnvironment(),
+            ['bypass_shell' => true, 'suppress_errors' => true],
+        );
+
+        if (! \is_resource($handle)) {
+            throw new CredentialStoreFailed('Windows Credential Manager could not be reached.');
+        }
+
+        fclose($pipes[0]);
+
+        // Bounded, because nothing else bounds it here: `Process` owned the timeout on every other
+        // call, and a child that never writes would otherwise hold this read open forever.
+        stream_set_timeout($pipes[1], self::TIMEOUT_SECONDS);
+
+        $output = (string) stream_get_contents($pipes[1]);
+
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        return [proc_close($handle), $output];
+    }
+
+    /**
+     * The environment to hand the child, since `proc_open` replaces rather than merges.
+     *
+     * `Process::start()` merges what it is given over `getDefaultEnv()`. Passing an array to
+     * `proc_open` does not: it becomes the child's entire environment. `powershell.exe` needs
+     * `SystemRoot`, `PATH` and `TEMP` to start and to run its compiler, so they are carried
+     * explicitly rather than by luck.
+     *
+     * @return array<string, string> The inherited environment.
+     */
+    private function inheritedEnvironment(): array
+    {
+        // `getenv()` with no argument returns every variable as a string, so this is the whole
+        // inherited environment with nothing to filter.
+        return getenv();
     }
 
     /**
