@@ -123,6 +123,30 @@ Two controls ran beside it, because a health check that answers `Connected` for 
 
 If `robot-council` is not on your `PATH`, give the absolute path to the executable instead — and **quote it if it contains a space**, because the failure is silent. Measured on 2026-09-18 with the path `/Users/…/GitHub Repos/robot-council-cli/robot-council`: unquoted, `claude mcp add` exits 0 and prints `Added stdio MCP server … with command: <the whole path> mcp`, which reads as correct, while what it wrote was `"command": "/Users/…/GitHub"` with `"args": ["Repos/robot-council-cli/robot-council", "mcp"]`. The success message rejoins the split with spaces, so the only place the damage is visible is `~/.claude.json`.
 
+### Cursor
+
+```json
+{
+  "mcpServers": {
+    "robot-council": {
+      "command": "robot-council",
+      "args": ["mcp"],
+      "env": {
+        "ROBOT_COUNCIL_SERVICE": "https://your-fleet.example.com"
+      }
+    }
+  }
+}
+```
+
+**Verified 2026-09-21**, on Cursor 3.7.21 and Windows 11 Pro 25H2 (build 26200.8875), against a live fleet: the block above (without a `type` field) is the shape that launched. Cursor's [MCP docs](https://cursor.com/docs/mcp) put `command`, `args`, and `env` under `mcpServers.<id>` for stdio servers, and name `~/.cursor/mcp.json` (global) and `.cursor/mcp.json` (project) as the config locations. The same page's STDIO field table lists `type: "stdio"` as required while its examples omit it; the run that connected omitted it.
+
+After enroll with `--harness=cursor`, Settings → Tools & MCP showed the server connected. Reloading it there closed the old stdio process and started a new one: the fleet's agents list marked the previous session `gone` and showed a new `active` session for the same machine, harness `cursor`, last seen within seconds. That is the control that matters — the dashboard reading changes with the reload, so the variable reached the process and a session started on the service.
+
+Put the entry in the **global** file when the fleet URL is yours. A project `.cursor/mcp.json` is shared with whoever opens that checkout; this repository does not ship one, because the URL is per deployment rather than part of the CLI source.
+
+If `robot-council` is not on the `PATH` Cursor inherits, point `command` at `php` (absolute path to the binary) and put the absolute path to this repository's `robot-council` script, then `mcp`, in `args`. Measured on the same Windows run: without that, Windows offered "Select an app to open `robot-council`" instead of launching the bridge.
+
 ### Codex
 
 ```toml
