@@ -89,14 +89,12 @@ function requiresCredentialManager(): bool
  */
 function hasWindowsPowerShell(): bool
 {
-    $root = getenv('SystemRoot');
-
-    if (! is_string($root) || $root === '') {
-        $root = 'C:\Windows';
-    }
-
-    return PHP_OS_FAMILY === 'Windows'
-        && is_executable(rtrim($root, '\\/').'\System32\WindowsPowerShell\v1.0\powershell.exe');
+    // **Asks about the path the store actually uses.** This used to rebuild it from `SystemRoot`,
+    // a copy of the code the store deleted -- so on a machine with Windows somewhere other than
+    // `C:\Windows` it answered true while `available()` answered false, and the test that asserts
+    // the store IS available ran and failed. That is the configuration the store documents as
+    // degrading gracefully to `UserFileStore`; a red suite is not graceful.
+    return PHP_OS_FAMILY === 'Windows' && is_executable(WindowsCredentialStore::INTERPRETER);
 }
 
 beforeEach(function (): void {
@@ -303,6 +301,19 @@ it('stores a service key that would be an injection if anything parsed it', func
     expect($this->store->get($hostile)?->reveal())->toBe(WINDOWS_TOKEN);
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
+it('holds the blob ceiling at the size the API actually stops at', function (): void {
+    // **The other two boundary tests cannot catch this one, by construction.** Both derive their
+    // sizes from `MAX_BLOB_BYTES`, which keeps the store and its tests from drifting apart -- and
+    // means lowering the constant to 2000 leaves them green while the store needlessly refuses
+    // credentials Credential Manager would have taken. Surfaced by a mutation run, which reported
+    // the constant as uncovered.
+    //
+    // 2560 is `CRED_MAX_CREDENTIAL_BLOB_SIZE`, measured on 2026-09-21 with the guard bypassed:
+    // 2560 bytes round-tripped through `CredWriteW` and 2561 failed inside it. It is an external
+    // fact rather than a choice, which is why it is written here as a literal.
+    expect(intConstantOf('MAX_BLOB_BYTES'))->toBe(2560);
+});
+
 it('refuses a credential longer than Credential Manager accepts, saying so', function (): void {
     $ceiling = intConstantOf('MAX_BLOB_BYTES');
 
@@ -326,28 +337,55 @@ it('stores a credential exactly at the ceiling', function (): void {
     expect($this->store->get($this->service)?->reveal())->toBe($token);
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
-it('leaves no script behind in the temporary directory', function (): void {
-    $pattern = sys_get_temp_dir().'/'.WindowsCredentialStore::SCRIPT_PREFIX.'*.ps1';
+it('passes the script inline, with no file path and no execution-policy flag', function (): void {
+    $arguments = new WindowsCredentialStore()->arguments();
 
-    // **Positive control first.** Two empty sets compare equal, so without showing this glob can
-    // match something the store would have written, "nothing left behind" and "this glob can never
-    // match" are the same result. The prefix comes from the class rather than a copy of the
-    // literal, so renaming it in the store makes this test red instead of vacuous.
-    $planted = sys_get_temp_dir().'/'.WindowsCredentialStore::SCRIPT_PREFIX.bin2hex(random_bytes(8)).'.ps1';
-    touch($planted);
+    // **This replaced a test that could not fail.** The old one redirected `TMP` in a subprocess,
+    // ran a `get()`, and then looked for a leftover `.ps1`. The implementation it was written to
+    // kill removed its own file in a `finally`, and the child had exited before the glob ran, so
+    // an empty result was what both implementations produced. Asserting on the command instead
+    // does discriminate: restoring the file-based version turns this red.
+    expect($arguments[0])->toBe(WindowsCredentialStore::INTERPRETER)
+        ->and($arguments)->toContain('-Command')
+        ->and($arguments)->not->toContain('-File')
+        ->and($arguments)->not->toContain('-ExecutionPolicy')
+        ->and(end($arguments))->toBe(constantOf('SCRIPT'));
+});
 
-    expect(glob($pattern) ?: [])->toContain($planted);
+it('pipes the credential into a literal interpreter path, whatever `SystemRoot` says', function (): void {
+    $previous = getenv('SystemRoot');
 
-    unlink($planted);
+    putenv('SystemRoot=C:\\rc-planted-windows');
 
-    $before = glob($pattern) ?: [];
+    try {
+        // Control: the redirection is real, so a stable interpreter path below is the store
+        // ignoring the variable rather than the variable failing to move.
+        expect(getenv('SystemRoot'))->toBe('C:\\rc-planted-windows');
 
-    $this->store->put($this->service, new Credential(WINDOWS_TOKEN));
-    $this->store->get($this->service);
-    $this->store->forget($this->service);
+        $resolved = new ReflectionMethod(WindowsCredentialStore::class, 'powershell')
+            ->invoke(new WindowsCredentialStore);
 
-    // The script holds no credential, so a leak here is untidy rather than dangerous -- but it is
-    // written on every call, and a store that scattered a file per call would fill a temp
-    // directory.
-    expect(glob($pattern) ?: [])->toBe($before);
-})->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
+        // The credential is piped to whatever this returns. Built from `SystemRoot`, a planted
+        // `C:\rc-planted-windows\System32\WindowsPowerShell\v1.0\powershell.exe` would have
+        // received it on stdin.
+        expect($resolved)->toBe(WindowsCredentialStore::INTERPRETER)
+            ->and($resolved)->not->toContain('rc-planted-windows');
+    } finally {
+        $previous === false ? putenv('SystemRoot') : putenv('SystemRoot='.$previous);
+    }
+});
+
+it('keeps the script within the environment budget it is allowed', function (): void {
+    // **The resource is the environment block, not the command line.** Symfony rewrites a quoted
+    // argument containing `!LF!` or `""` into an environment variable and leaves `!uid!` in the
+    // command line -- measured on 2026-09-21 by reading `Win32_Process.CommandLine` of a live
+    // call, which was 259 characters with the script nowhere in it. So a command-line length guard
+    // measured a string `proc_open` never receives; this measures what the script really costs.
+    //
+    // Going over the 32767-unit block makes `Process::start()` throw, and on a machine whose own
+    // environment is large the store's share is what tips it over.
+    $arguments = new WindowsCredentialStore()->arguments();
+    $script = end($arguments);
+
+    expect(\strlen($script))->toBeLessThan(WindowsCredentialStore::ENVIRONMENT_BUDGET);
+});
