@@ -13,8 +13,11 @@ declare(strict_types=1);
 
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
+use App\Support\Credentials\CredentialStore;
 use App\Support\Credentials\KeychainStore;
+use App\Support\Credentials\SecretToolStore;
 use App\Support\Credentials\UserFileStore;
+use App\Support\Credentials\WindowsCredentialStore;
 
 const TOKEN = 'rcouncil_1|SuPeRsEcReTvAlUe0123456789abcdef';
 const OTHER = 'https://other.example.test';
@@ -65,13 +68,14 @@ it('writes the file so only its owner can read it', function (): void {
     expect(decoct($mode))->toBe('600');
 })->skip(
     PHP_OS_FAMILY === 'Windows',
-    'chmod only toggles the read-only bit on Windows, so this guarantee does not hold there -- see #7.'
+    'chmod only toggles the read-only bit on Windows, so this guarantee does not hold there.'
 );
 
 it('says plainly that the mode guarantee does not hold on Windows', function (): void {
-    // The skip above would otherwise be the only record that Windows -- the one platform that
-    // ALWAYS uses this store, since `WindowsCredentialStore` reports itself unavailable -- gets no
-    // mode guarantee at all. A skipped test is easy to read as "covered elsewhere". It is not.
+    // The skip above would otherwise be the only record that this store gives Windows no mode
+    // guarantee at all, and a skipped test is easy to read as "covered elsewhere". It is not.
+    // `WindowsCredentialStore` means a Windows machine usually never reaches this store -- but a
+    // machine where Credential Manager cannot be used lands here, with exactly this gap.
     $this->store->put('https://fleet.example.test', new Credential(TOKEN));
 
     expect($this->store->path())->toBeFile()
@@ -133,11 +137,55 @@ it('reads a corrupt file as empty rather than throwing', function (): void {
     expect($this->store->get('https://fleet.example.test')?->reveal())->toBe(TOKEN);
 });
 
-it('is the store chosen when nothing else is available', function (): void {
-    // It reports itself available unconditionally, which is what makes it the fallback rather than
-    // one more thing that can be missing
-    expect((new UserFileStore)->available())->toBeTrue()
-        ->and(new Credentials(Credentials::candidates())->store())->toBeInstanceOf(
-            PHP_OS_FAMILY === 'Darwin' ? KeychainStore::class : UserFileStore::class
-        );
+it('reports itself available unconditionally, which is what makes it the fallback', function (): void {
+    expect((new UserFileStore)->available())->toBeTrue();
+});
+
+it('is the last candidate, behind every store that can be absent', function (): void {
+    // Pinned by class and by ORDER, on every platform. An earlier version of this test recomputed
+    // `store()`'s own rule from the same `available()` calls the production code makes and
+    // compared the two, which can only fail if the test's copy of the list diverges -- on ubuntu
+    // it asserted `UserFileStore === UserFileStore` and would have stayed green with
+    // `WindowsCredentialStore` removed from the candidates entirely.
+    expect(array_map(fn (CredentialStore $store): string => $store::class, Credentials::candidates()))
+        ->toBe([
+            KeychainStore::class,
+            SecretToolStore::class,
+            WindowsCredentialStore::class,
+            UserFileStore::class,
+        ]);
+});
+
+it('is passed over for the first store that reports itself available', function (): void {
+    // Fakes rather than the real candidates, so this asserts `store()`'s rule -- first available
+    // wins -- on every platform instead of asking the machine what it happens to have.
+    $fake = fn (bool $available): CredentialStore => new readonly class($available) implements CredentialStore
+    {
+        public function __construct(private bool $available) {}
+
+        public function available(): bool
+        {
+            return $this->available;
+        }
+
+        public function describe(): string
+        {
+            return 'a fake';
+        }
+
+        public function put(string $service, Credential $credential): void {}
+
+        public function get(string $service): ?Credential
+        {
+            return null;
+        }
+
+        public function forget(string $service): void {}
+    };
+
+    $unavailable = $fake(false);
+    $available = $fake(true);
+
+    expect(new Credentials([$unavailable, $available, new UserFileStore])->store())->toBe($available)
+        ->and(new Credentials([$unavailable, new UserFileStore])->store())->toBeInstanceOf(UserFileStore::class);
 });

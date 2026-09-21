@@ -116,9 +116,10 @@ final class UserFileStore implements CredentialStore
             return rtrim($configured, '/\\').'/'.self::DIRECTORY.'/credentials.json';
         }
 
-        // `HOME` is not set on Windows, and this is the one platform that ALWAYS lands here, since
-        // `WindowsCredentialStore` reports itself unavailable. Without this the path resolved to
-        // `/.config/…` -- the root of the current drive.
+        // `HOME` is not set on Windows. Without this the path resolved to `/.config/…` -- the root
+        // of the current drive. A Windows machine now usually reaches `WindowsCredentialStore`
+        // first, but "usually" is the point: this store is still where a machine lands when
+        // Credential Manager cannot be used, and that machine is the one that needs the path right.
         $home = getenv('HOME');
 
         if (! \is_string($home) || $home === '') {
@@ -159,8 +160,10 @@ final class UserFileStore implements CredentialStore
      * Refuse to leave a credential in a file somebody else can read.
      *
      * Skipped on Windows, where `chmod` only toggles the read-only bit and the mode it reports says
-     * nothing about who may read the file. That is a real gap on the one platform that always uses
-     * this store, and it is why #7 exists.
+     * nothing about who may read the file. `WindowsCredentialStore` is what closed that gap for a
+     * Windows machine, by getting there first -- it did not close it *here*. A Windows machine that
+     * falls through to this store still gets no mode guarantee, so a credential left here is
+     * protected by the profile directory's own permissions and nothing this class checks.
      *
      * @param  string  $path  The file to check.
      *
