@@ -118,7 +118,7 @@ it('never puts the credential on stdout or stderr', function (): void {
     // line below: the same value IS in the store, so a run that stored nothing could not pass this
     // pair by printing nothing.
     expect(Artisan::output())->not->toContain(CREDENTIAL)
-        ->and($store->stored[SERVICE]->reveal())->toBe(CREDENTIAL);
+        ->and($store->stored[SERVICE.'|claude']->reveal())->toBe(CREDENTIAL);
 });
 
 it('writes nothing anywhere inside a repository', function (): void {
@@ -234,7 +234,7 @@ it('allows http only for a loopback address', function (): void {
     // A developer running core locally has no certificate, and cleartext to their own machine
     // carries nothing off the host
     expect(Artisan::call('enroll', ['--service' => 'http://127.0.0.1:8000', '--harness' => 'claude']))->toBe(0)
-        ->and($store->stored)->toHaveKey('http://127.0.0.1:8000');
+        ->and($store->stored)->toHaveKey('http://127.0.0.1:8000|claude');
 });
 
 it('polls while the developer has not decided yet', function (): void {
@@ -242,7 +242,7 @@ it('polls while the developer has not decided yet', function (): void {
     $store = recordingStore();
 
     expect(Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'claude']))->toBe(0)
-        ->and($store->stored)->toHaveKey(SERVICE);
+        ->and($store->stored)->toHaveKey(SERVICE.'|claude');
 
     // `authorization_pending` is the flow working, not a failure, and the interval slept is the one
     // the service asked for rather than a number this command chose

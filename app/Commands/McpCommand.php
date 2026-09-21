@@ -7,6 +7,7 @@ namespace App\Commands;
 use App\Support\Bridge;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
+use App\Support\Credentials\InstallationChoice;
 use App\Support\Session;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
@@ -30,7 +31,8 @@ use Throwable;
 #[Description('Serve the coordination tools over stdio, for a harness to launch')]
 #[Signature('mcp
     {--service= : The service base URL, defaulting to ROBOT_COUNCIL_SERVICE}
-    {--project= : The repository or workspace this session belongs to}')]
+    {--project= : The repository or workspace this session belongs to}
+    {--harness= : Which enrolled harness this process is, when detection cannot tell}')]
 final class McpCommand extends Command
 {
     /**
@@ -50,10 +52,13 @@ final class McpCommand extends Command
             return self::FAILURE;
         }
 
-        $installation = $credentials->store()->get($service);
-
-        if (! $installation instanceof Credential) {
-            $this->diagnostic('This machine is not enrolled against that service. Run `robot-council enroll`.');
+        // One credential per harness per fleet, so this process has to say which harness it is.
+        // It refuses rather than guessing, including when only one is stored -- #21 weighed that
+        // and chose one rule with nothing inferred.
+        try {
+            $installation = new InstallationChoice($credentials)->for($service, $this->stringOption('harness'));
+        } catch (RuntimeException $runtimeException) {
+            $this->diagnostic($runtimeException->getMessage());
 
             return self::FAILURE;
         }

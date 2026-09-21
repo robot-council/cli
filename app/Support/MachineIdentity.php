@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Support;
 
 use Laravel\AgentDetector\AgentDetector;
+use Laravel\AgentDetector\KnownAgent;
 
 /**
  * What this machine calls itself, reduced to what the service will store.
@@ -44,6 +45,26 @@ final class MachineIdentity
         $agent = AgentDetector::detect()->knownAgent();
 
         return $agent?->value;
+    }
+
+    /**
+     * Every harness `laravel/agent-detector` can name, as the service would store them.
+     *
+     * Used to say what a machine has enrolled when it refuses to guess. Read from the enum's
+     * **values**, which are already inside the service's harness charset, never from `label()`,
+     * which returns display text like `Augment CLI`.
+     *
+     * This is a list of what is *knowable*, not of what a developer may use: `--harness=whatever`
+     * is accepted if it fits the charset, so anything reported from this list is a lower bound.
+     *
+     * @return list<string> The harness names.
+     */
+    public static function knownHarnesses(): array
+    {
+        return array_map(
+            static fn (KnownAgent $agent): string => $agent->value,
+            KnownAgent::cases()
+        );
     }
 
     /**

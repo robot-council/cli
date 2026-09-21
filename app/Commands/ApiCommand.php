@@ -6,6 +6,7 @@ namespace App\Commands;
 
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
+use App\Support\Credentials\InstallationChoice;
 use App\Support\Session;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
@@ -31,7 +32,8 @@ use Throwable;
     {path : The path, such as /api/tasks}
     {--service= : The service base URL, defaulting to ROBOT_COUNCIL_SERVICE}
     {--body= : A JSON body, for methods that take one}
-    {--project= : The repository or workspace this call belongs to}')]
+    {--project= : The repository or workspace this call belongs to}
+    {--harness= : Which enrolled harness this process is, when detection cannot tell}')]
 final class ApiCommand extends Command
 {
     /**
@@ -51,10 +53,13 @@ final class ApiCommand extends Command
             return self::FAILURE;
         }
 
-        $installation = $credentials->store()->get($service);
-
-        if (! $installation instanceof Credential) {
-            $this->components->error('This machine is not enrolled against that service. Run `robot-council enroll`.');
+        // One credential per harness per fleet, so this process has to say which harness it is.
+        // It refuses rather than guessing, including when only one is stored -- #21 weighed that
+        // and chose one rule with nothing inferred.
+        try {
+            $installation = new InstallationChoice($credentials)->for($service, $this->stringOption('harness'));
+        } catch (RuntimeException $runtimeException) {
+            $this->components->error($runtimeException->getMessage());
 
             return self::FAILURE;
         }
