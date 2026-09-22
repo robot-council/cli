@@ -97,8 +97,59 @@ class Routing(unittest.TestCase):
                              msg=f"{path} should route by title, not force `new`")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class SecurityRouting(unittest.TestCase):
+    """What reaches the **Security** heading, which is a claim that something was wrong.
+
+    Both of the signals `robot-council/core` uses are unreliable here, and for the same
+    underlying reason: this repository's subject IS credential handling, so "security" marks
+    an area rather than a finding. Measured on `robot-council/cli#78` over all 35 merged
+    subjects on `main` -- nine reached Security, every one of them wrongly.
+    """
+
+    # An area label and domain vocabulary together, and still not a security fix: it is the
+    # feature that introduced the Windows store.
+    AREA = "Store the credential in Windows Credential Manager, without putting it in argv"
+
+    def test_the_security_label_marks_an_area_and_does_not_decide(self):
+        """The label's own description says *security-sensitive work*, and tells reporters to
+        keep exploitable vulnerabilities out of public issues entirely. So it cannot be
+        evidence that a vulnerability was fixed -- one would never be on the issue.
+
+        `Point the README at the transferred issue` routed to Security before this, because
+        the issue it closed sat in a security-sensitive area.
+        """
+        self.assertEqual(g.bucket("s", self.AREA, labels=["security"]), "new")
+        self.assertEqual(g.bucket("s", "Point the README at the transferred issue",
+                                  labels=["security"], paths=["README.md"]), "maint")
+
+    def test_domain_vocabulary_alone_is_not_a_security_claim(self):
+        """`credential`, `secret`, `token` and `password` are what this command line is about.
+
+        Each of these is a feature or a fix that happens to name one.
+        """
+        for title in (self.AREA,
+                      "Bridge MCP over stdio, holding the credential outside the agent",
+                      "Enroll a machine and keep the credential out of every transcript",
+                      "Key the credential store by service and harness",
+                      "Read several credentials in one call, instead of a subprocess apiece"):
+            self.assertNotEqual(g.bucket("s", title), "sec", msg=title)
+
+    def test_the_same_vocabulary_plus_an_escape_word_is_a_security_claim(self):
+        """What separates the two is whether the value got OUT, not which area it sits in."""
+        for title in ("Fix a credential leak in the debug log",
+                      "Stop the token being exposed in the crash report",
+                      "Prevent the secret from being written world-readable",
+                      "Correct a credential disclosed through the error output"):
+            self.assertEqual(g.bucket("s", title), "sec", msg=title)
+
+    def test_unambiguous_terms_still_route_on_their_own(self):
+        """These were never the problem -- none of them fired once across 35 subjects -- and
+        they must keep working without a label, since a real advisory fix may carry none.
+        """
+        for title in ("Fix an SSRF in the API client",
+                      "Sanitize the project label before it reaches the feed",
+                      "Fix an XSS in the enrollment page"):
+            self.assertEqual(g.bucket("s", title), "sec", msg=title)
 
 
 class RemoteParsing(unittest.TestCase):
@@ -163,3 +214,7 @@ class RepoDerivation(unittest.TestCase):
 
     def test_returns_nothing_when_there_is_no_remote_at_all(self):
         self.assertIsNone(g.derive_repo(self.runner({})))
+
+
+if __name__ == "__main__":
+    unittest.main()
