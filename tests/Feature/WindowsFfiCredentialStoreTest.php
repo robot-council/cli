@@ -474,8 +474,17 @@ it('writes nothing to the temporary directory when it reads a credential', funct
         // from a redirect that never took.
         $normalize = static fn (string $path): string => str_replace('\\', '/', $path);
 
-        expect($normalize(trim($subject->getOutput())))->toBe($normalize($decoy))
-            ->and($subject->getExitCode())->toBe(0);
+        expect($normalize(trim($subject->getOutput())))->toBe($normalize($decoy));
+
+        // The child's stderr, not just its code. `robot-council/cli#76` is two CI instances of the
+        // equivalent assertion in `WindowsCredentialStoreTest` reporting only `255` -- PHP's exit
+        // code for an uncaught exception -- while the line naming the fault sat unread. This
+        // subprocess calls `get()` the same way and can die the same way.
+        expect($subject->getExitCode())->toBe(0, sprintf(
+            'the subject child exited %s. Its stderr began: %s',
+            var_export($subject->getExitCode(), true),
+            firstLineOf($subject->getErrorOutput()),
+        ));
 
         // **The positive control that makes the assertion below mean something, and it was missing
         // from the equivalent test on the PowerShell store.** That test asserts an empty directory
@@ -484,8 +493,14 @@ it('writes nothing to the temporary directory when it reads a credential', funct
         // known to spool proves the directory is watched.
         $spooling = $run($control, 'control', $this->service);
 
-        expect($spooling->getExitCode())->toBe(0)
-            ->and(glob($control.'/sf_proc_*') ?: [])->not->toBeEmpty();
+        $spooled = glob($control.'/sf_proc_*') ?: [];
+
+        expect($spooling->getExitCode())->toBe(0, sprintf(
+            'the control child exited %s. Its stderr began: %s',
+            var_export($spooling->getExitCode(), true),
+            firstLineOf($spooling->getErrorOutput()),
+        ))
+            ->and($spooled)->not->toBeEmpty();
 
         // Now the claim: reading through FFI leaves the directory exactly as it found it.
         expect(scandir($decoy))->toBe(['.', '..']);

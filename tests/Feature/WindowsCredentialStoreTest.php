@@ -150,7 +150,34 @@ it('is available on a machine that has the interpreter', function (): void {
     // exit code, an environment variable the script no longer receives, a renamed operation --
     // turns the behavioral half of this file into skips, and a suite of skips reads exactly like a
     // suite of passes. Without this assertion nothing anywhere says the store should work.
-    expect(new WindowsCredentialStore()->available())->toBeTrue();
+    $available = new WindowsCredentialStore()->available();
+
+    // **`available()` answers a bool, so a failure here says only `false is not true`.**
+    // `robot-council/cli#66` is an instance of exactly that, and `robot-council/cli#76` asks
+    // whether the two share a cause -- which cannot be answered while neither reports one. So when
+    // it says no, run the same probe the store runs and report what came back. Nothing is asserted
+    // about this second run: it is evidence for the message, and a probe that disagrees with
+    // `available()` is itself worth seeing.
+    $why = '';
+
+    if (! $available) {
+        $probe = new Process(new WindowsCredentialStore()->arguments(), timeout: WindowsCredentialStore::TIMEOUT_SECONDS);
+        $probe->setEnv([
+            'ROBOT_COUNCIL_OPERATION' => 'read',
+            'ROBOT_COUNCIL_TARGET' => WindowsCredentialTarget::probe(),
+            'ROBOT_COUNCIL_USERNAME' => '',
+        ]);
+        $probe->run();
+
+        $why = sprintf(
+            ' A probe run here exited %s (%d means no such credential, which is what `available()` demands). Its stderr began: %s',
+            var_export($probe->getExitCode(), true),
+            intConstantOf('NOT_FOUND'),
+            firstLineOf($probe->getErrorOutput()),
+        );
+    }
+
+    expect($available)->toBeTrue('Credential Manager should be reachable where the interpreter is.'.$why);
 })->skip(fn (): bool => ! hasWindowsPowerShell(), 'No Windows PowerShell on this machine.');
 
 it('takes the credential on stdin and never in an argument', function (): void {
@@ -312,8 +339,22 @@ it('writes nothing to the temporary directory when it reads a credential', funct
         // because `sys_get_temp_dir()` returns backslashes and the path was built with a slash.
         $normalize = static fn (string $path): string => str_replace('\\', '/', $path);
 
-        expect($normalize(trim($child->getOutput())))->toBe($normalize($decoy))
-            ->and($child->getExitCode())->toBe(0);
+        expect($normalize(trim($child->getOutput())))->toBe($normalize($decoy));
+
+        // **The exit code alone does not say why, and this test has failed twice on CI saying only
+        // `255`.** `robot-council/cli#76`. The child calls `get()` without a `try`, and since
+        // `robot-council/cli#39` that method *throws* when the mechanism fails -- so 255 is PHP's
+        // exit code for an uncaught exception, and the message naming the fault went to the
+        // child's stderr, which this assertion used to discard.
+        //
+        // The first line is what carries the cause: PHP puts `Uncaught <class>: <message>` there,
+        // and the frames that follow add nothing an instance needs. It cannot hold a credential --
+        // the value travels on stdout, and `get()`'s argument is the service key.
+        expect($child->getExitCode())->toBe(0, sprintf(
+            'the child exited %s. Its stderr began: %s',
+            var_export($child->getExitCode(), true),
+            firstLineOf($child->getErrorOutput()),
+        ));
 
         // **This assertion discriminates, and a near-identical one elsewhere did not.** A reading
         // credential store that used `Symfony\…\Process` here would leave `sf_proc_NN.out` and
