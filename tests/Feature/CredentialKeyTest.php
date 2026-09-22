@@ -21,6 +21,7 @@ use App\Support\Credentials\Credentials;
 use App\Support\Credentials\CredentialStore;
 use App\Support\Credentials\CredentialStoreFailed;
 use App\Support\Credentials\UserFileStore;
+use Tests\Fixtures\StoreBreakingAfterTheClaim;
 
 const KEYED_FLEET = 'https://fleet.example.test';
 const KEYED_CLAUDE_TOKEN = 'rcouncil_1|CLAUDE-TOKEN-0123456789abcdef';
@@ -261,4 +262,65 @@ it('leaves every store ignorant of the key it is handed', function (): void {
 
     expect((string) file_get_contents(__DIR__.'/../../app/Support/Credentials/Credentials.php'))
         ->toContain('CredentialKey');
+});
+
+it('names both facts when it cannot check whether the leftover is gone', function (): void {
+    // **The branch where the claim succeeded and the cleanup could not be verified.** Mutation
+    // reported three uncovered mutants on its message and no test executed the line (#104), which
+    // is the worst place for that: the message only appears when something has already gone wrong,
+    // and it carries the two facts that decide what a person does next.
+    //
+    // Distinct from the test above, which covers the read-back SUCCEEDING and finding the leftover
+    // still there. This is the read-back that cannot answer at all.
+    $store = new StoreBreakingAfterTheClaim;
+
+    $store->put(CredentialKey::legacy(KEYED_FLEET), new Credential(KEYED_CLAUDE_TOKEN));
+
+    try {
+        new Credentials([$store])->adopt(KEYED_FLEET, 'claude');
+
+        $thrown = null;
+    } catch (CredentialStoreFailed $credentialStoreFailed) {
+        $thrown = $credentialStoreFailed;
+    }
+
+    // Asserted first, so a guard that stops raising fails as "expected null not to be null" rather
+    // than as `toContain()` on a null.
+    expect($thrown)->not->toBeNull();
+
+    $message = $thrown?->getMessage() ?? '';
+
+    expect($message)
+        // Fact one: the credential IS claimed, so the remedy is not to enroll again.
+        ->toContain('was claimed for `claude`')
+        // Fact two: the leftover's state is unknown, and a person has to settle it by hand before
+        // a second harness can claim the same credential.
+        ->toContain('could not be checked')
+        ->toContain('Check a store that stops answering mid-claim by hand')
+        // The underlying cause travels with it. Without this the operator is told something went
+        // wrong and never what.
+        ->toContain('the keychain is locked')
+        // **Not the other branch's wording.** The two messages are similar enough that a test
+        // asserting only the shared half would pass against either.
+        ->not->toContain('could not be removed');
+
+    // Chained, so the original is still reachable rather than flattened into a string.
+    expect($thrown?->getPrevious())->toBeInstanceOf(CredentialStoreFailed::class);
+
+    // The claim is kept rather than rolled back: undoing it would leave the machine with nothing
+    // while a leftover it could not remove may still be there.
+    expect($store->entries[CredentialKey::for(KEYED_FLEET, 'claude')] ?? null)->toBe(KEYED_CLAUDE_TOKEN);
+});
+
+it('claims cleanly against the same fake when the read-back does answer', function (): void {
+    // The control, differing from the test above in one constructor argument. Without it, an
+    // `adopt()` that raised unconditionally would satisfy the refusal above and be broken.
+    $store = new StoreBreakingAfterTheClaim(breaks: false);
+
+    $store->put(CredentialKey::legacy(KEYED_FLEET), new Credential(KEYED_CLAUDE_TOKEN));
+
+    expect(new Credentials([$store])->adopt(KEYED_FLEET, 'claude')?->reveal())->toBe(KEYED_CLAUDE_TOKEN)
+        // It really did read twice, so the difference in outcome is the raise and not a path that
+        // never reached the read-back.
+        ->and($store->reads)->toBe(2);
 });
