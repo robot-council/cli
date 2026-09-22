@@ -22,10 +22,28 @@ Two further costs: `U+FE0F` is **invisible** and survives a naive strip of the g
    ```bash
    python3 - path/to/draft.md <<'PY'
    import io, sys
+
    def bad(c):
-       o = ord(c)
-       return (0x1F000 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF
-               or 0x2B00 <= o <= 0x2BFF or o == 0xFE0F)
+       # Invisible, and it survives a naive strip of the glyph it modifies.
+       if ord(c) == 0xFE0F:
+           return True
+       # The rule's own reason, asked directly: a character cp1252 cannot encode is one that
+       # breaks a Windows console. No interval list to go stale.
+       try:
+           c.encode('cp1252')
+           return False
+       except UnicodeEncodeError:
+           return True
+
+   # The control, in the same invocation, so a broken predicate cannot report a clean draft.
+   must = ['\u2713', '\u2A2F', '\u26A0', '\u274C', '\uFE0F', '\U0001F916']
+   mustnt = ['e', '-', '\u2014', '\u2019', '\u00E9', '\u2026', '\u2022']
+   missed = ['U+%04X' % ord(c) for c in must if not bad(c)]
+   wrong = ['U+%04X' % ord(c) for c in mustnt if bad(c)]
+   if missed or wrong:
+       print('CONTROL FAILED  missed:', missed, ' false positives:', wrong)
+       sys.exit(2)
+
    for n, line in enumerate(io.open(sys.argv[1], encoding='utf-8'), 1):
        hits = {c for c in line if bad(c)}
        if hits:
@@ -33,7 +51,11 @@ Two further costs: `U+FE0F` is **invisible** and survives a naive strip of the g
    PY
    ```
 
-   **It prints code points, never the characters, and that is load-bearing.** A version that printed the matched line crashed on the finding it was reporting. This one, run with `PYTHONIOENCODING=cp1252` over a fixture carrying `U+274C`, `U+26A0 U+FE0F`, and `U+2713` (Python 3.9.6, macOS), reports all three lines and exits 0. `U+FE0F` is in the list deliberately.
+   **It prints code points, never the characters, and that is load-bearing.** A version that printed the matched line crashed on the finding it was reporting. `U+FE0F` is handled first and deliberately.
+
+   **It asks the question the rule is about, rather than a proxy for it.** An earlier version listed intervals -- `0x2600-0x27BF`, `0x2B00-0x2BFF` -- and **could not see `U+2A2F`**, which falls in the gap between them and is what Pest prints for a **failing** test. That is the character most likely to be pasted, because quoting a failing run is what a person does when something is wrong. A hand-maintained list of ranges has exactly that failure mode and will have it again; asking cp1252 whether it can encode the character cannot.
+
+   **The control runs before the scan and exits 2 if it fails**, so a predicate that stopped working reports that rather than reporting a clean draft. Its second half matters as much as the first: `-`, an em dash, a curly apostrophe, an ellipsis, a bullet and `e-acute` are all over this repository's prose and all live in cp1252, so a check that flagged them would be abandoned within a day.
 
    **Validate the harness, not only the expression.** A correct pattern that never meets its input is as blind as no check, and the passing control is what makes it feel covered:
    - **Decode the input.** `perl -ne 'print if /[\x{2600}-\x{27BF}]/'` finds nothing in a UTF-8 file, because without `-CSD` perl reads the bytes separately; with `-CSD` it finds them (perl 5.34, macOS).
@@ -45,7 +67,7 @@ Two further costs: `U+FE0F` is **invisible** and survives a naive strip of the g
 ## Two settled conventions
 
 - **The release breaking-change callout is words:** `**Breaking change** — <impact and required action>`, as [`writing-release-notes`](../skills/writing-release-notes/SKILL.md) and its generator emit it. No glyph and no exception for generated output — a generator writing to a redirected stdout is the case the breakage argument covers most directly.
-- **A PR verification list does not use `U+2713`.** Mark a checked item with a `[x]` task-list box or the word `verified`. A check mark is a text symbol rather than a colored emoji, which is why it reads as exempt, but it is absent from `cp1252` and breaks tooling exactly as the warning glyph does.
+- **A PR verification list does not use `U+2713`, and quoted test output does not carry `U+2A2F`.** Mark a checked item with a `[x]` task-list box or the word `verified`. Neither is a colored emoji, which is why both read as exempt, and both are absent from `cp1252` and break tooling exactly as the warning glyph does. They arrive together, from the same tool: Pest prints `U+2713` for a passing test and `U+2A2F` for a failing one, so a pasted run carries whichever half is being talked about. Transcribe them as words -- `PASSED`, `FAILED`, `SKIPPED` -- which is what the quotation was for anyway, since the reader cannot act on a glyph their font drops.
 
 ## What this does not cover
 
