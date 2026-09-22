@@ -32,26 +32,42 @@ Security heading**, which `robot-council/cli#78` changed for a reason that does 
 
 ## Versioning — what the number promises
 
-**Nothing resolves these tags as a Composer constraint today.** This repository is a Laravel Zero
-application installed as a command, not a library an application requires. `composer.json` declares
-`"type": "project"`, it is not published on Packagist, and the install the README documents and has
-verified is:
+**These tags are resolved as a Composer constraint.** Published to Packagist on 2026-09-22,
+decided on `robot-council/cli#75`, with `composer.json` declaring `"type": "library"` to match
+`statamic/cli` and `laravel/installer`. The install the README documents and has verified is:
 
 ```bash
-composer global config repositories.robot-council vcs https://github.com/robot-council/cli.git
-composer global require robot-council/cli:dev-main
+composer global require robot-council/cli
 ```
 
-That pins a **branch**. So a tag's consumers are the GitHub Release and `CHANGELOG.md` — people
-reading what shipped — rather than a resolver. Decided on `robot-council/cli#69`; whether to publish
-to Packagist, and the `"type"` question that comes with it, is its own ticket.
+Measured the day it was published, into a throwaway `COMPOSER_HOME`: that line prints
+`Using version ^0.2.0 for robot-council/cli` and installs the tag. So a tag now has a **resolver**
+as well as a reader, and what it promises is no longer a courtesy. This section said the opposite
+until `#75`; the history is in `robot-council/cli#69`, which decided the question while nothing
+resolved a caret.
 
-**Tag semantically anyway, and keep the 0.x rule.** Use `MAJOR.MINOR.PATCH`, and below 1.0 let a
-breaking change bump the **minor**, because that is how Composer's caret would read it if this were
-ever published: `^0.3` means `>=0.3.0 <0.4.0`, while `^1.2` means `>=1.2.0 <2.0.0`. Holding to it
-now costs nothing while nothing resolves a caret, and it means no tag ever broke a promise it had
-not yet made. From `1.0.0` on, a breaking change bumps the **major**. When to cut a release, and
-when `1.0.0` happens, are not decided here.
+**Tag semantically, and keep the 0.x rule.** Use `MAJOR.MINOR.PATCH`, and below 1.0 let a breaking
+change bump the **minor**, because that is how Composer's caret reads it: `^0.3` means
+`>=0.3.0 <0.4.0`, while `^1.2` means `>=1.2.0 <2.0.0`. From `1.0.0` on, a breaking change bumps the
+**major**. When to cut a release, and when `1.0.0` happens, are not decided here.
+
+**A GitHub pre-release flag does not make Composer treat a version as unstable**, and reaching for
+it when you meant a resolver to skip a version is the trap. The flag is GitHub metadata: it drives
+the `Latest` badge and the release page, and Packagist never sees it. Composer reads stability from
+the **version string** alone. Measured on `v0.2.0`, which is flagged `prerelease=true` on GitHub and
+which Packagist serves as `version_normalized=0.2.0.0` — a stable version, installed by a default
+`composer global require` with no warning and no `minimum-stability` change.
+
+So the two mechanisms have different audiences, and both are legitimate:
+
+| to tell | use |
+| --- | --- |
+| a person reading the releases page that a version is provisional | the GitHub `prerelease` flag |
+| a **resolver** to skip a version | a tag suffix — `v0.3.0-beta.1`, normalizing to `0.3.0.0-beta1` |
+
+A suffixed tag is resolved only by a caller whose `minimum-stability` admits it. `robot-council/cli#101`
+and `robot-council/core#154` record this, including why the releases already flagged this way are
+better accepted than re-tagged: Packagist has served them, and a consumer may have resolved them.
 
 **Breaking, for a command, is a change to what somebody types or parses**: a command or flag removed
 or renamed, output another program reads changed, a config key moved, or an enrolled machine having
@@ -178,7 +194,7 @@ Don't hand-assemble the buckets — run the bundled generator. It reads first-pa
 for a ref range, pulls each PR's title **live from the GitHub API** (`gh`), and applies every
 rule above: prefix/`[skip ci]`/merge-hint stripping, acronym casing of a direct commit's subject
 (never of a PR title, which is used as written, and never of a dotted name, a path, or a code
-span), the routing cascade, `&`→and with the Oxford comma, `[#N]` PR links, and
+span), the routing cascade, `&` rewritten to `and` with the Oxford comma, `[#N]` PR links, and
 backticked-short-SHA links for direct commits. It skips changelog pull requests titled
 `Update CHANGELOG for vX.Y.Z`. It depends only on `git`, `gh`, and Python 3 (3.9 or later) — no
 other setup. Its title cleanup and routing are tested offline by

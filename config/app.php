@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Providers\AppServiceProvider;
 use App\Providers\CredentialsServiceProvider;
+use App\Support\Version;
 
 return [
 
@@ -31,7 +32,7 @@ return [
     |
     */
 
-    'version' => app('git.version'),
+    'version' => Version::current(),
 
     /*
     |--------------------------------------------------------------------------

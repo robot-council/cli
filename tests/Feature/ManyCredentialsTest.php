@@ -21,6 +21,7 @@ use App\Support\Credentials\Credential;
 use App\Support\Credentials\CredentialKey;
 use App\Support\Credentials\Credentials;
 use Tests\Fixtures\BatchingProbeStore;
+use Tests\Fixtures\PositionalBatchingStore;
 use Tests\Fixtures\ProbeStore;
 use Tests\Fixtures\TargetKeyedBatchingStore;
 
@@ -115,6 +116,32 @@ it('finds nothing through the looping default, and is shown to have asked', func
             CredentialKey::for(MANY_FLEET, 'claude'),
             CredentialKey::for(MANY_FLEET, 'codex'),
         ]);
+});
+
+it('is misled by a batch that pairs answers to keys by position, and the harnesses come back wrong', function (): void {
+    // **The failure the contract's positional clause exists to prevent, characterized.**
+    // `codex` holds nothing, so a batch that answers with what it found and pairs by index files
+    // `cursor`'s credential under `codex`. The result is not empty, it is confidently wrong: one
+    // harness reported enrolled when it is not, and one reported absent when it is.
+    //
+    // Neither other fixture can produce this. Both build their map keyed by the key they are
+    // answering for, so no omission can shift them.
+    $harnesses = ['claude', 'codex', 'cursor'];
+
+    $positional = new PositionalBatchingStore;
+    $correct = new PositionalBatchingStore(positional: false);
+
+    foreach ([$positional, $correct] as $store) {
+        $store->put(CredentialKey::for(MANY_FLEET, 'claude'), new Credential('token-claude'));
+        $store->put(CredentialKey::for(MANY_FLEET, 'cursor'), new Credential('token-cursor'));
+    }
+
+    expect(new Credentials([$positional])->storedAmong(MANY_FLEET, $harnesses))
+        // `cursor` is enrolled and is not listed; `codex` is not enrolled and is.
+        ->toBe(['claude', 'codex'])
+        ->and($positional->batches)->toHaveCount(1)
+        // The control: the same fixture, the same credentials, one flag apart.
+        ->and(new Credentials([$correct])->storedAmong(MANY_FLEET, $harnesses))->toBe(['claude', 'cursor']);
 });
 
 it('answers in the order asked for, whatever order the store replies in', function (): void {
