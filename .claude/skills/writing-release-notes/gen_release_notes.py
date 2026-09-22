@@ -141,9 +141,37 @@ def clean_title(t, recase=True):
 
 # ---- routing (which bucket) ---------------------------------------------
 
+# Terms that mean a security problem wherever they appear. None of these is ordinary
+# vocabulary for a command line, so a title carrying one is making a security claim.
 SEC = re.compile(
-    r"\b(xss|ssrf|csp|hsts|xxe|redos|egress|nonce|secret|credentials?|"
+    r"\b(xss|ssrf|csp|hsts|xxe|redos|egress|nonce|"
     r"impersonat\w*|sanitiz\w*|clickjack\w*)\b", re.I)
+
+# **`secret`, `credential`, `token` and `password` are this repository's SUBJECT, not a
+# signal.** `robot-council/core` carries them in `SEC` and is right to: there they are
+# unusual enough that a title using one is probably reporting a vulnerability. Here the
+# product is a credential store, so they appear in the title of ordinary feature work.
+#
+# Measured on `robot-council/cli#78` across all 35 merged subjects on `main`, routed with no
+# paths and no labels: `credential` alone fired 8 times and `secret` once, and the nine
+# included `Bridge MCP over stdio, holding the credential outside the agent (#10)` -- the
+# headline feature of `v0.1.0` -- plus enrollment, the Windows credential store, and the
+# per-harness keying. None of the unambiguous terms above fired even once. So this is the
+# whole of the defect, and splitting the tiers is the whole of the fix.
+#
+# A **Security** heading claims something was wrong and is now fixed. Nine such claims in a
+# release that had at most one real one does not merely mislabel bullets: it buries the
+# genuine fix among eight that are not, which is the direction that costs a reader something.
+SEC_AMBIGUOUS = re.compile(r"\b(secrets?|credentials?|tokens?|passwords?)\b", re.I)
+
+# What turns one of those into a security claim: a word about the value ESCAPING, rather
+# than about storing, choosing or reading it. Deliberately not `argv`, `transcript` or
+# `plaintext`-adjacent phrasing about where a credential is *kept*, because keeping one out
+# of argv is what several of this repository's features are FOR -- `Store the credential in
+# Windows Credential Manager, without putting it in argv (#35)` is a feature, not a fix.
+SEC_EXPOSURE = re.compile(
+    r"\b(leak\w*|expos\w*|disclos\w*|exfiltrat\w*|world-readable|hard-?coded)\b"
+    r"|\bin the clear\b|\bplain ?text\b", re.I)
 
 # A Conventional-Commit prefix is STRIPPED, never routed on. The title conventions in
 # `writing-pull-requests` forbid these outright, so a prefix here is legacy litter -- and
@@ -155,7 +183,28 @@ CC_PREFIX = re.compile(
 # `development` is deliberately absent: it is the default for all code work and spans every
 # bucket, so it discriminates nothing.
 LABEL_MAINT = {"build", "documentation"}
-LABEL_SEC = {"security"}
+
+# **Empty, and `security` is deliberately not in it.** `robot-council/core` keys the Security
+# heading on that label. Here the label's own description is
+#
+#     Security-sensitive work; report exploitable vulnerabilities privately, not in a public issue
+#
+# which marks an AREA, not a severity -- and its second clause means an exploitable
+# vulnerability is never on a public issue to carry the label in the first place. It goes to a
+# draft advisory, per `CLAUDE.md`. So the label cannot be evidence that something was fixed.
+#
+# Measured on `robot-council/cli#78`, routing all 35 merged subjects on `main` with the labels
+# their closing issues actually carry: **9 routed to Security, every one of them by this
+# label**, including `Bridge MCP over stdio, holding the credential outside the agent (#10)`,
+# `Enroll a machine and keep the credential out of every transcript (#8)`, and
+# `Point the README at the transferred issue (#2)` -- a README link change, routed to Security
+# because the issue it closed was filed under a security-sensitive area.
+#
+# Security now comes from the vocabulary below, which asks whether a value ESCAPED rather than
+# which area the work sat in. If a label should ever decide this again it has to be a new one
+# meaning "this fixed a vulnerability", which is a different fact from the one `security`
+# records.
+LABEL_SEC: set[str] = set()
 
 # A change confined to these is tooling or prose whatever its title says. Top-level
 # dotfiles (`.editorconfig`, `.gitattributes`, `.gitignore`) count too; see _is_maint.
@@ -216,12 +265,15 @@ def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0):
     combo = strip_cc_prefix(subject) + " || " + t
     low = combo.lower()
 
-    # 1. Security, by label or vocabulary.
+    # 1. Security, by label or vocabulary. The label is authoritative and always was; what
+    #    changed on #78 is that this repository's own subject vocabulary now needs a second
+    #    word saying the value ESCAPED before it counts as a security claim on its own.
     if labels & LABEL_SEC:
         return "sec"
     if (SEC.search(combo) or "ssl verif" in low or "security header" in low or "x-powered-by" in low
             or "password protection" in low or "internal-network" in low or "internal network" in low
-            or (("escap" in low) and re.search(r"script|json-ld|xss|html", low))):
+            or (("escap" in low) and re.search(r"script|json-ld|xss|html", low))
+            or (SEC_AMBIGUOUS.search(combo) and SEC_EXPOSURE.search(combo))):
         return "sec"
 
     # 2. A category-bearing label on the linked issue. Pull requests usually carry no labels

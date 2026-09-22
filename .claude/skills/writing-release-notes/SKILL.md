@@ -27,7 +27,8 @@ described that package throughout. What is still shared with it is shared becaus
 be — the title shape, the closed heading vocabulary, the bullet and link format, the prose rules,
 and the cascade's *structure* are deliberately the same, so a reader moving between the two
 repositories is reading one convention. What differs is marked where it differs: the versioning
-section below, the bucket definitions, and the paths the cascade routes on.
+section below, the bucket definitions, the paths the cascade routes on, and **what reaches the
+Security heading**, which `robot-council/cli#78` changed for a reason that does not apply there.
 
 ## Versioning — what the number promises
 
@@ -86,10 +87,25 @@ The title is not cosmetic: it is also the version heading of the release's `CHAN
    - `## What's fixed` — bug fixes, regressions, correctness and performance fixes.
    - `## Security` — vulnerability fixes and hardening. Here that is mostly the credential: keeping
      it out of argv, out of stdout and a log, out of an exception trace, and out of a file anything
-     else can read. The generator's keyword list is deliberately still `robot-council/core`'s, and
-     already carries `secret` and `credentials`; the web terms in it (SSRF, injection) stay because
-     this command has an API client. **A `security` label on the closing issue routes it whatever
-     the title says**, which is the mechanism to rely on.
+     else can read.
+
+     **Neither of the two signals `robot-council/core` routes on works here, and `robot-council/cli#78`
+     changed both.** Measured over all 35 merged subjects on `main`, with the labels their closing
+     issues actually carry: **nine reached this heading and none belonged.** They included the bridge,
+     enrollment, the Windows credential store, and `Point the README at the transferred issue`.
+
+     - **The `security` label marks an area, not a finding**, and no longer decides. Its own
+       description is *"Security-sensitive work; report exploitable vulnerabilities privately, not in
+       a public issue"* — so an exploitable vulnerability is never on a public issue to carry it.
+       That goes to a draft advisory, per `CLAUDE.md`.
+     - **`secret`, `credential`, `token` and `password` no longer route on their own.** In `core` they
+       are unusual enough to be a signal; here they are the product. They now need a second word
+       saying the value **escaped** — `leak`, `exposed`, `disclosed`, `world-readable`, `in the clear`.
+       The unambiguous web terms (SSRF, XSS, sanitize) still route alone, and never once misfired.
+
+     Write the title so it says what got out, and it will route itself. **Nothing routes a change here
+     automatically any more**, so if a release fixes something exploitable, put it under this heading
+     deliberately and check the generator agreed.
    - `## Maintenance and tooling` — docs, CI, tests, refactors, dependency bumps, chores, and
      developer-experience / skills work.
 4. **Footer** — retroactively-tagged releases only: `_Retroactively tagged at \`<sha>\` (<date>)._`
