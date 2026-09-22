@@ -54,8 +54,12 @@ final class WindowsCredentialStore implements CredentialStore
     /**
      * The prefix every credential is filed under, so the targets this store owns are greppable in
      * `cmdkey /list` and cannot collide with anything else on the machine.
+     *
+     * **Held on `WindowsCredentialTarget` and referenced here**, so this store and
+     * `WindowsFfiCredentialStore` cannot drift to different prefixes. The name stays because it is
+     * what callers and tests already say.
      */
-    public const string TARGET_PREFIX = 'robot-council:';
+    public const string TARGET_PREFIX = WindowsCredentialTarget::PREFIX;
 
     /**
      * How long any one `powershell.exe` call may take.
@@ -77,23 +81,6 @@ final class WindowsCredentialStore implements CredentialStore
      * mechanism that never reached `CredReadW` cannot produce.
      */
     private const int NOT_FOUND = 3;
-
-    /**
-     * The prefix `available()` probes under, completed with fresh randomness on every probe.
-     *
-     * **It deliberately does not begin with `TARGET_PREFIX`.** A service key is an opaque string
-     * that nothing here parses, so every target `target()` can produce is `TARGET_PREFIX` followed
-     * by *anything* -- including a leading colon. A probe target sharing that prefix could
-     * therefore be occupied by a real credential, and `available()` would read someone's stored
-     * token as a broken mechanism.
-     *
-     * **The random suffix closes a second hole.** `probe()` requires "no such credential", so a
-     * fixed target is something anything running as this user could occupy -- one
-     * `cmdkey /generic:<the fixed target>` and `available()` reports false forever, silently
-     * downgrading the machine to `UserFileStore`, which on Windows checks no permissions at all.
-     * A target nobody can predict cannot be squatted.
-     */
-    private const string PROBE_PREFIX = 'robot-council-probe:';
 
     /**
      * The interpreter the credential is piped into, named literally.
@@ -127,10 +114,11 @@ final class WindowsCredentialStore implements CredentialStore
     /**
      * The largest blob `CredWriteW` accepts, in bytes.
      *
-     * `CRED_MAX_CREDENTIAL_BLOB_SIZE`. Checked here so that an over-long credential fails saying
-     * so, rather than through a read-back that only reports the value did not land.
+     * `CRED_MAX_CREDENTIAL_BLOB_SIZE`, held on `WindowsCredentialTarget` so both Windows stores
+     * refuse at the same size. Checked here so that an over-long credential fails saying so, rather
+     * than through a read-back that only reports the value did not land.
      */
-    private const int MAX_BLOB_BYTES = 2560;
+    private const int MAX_BLOB_BYTES = WindowsCredentialTarget::MAX_BLOB_BYTES;
 
     /**
      * The PowerShell that does the work, held in `advapi32.dll` rather than in any CLI.
@@ -415,33 +403,18 @@ final class WindowsCredentialStore implements CredentialStore
     /**
      * The Credential Manager target a key is filed under.
      *
-     * Keyed on the key so a machine enrolled against two deployments holds two credentials,
-     * matching the other stores.
-     *
-     * **The digest is not decoration: Credential Manager matches target names case-insensitively,
-     * and the key is case-sensitive everywhere else.** Measured on 2026-09-21 against
-     * `advapi32.dll`, with a key stored under one casing and read back under another:
-     *
-     * ```
-     * put('https://example.test/FleetA|claude')
-     *   get('https://example.test/FleetA|claude') -> 'TOKEN-FOR-MIXED-CASE'
-     *   get('https://example.test/fleeta|claude') -> 'TOKEN-FOR-MIXED-CASE'   <- never enrolled
-     *   get('https://example.test/NothingHere|claude') -> null                <- control
-     * ```
-     *
-     * `UserFileStore` returns null for that middle row, so without this the Windows store alone
-     * would hand one fleet's bearer token to a different fleet whose URL differs only in case --
-     * and `put()`'s read-back is structurally blind to it, because it reads back the very entry it
-     * collapsed onto. Appending a case-sensitive digest of the exact key makes two keys that differ
-     * only in case land on two targets. The key stays in the target in readable form, so
-     * `cmdkey /list` is still greppable.
+     * Delegates to `WindowsCredentialTarget`, which holds the derivation and the measurement behind
+     * its case-sensitive digest. **Nothing is derived here**, so this store and
+     * `WindowsFfiCredentialStore` cannot disagree about where a credential lives -- a disagreement
+     * that would surface as a machine losing its enrollment on a `php.ini` change, with no error to
+     * read. A test asserts the two return identical targets.
      *
      * @param  string  $service  The credential key, which nothing here parses.
      * @return string The target name.
      */
     public function target(string $service): string
     {
-        return sprintf('%s%s#%s', self::TARGET_PREFIX, $service, substr(hash('sha256', $service), 0, 16));
+        return WindowsCredentialTarget::for($service);
     }
 
     /**
@@ -638,7 +611,7 @@ final class WindowsCredentialStore implements CredentialStore
         // `ApiCommand` nor `McpCommand` catches anything but `RuntimeException`, so an escaping
         // throwable would reach Collision instead of falling through to `UserFileStore`.
         try {
-            $probe = $this->run('read', self::PROBE_PREFIX.bin2hex(random_bytes(16)));
+            $probe = $this->run('read', WindowsCredentialTarget::probe());
         } catch (Throwable) {
             return false;
         }

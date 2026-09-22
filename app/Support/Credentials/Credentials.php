@@ -26,6 +26,13 @@ final class Credentials
     /**
      * The stores this machine should try, in order, on any platform.
      *
+     * **`WindowsFfiCredentialStore` comes before `WindowsCredentialStore`, and the order is the
+     * whole mechanism.** Both reach the same Credential Manager and write interchangeable entries;
+     * the first calls `advapi32` in-process and the second starts `powershell.exe` to do it. A
+     * machine whose `php.ini` leaves `extension=ffi` commented out -- which is the stock setting --
+     * fails the first store's probe and lands on the second, exactly where it was before. A machine
+     * that has FFI skips a subprocess per call. Decided on `robot-council/cli#50`.
+     *
      * @return list<CredentialStore> The candidates.
      */
     public static function candidates(): array
@@ -33,6 +40,7 @@ final class Credentials
         return [
             new KeychainStore,
             new SecretToolStore,
+            new WindowsFfiCredentialStore,
             new WindowsCredentialStore,
             new UserFileStore,
         ];
