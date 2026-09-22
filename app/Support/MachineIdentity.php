@@ -23,6 +23,11 @@ use Laravel\AgentDetector\KnownAgent;
 final class MachineIdentity
 {
     /**
+     * The environment variable a harness names itself in.
+     */
+    public const string VARIABLE = 'ROBOT_COUNCIL_HARNESS';
+
+    /**
      * The longest harness name the service stores.
      */
     public const int MAX_HARNESS = 32;
@@ -65,6 +70,46 @@ final class MachineIdentity
             static fn (KnownAgent $agent): string => $agent->value,
             KnownAgent::cases()
         );
+    }
+
+    /**
+     * The harness a person named, from a flag or from the environment.
+     *
+     * Told apart from a detected one because `Credentials\InstallationChoice` treats them
+     * differently: only an explicitly named harness may claim a credential stored before harnesses
+     * were told apart, since a bare-fleet entry belongs to whichever harness enrolled it and
+     * adopting it on a detected name would be the inference #21 refused.
+     *
+     * @param  string|null  $flag  What `--harness` carried, when it carried anything.
+     * @return string|null The harness, or null when nobody said.
+     */
+    public static function namedHarness(?string $flag): ?string
+    {
+        if (\is_string($flag) && $flag !== '') {
+            return self::harness($flag);
+        }
+
+        $fromEnvironment = getenv(self::VARIABLE);
+
+        return \is_string($fromEnvironment) && trim($fromEnvironment) !== ''
+            ? self::harness(trim($fromEnvironment))
+            : null;
+    }
+
+    /**
+     * Which harness this process is, by the whole cascade.
+     *
+     * **One definition, because two would drift and the drift would be silent** (cli#60). The
+     * bridge picks a credential by this, and `pending` finds that bridge's sink by it: a `pending`
+     * that resolved the harness differently would read an empty sink beside a full one and report
+     * a quiet fleet.
+     *
+     * @param  string|null  $flag  What `--harness` carried, when it carried anything.
+     * @return string|null The harness, or null when nothing answered.
+     */
+    public static function resolveHarness(?string $flag): ?string
+    {
+        return self::namedHarness($flag) ?? self::detectedHarness();
     }
 
     /**

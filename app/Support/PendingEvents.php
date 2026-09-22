@@ -1,0 +1,256 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Support;
+
+use JsonException;
+use RuntimeException;
+
+/**
+ * Where the bridge leaves fleet events for a harness-side hook to pick up.
+ *
+ * **It exists because the two halves are different processes with different lifetimes.** The bridge
+ * is long-running and holds the session, the credential and the feed cursor; a stop hook is a
+ * short-lived process the harness spawns at a turn boundary and which knows none of those. A file
+ * is what they can both reach (cli#60).
+ *
+ * **Keyed by the bridge's identity, not by its session id**, for the same reason: the hook cannot
+ * know a session id, and it can know the service, the harness and the project because they are what
+ * its own configuration already carries. One bridge runs per identity, so one sink does too.
+ *
+ * Under `XDG_STATE_HOME` rather than beside the credential in `XDG_CONFIG_HOME`: this is transient
+ * state a fresh run may discard, not configuration a person edits. Never the working directory,
+ * because a file written beside a project gets committed.
+ */
+final class PendingEvents
+{
+    /**
+     * The directory name under the user's state directory.
+     */
+    public const string DIRECTORY = 'robot-council';
+
+    /**
+     * How many events one sink keeps.
+     *
+     * A bound rather than a policy: an agent that is idle for a weekend while the fleet is busy
+     * would otherwise return to a file nobody can read and a turn that starts with a month of
+     * history. The oldest go first, because the newest are what a harness can still act on.
+     */
+    public const int MAX_EVENTS = 200;
+
+    /**
+     * @param  string  $service  The fleet's base URL.
+     * @param  string  $harness  Which harness this bridge is.
+     * @param  string|null  $projectId  The checkout this bridge is working, when one was named.
+     */
+    public function __construct(
+        private readonly string $service,
+        private readonly string $harness,
+        private readonly ?string $projectId = null
+    ) {}
+
+    /**
+     * Add events to the sink, keeping the newest.
+     *
+     * @param  list<array<array-key, mixed>>  $events  The events to leave for the harness.
+     *
+     * @throws RuntimeException When the sink cannot be written.
+     */
+    public function add(array $events): void
+    {
+        if ($events === []) {
+            return;
+        }
+
+        $this->write([...$this->read(), ...$events]);
+    }
+
+    /**
+     * Take everything waiting, leaving the sink empty.
+     *
+     * **Read and truncate under one lock**, because a hook draining while the bridge appends would
+     * otherwise lose whatever arrived between the two operations -- and a lost wake-up looks
+     * exactly like a quiet fleet.
+     *
+     * @return list<array<array-key, mixed>> What was waiting, oldest first.
+     */
+    public function drain(): array
+    {
+        $path = $this->path();
+
+        if (! is_file($path)) {
+            return [];
+        }
+
+        $handle = fopen($path, 'c+');
+
+        if ($handle === false) {
+            return [];
+        }
+
+        try {
+            if (! flock($handle, LOCK_EX)) {
+                return [];
+            }
+
+            $contents = stream_get_contents($handle);
+
+            ftruncate($handle, 0);
+            fflush($handle);
+
+            return $this->decode($contents === false ? '' : $contents);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    /**
+     * Whether anything is waiting, without taking it.
+     */
+    public function isEmpty(): bool
+    {
+        return $this->read() === [];
+    }
+
+    /**
+     * Remove the sink entirely.
+     *
+     * Called when a session ends, so a harness that restarts does not inherit the previous
+     * session's unread events -- they name tasks and locks that session held, which the new one
+     * does not.
+     */
+    public function forget(): void
+    {
+        $path = $this->path();
+
+        if (is_file($path)) {
+            @unlink($path);
+        }
+    }
+
+    /**
+     * Where this bridge's sink lives.
+     */
+    public function path(): string
+    {
+        return $this->directory().'/'.$this->key().'.json';
+    }
+
+    /**
+     * Everything currently waiting, without taking it.
+     *
+     * @return list<array<array-key, mixed>> The events.
+     */
+    private function read(): array
+    {
+        $path = $this->path();
+
+        if (! is_file($path)) {
+            return [];
+        }
+
+        $contents = @file_get_contents($path);
+
+        return $this->decode($contents === false ? '' : $contents);
+    }
+
+    /**
+     * Replace the sink's contents, keeping only the newest events.
+     *
+     * @param  list<array<array-key, mixed>>  $events  Everything to keep.
+     *
+     * @throws RuntimeException When the sink cannot be written.
+     */
+    private function write(array $events): void
+    {
+        $directory = $this->directory();
+
+        if (! is_dir($directory) && ! mkdir($directory, 0o700, true) && ! is_dir($directory)) {
+            throw new RuntimeException(sprintf('Could not create `%s` to leave fleet events in.', $directory));
+        }
+
+        $kept = \count($events) > self::MAX_EVENTS
+            ? \array_slice($events, -self::MAX_EVENTS)
+            : $events;
+
+        $path = $this->path();
+
+        // Created narrow before anything is written, the way the credential store does: event
+        // bodies are other developers' agents' words, and this file sits in a shared home.
+        if (! is_file($path)) {
+            touch($path);
+            @chmod($path, 0o600);
+        }
+
+        $encoded = json_encode($kept, JSON_THROW_ON_ERROR);
+
+        if (file_put_contents($path, $encoded, LOCK_EX) === false) {
+            throw new RuntimeException(sprintf('Could not write fleet events to `%s`.', $path));
+        }
+    }
+
+    /**
+     * Decode a sink's contents, treating anything unreadable as empty.
+     *
+     * **A corrupt sink is emptiness, not an error.** It is a cache of things to tell an agent; a
+     * half-written file is worth losing, and is not worth stopping a bridge or a turn for.
+     *
+     * @param  string  $contents  The raw file.
+     * @return list<array<array-key, mixed>> The events it held.
+     */
+    private function decode(string $contents): array
+    {
+        if (trim($contents) === '') {
+            return [];
+        }
+
+        try {
+            $decoded = json_decode($contents, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            return [];
+        }
+
+        if (! \is_array($decoded)) {
+            return [];
+        }
+
+        return array_values(array_filter($decoded, \is_array(...)));
+    }
+
+    /**
+     * The directory sinks live in.
+     */
+    private function directory(): string
+    {
+        $configured = getenv('XDG_STATE_HOME');
+
+        if (\is_string($configured) && trim($configured) !== '') {
+            return rtrim($configured, '/\\').'/'.self::DIRECTORY.'/pending';
+        }
+
+        $home = getenv('HOME');
+
+        if (! \is_string($home) || trim($home) === '') {
+            $home = sys_get_temp_dir();
+        }
+
+        return rtrim($home, '/\\').'/.local/state/'.self::DIRECTORY.'/pending';
+    }
+
+    /**
+     * A file name for this bridge's identity.
+     *
+     * Hashed rather than spelled out, because a service URL and a project id both contain
+     * characters a path cannot carry, and a project id is a label a person chose.
+     */
+    private function key(): string
+    {
+        return substr(hash('sha256', implode("\0", [
+            rtrim($this->service, '/'),
+            $this->harness,
+            $this->projectId ?? '',
+        ])), 0, 32);
+    }
+}

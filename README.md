@@ -8,6 +8,7 @@ Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) a
 
 - **`robot-council enroll`** — enroll this machine. It requests a device code, prints the user code and the verification URL, and polls until a developer approves. The credential it receives is stored in the OS keychain or a user-only file, and never printed.
 - **`robot-council mcp`** — the stdio MCP bridge. An agent harness launches it, and it serves the coordination tools over stdio while renewing its own session token, so a token expiring needs no restart and no human.
+- **`robot-council pending`** — print the fleet events waiting for this harness, and clear them. The bridge reads the change feed while it runs and leaves anything that concerns its own session here; a harness's stop hook runs this at a turn boundary so an agent finds out without being asked. Prints nothing and exits `0` when the fleet has been quiet.
 - **`robot-council api`** — the fallback for anything the bridge does not cover.
 
 - **`robot-council new`** — create a fleet service in this directory, the way `statamic new` creates a site.

@@ -8,6 +8,9 @@ use App\Support\Bridge;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
 use App\Support\Credentials\InstallationChoice;
+use App\Support\FleetFollower;
+use App\Support\MachineIdentity;
+use App\Support\PendingEvents;
 use App\Support\Session;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
@@ -75,7 +78,20 @@ final class McpCommand extends Command
             return self::FAILURE;
         }
 
-        $bridge = new Bridge($session, $service);
+        // The sink the follower writes and `robot-council pending` drains, keyed by the same three
+        // things that identify this bridge, so a stop hook beside it finds the same file (cli#60).
+        // The same cascade `InstallationChoice` just used to pick the credential, so the sink is
+        // keyed by the harness this process actually is rather than by a second opinion.
+        $harness = MachineIdentity::resolveHarness($this->stringOption('harness')) ?? 'unknown-harness';
+
+        $pending = new PendingEvents($service, $harness, $this->stringOption('project'));
+
+        $bridge = new Bridge(
+            $session,
+            $service,
+            Bridge::HEARTBEAT_SECONDS,
+            new FleetFollower($session, $service, $pending)
+        );
 
         $this->listenForSignals($bridge);
 
@@ -96,6 +112,10 @@ final class McpCommand extends Command
             // The session must not outlive the harness. Ending it releases its tasks and locks now
             // rather than leaving them held until the presence sweep notices.
             $session->end();
+
+            // And the sink goes with it. Unread events name tasks and locks THIS session held, so
+            // leaving them for the next one would hand it somebody else's work to react to.
+            $pending->forget();
         }
 
         return self::SUCCESS;
