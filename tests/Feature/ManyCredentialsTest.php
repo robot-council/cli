@@ -22,6 +22,7 @@ use App\Support\Credentials\CredentialKey;
 use App\Support\Credentials\Credentials;
 use Tests\Fixtures\BatchingProbeStore;
 use Tests\Fixtures\ProbeStore;
+use Tests\Fixtures\TargetKeyedBatchingStore;
 
 const MANY_FLEET = 'https://many.example.test';
 
@@ -62,6 +63,58 @@ it('asks a store without the capability once per harness, exactly as before', fu
 
     expect($found)->toBe(['claude'])
         ->and($store->reads)->toHaveCount(2);
+});
+
+it("finds credentials in a store whose own addressing differs from the caller's keys", function (): void {
+    // **The round trip is only a real round trip when the two key spaces differ.**
+    // `BatchingProbeStore` answers with the key it was handed, so translation is a no-op there and
+    // a store that skipped it would still pass. This one files under
+    // `WindowsCredentialTarget::for()`, exactly as `WindowsCredentialStore` does, so the key asked
+    // about and the name holding the credential are different strings by construction.
+    $store = new TargetKeyedBatchingStore;
+    $store->put(CredentialKey::for(MANY_FLEET, 'claude'), new Credential('token-claude'));
+    $store->put(CredentialKey::for(MANY_FLEET, 'cursor'), new Credential('token-cursor'));
+
+    $found = new Credentials([$store])->storedAmong(MANY_FLEET, ['claude', 'codex', 'cursor']);
+
+    expect($found)->toBe(['claude', 'cursor'])
+        ->and($store->batches)->toHaveCount(1);
+});
+
+it("sees nothing from a batch answered in the store's own key space, and is told nothing about it", function (): void {
+    // **The failure mode the contract exists to prevent, characterized rather than described.**
+    // A batch keyed by target name returns a map whose every key misses `isset()`, so an enrolled
+    // machine is reported as having nothing stored and `remedies()` tells the operator to run
+    // `enroll` first. The call succeeded, the answer is well-formed, and an empty result is what a
+    // machine with no credentials returns too -- so nothing anywhere reports it.
+    $wrong = new TargetKeyedBatchingStore(answersInStoreSpace: true);
+    $right = new TargetKeyedBatchingStore;
+
+    foreach ([$wrong, $right] as $store) {
+        $store->put(CredentialKey::for(MANY_FLEET, 'claude'), new Credential('token-claude'));
+        $store->put(CredentialKey::for(MANY_FLEET, 'cursor'), new Credential('token-cursor'));
+    }
+
+    expect(new Credentials([$wrong])->storedAmong(MANY_FLEET, ['claude', 'cursor']))->toBeEmpty()
+        // It ran and it held the credentials, so the empty answer is the translation and nothing
+        // else. Without this the assertion would pass against a store that was simply empty.
+        ->and($wrong->batches)->toHaveCount(1)
+        ->and($wrong->stored)->toHaveCount(2)
+        // The control: one flag apart, the same fixture holding the same credentials answers.
+        ->and(new Credentials([$right])->storedAmong(MANY_FLEET, ['claude', 'cursor']))->toBe(['claude', 'cursor']);
+});
+
+it('finds nothing through the looping default, and is shown to have asked', function (): void {
+    // Criterion 3 asks for a finds-none case on **the default**. The finds-none test below drives
+    // a batching store, so it covers the other branch; this one covers the loop, and `$reads` is
+    // what separates "asked and found nothing" from "never asked".
+    $store = new ProbeStore;
+
+    expect(new Credentials([$store])->storedAmong(MANY_FLEET, ['claude', 'codex']))->toBeEmpty()
+        ->and($store->reads)->toBe([
+            CredentialKey::for(MANY_FLEET, 'claude'),
+            CredentialKey::for(MANY_FLEET, 'codex'),
+        ]);
 });
 
 it('answers in the order asked for, whatever order the store replies in', function (): void {
@@ -160,8 +213,13 @@ it('asks nothing at all when given no harnesses', function (): void {
 
     expect(new Credentials([$store])->storedAmong(MANY_FLEET, []))->toBeEmpty()
         // **The name of this test is the assertion.** A batch is a `powershell.exe` start on the
-        // store this whole capability exists for, so asking it about nothing spends a process to
-        // learn nothing. The looping path already does nothing here, because a `foreach` over an
-        // empty list does nothing; this is what makes the batching path agree rather than diverge.
+        // store this capability exists for, so asking it about nothing would spend a process to
+        // learn nothing, and the looping path already does nothing here because a `foreach` over
+        // an empty list does nothing. This makes the two agree.
+        //
+        // **Nothing pays that cost today**, and saying so is the honest scope: `storedAmong()`'s
+        // only caller passes `MachineIdentity::knownHarnesses()`, which is every `KnownAgent`
+        // case -- 15 of them, and never none. This pins a private method's behavior against a
+        // future caller, not a live bug.
         ->and($store->batches)->toBeEmpty();
 });

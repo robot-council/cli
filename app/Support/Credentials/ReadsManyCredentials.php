@@ -25,6 +25,24 @@ interface ReadsManyCredentials
     /**
      * The credentials for several keys, in one call.
      *
+     * **The map is keyed by the strings that were PASSED IN, byte for byte, and on the one store
+     * this exists for those are not the strings the store looks things up by.**
+     * `WindowsCredentialStore` never addresses Credential Manager by a credential key: it maps each
+     * one through `WindowsCredentialTarget::for()` first, yielding
+     * `robot-council:<key>#<16-hex-digest>`. So a batch that answers in target-name space returns a
+     * map whose every key misses, `storedAmong()` reports nothing stored on a fully enrolled
+     * machine, and `remedies()` tells somebody who has already enrolled to run `enroll` first.
+     *
+     * **Nothing detects that.** The answer is well-formed, the call succeeded, and an empty result
+     * is what a machine with no credentials returns too. The translation back to the caller's key
+     * is the implementation's job, and it is stated here because it is the one part of this
+     * contract that cannot be inferred from the signature.
+     *
+     * A second edge in the same place: Credential Manager matches target names
+     * case-insensitively -- which is why `for()` carries a digest at all -- while the caller
+     * resolves this map with `isset()`, which does not. An implementation that echoes back what the
+     * backend reported rather than what it was asked for can differ in case and miss.
+     *
      * **A key that could not be read is ABSENT from the result, never an exception.** That is the
      * opposite of `CredentialStore::get()`, which raises when it can tell its mechanism is broken
      * (#39), and the difference is not an oversight.
