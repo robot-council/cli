@@ -19,16 +19,13 @@ Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) a
 
 ## Installing
 
-Not published on Packagist yet, so point Composer at this repository and install it globally:
-
 ```bash
-composer global config repositories.robot-council vcs https://github.com/robot-council/cli.git
-composer global require robot-council/cli:dev-main
+composer global require robot-council/cli
 ```
 
 Put Composer's global `vendor/bin` on your `PATH` — `composer global config bin-dir --absolute` prints it — and `robot-council` is available everywhere, which is what the harness setups below assume.
 
-**Verified 2026-09-18** on macOS 26.6.2 with PHP 8.4, into a throwaway `COMPOSER_HOME`: the install exits 0, `vendor/bin/robot-council` is written, and `robot-council list` shows `about`, `api`, `enroll`, and `mcp`.
+**Verified 2026-09-22** on macOS 26.6.2 with PHP 8.4, into a throwaway `COMPOSER_HOME`: that line resolves `^0.2.0`, exits 0, writes `vendor/bin/robot-council`, and `robot-council list` shows `about`, `api`, `enroll`, `mcp`, `new`, and `pending`.
 
 ## Creating a fleet service
 
