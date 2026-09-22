@@ -20,6 +20,14 @@ use Symfony\Component\Process\Process;
  *   `passwords don't match`.
  * - It **exits 0 even when the passwords did not match**, so the exit code proves nothing here.
  *   `put()` therefore reads the value back and compares, which is the only check that discriminates.
+ *
+ * Both were re-measured on macOS 26.6.2 on 2026-09-22 for `robot-council/cli#46` and both still
+ * hold, along with a third that had not been written down:
+ *
+ * - A mismatched write **still creates the item**, with an empty password. So a failed `put()`
+ *   leaves an empty entry behind rather than nothing. `get()` answers null for it -- an item with
+ *   no password is not a credential -- and the next write replaces it, because `-U` updates. That
+ *   is why the read-back tests for a credential rather than for the item's existence.
  */
 final class KeychainStore implements CredentialStore
 {
@@ -34,6 +42,10 @@ final class KeychainStore implements CredentialStore
      * Bounded because the write path deliberately uses an interactive prompt, and a prompt that
      * stops reading stdin would otherwise hang a developer's terminal with no indication why.
      */
+    // A tuning value, not a behaviour. `14` and `16` are indistinguishable from any test that does
+    // not spend the difference waiting, and a test that did would assert the bound rather than
+    // anything this class decides. Recorded on cli#46 rather than chased.
+    // @pest-mutate-ignore: DecrementInteger, IncrementInteger
     public const int TIMEOUT_SECONDS = 15;
 
     /**
@@ -43,6 +55,11 @@ final class KeychainStore implements CredentialStore
 
     public function available(): bool
     {
+        // `BooleanAndToBooleanOr` survives here and no test on one machine can kill it: on macOS
+        // both operands are true and on anything else both are false, so `&&` and `||` agree
+        // everywhere either can be observed. Separating them means injecting the platform, which
+        // this class does not allow and which would test the injection. Recorded on cli#46.
+        // @pest-mutate-ignore: BooleanAndToBooleanOr
         return PHP_OS_FAMILY === 'Darwin' && is_executable('/usr/bin/security');
     }
 
@@ -62,13 +79,34 @@ final class KeychainStore implements CredentialStore
             timeout: self::TIMEOUT_SECONDS,
         );
 
-        // Twice, for the retype prompt
+        // Twice, for the retype prompt.
+        //
+        // The trailing newline is not load-bearing and no input can make it so: `security` takes
+        // EOF as the end of the second entry, so `$token."\n".$token` stores the same value.
+        // Measured on macOS 26.6.2 for cli#46, driving the tool directly -- `MUTANT-TOKEN\nMUTANT-TOKEN`
+        // with no trailing newline read back as `"MUTANT-TOKEN"`. Kept because a terminated line is
+        // what the prompt documents, and removing it would rest on EOF behaviour nothing states.
+        // @pest-mutate-ignore: ConcatRemoveRight
         $write->setInput($token."\n".$token."\n");
         $write->run();
 
         // Not `$write->isSuccessful()`: it exits 0 on a mismatch. The read-back is the decision.
+        //
+        // Measured for cli#46: one line, or two that disagree, prints `passwords don't match`,
+        // prompts again, exits **0**, and leaves an item with an EMPTY password. `get()` answers
+        // null for that, so the raise below is reached -- and a failed `put()` leaves that empty
+        // item behind, which the next `-U` write replaces.
         $stored = $this->get($service);
 
+        // Two survivors live on this line and neither can be killed from a test.
+        //
+        // `BooleanOrToBooleanAnd` and `InstanceOfToTrue` both need the left half to be reachable
+        // independently: a read-back that finds NOTHING while the write reported success. That is
+        // the `security` behaviour this class exists to work around, and it cannot be produced on
+        // demand against a real Keychain -- every way of making the write fail also makes the item
+        // exist with an empty password, which `get()` turns into null via the same branch.
+        // Injecting a fake `security` would kill them and would test the fake.
+        // @pest-mutate-ignore: BooleanOrToBooleanAnd, InstanceOfToTrue
         if (! $stored instanceof Credential || ! $stored->equals($credential)) {
             throw new CredentialStoreFailed('The credential could not be stored in the macOS Keychain.');
         }
