@@ -43,6 +43,25 @@ interface ReadsManyCredentials
      * resolves this map with `isset()`, which does not. An implementation that echoes back what the
      * backend reported rather than what it was asked for can differ in case and miss.
      *
+     * **Each entry carries the key it answers for. Position in the request means nothing**, and
+     * that is a stronger requirement than the paragraph above rather than a restatement of it. Hand
+     * a batch script N keys and it answers with the results it found, in the order it looked;
+     * pairing those back to the request by index is the obvious implementation and is correct right
+     * up until something is missing. This contract **requires** a key that could not be read to be
+     * omitted, so the first omission shifts every answer after it by one.
+     *
+     * **What that costs is not an empty answer but a confidently wrong one.** Ask about
+     * `claude, codex, cursor` where `codex` holds nothing, and a positional pairing returns
+     * `cursor`'s credential filed under `codex`: one harness reported as enrolled when it is not,
+     * another reported as not enrolled when it is, and a value returned under a key it does not
+     * belong to. `CredentialKey` exists precisely so that one harness's entry is never handed to
+     * another -- #7 gave the Windows targets a digest for that reason and #36 pinned that two keys
+     * differing only in case must not collapse -- and a positional answer defeats both.
+     *
+     * `storedAmong()` reads only membership through `isset()`, so today the damage stops at which
+     * harnesses get listed. It does not stop there for any future caller that reads a value out of
+     * this map, which is what makes this a contract rather than a note.
+     *
      * **A key that could not be read is ABSENT from the result, never an exception.** That is the
      * opposite of `CredentialStore::get()`, which raises when it can tell its mechanism is broken
      * (#39), and the difference is not an oversight.
