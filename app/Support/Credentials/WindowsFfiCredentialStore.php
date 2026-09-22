@@ -381,11 +381,23 @@ final class WindowsFfiCredentialStore implements CredentialStore
         }
 
         try {
-            // **Dereferencing the out-pointer, then narrowing what comes back.** Both checks below
-            // guard against a shape `advapi32` has never produced, and neither is a formality: a
-            // structure whose declaration had drifted would fail here rather than by reading a
-            // credential out of whatever the wrong offset happens to hold. Raising beats casting,
-            // because a cast would turn a garbage pointer into a confident answer.
+            // **Dereferencing the out-pointer, then narrowing what comes back.** A structure whose
+            // declaration had drifted would fail here rather than by reading a credential out of
+            // whatever the wrong offset happens to hold. Raising beats casting, because a cast
+            // would turn a garbage pointer into a confident answer.
+            //
+            // **The blob check below is not theoretical, and that was not expected.** PHP's FFI
+            // returns PHP `null` -- not a `CData` wrapping NULL -- for a pointer field whose value
+            // is NULL; measured on 2026-09-22, with a control showing a populated field does come
+            // back as `CData`. So this fires exactly when `advapi32` reports a blob size it did not
+            // supply a buffer for. It was then observed **once**, on a machine running two full
+            // test suites at the same time, where `CredReadW` returned success with a non-zero size
+            // and a null blob. Three thousand consecutive reads on a quiet machine produced no such
+            // read, and the covering test passes five times out of five.
+            //
+            // Raising is the right answer for it either way: `robot-council/cli#39` settled that a
+            // mechanism which failed must not be reported as "no credential", because the remedy an
+            // operator reaches for then is to enroll again through the same broken mechanism.
             $structure = $out[0];
 
             if (! $structure instanceof CData) {
