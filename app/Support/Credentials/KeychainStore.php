@@ -91,6 +91,10 @@ final class KeychainStore implements CredentialStore
 
         $read->run();
 
+        // **Both a missing item and a failure land here, and whether this backend can tell
+        // them apart is unmeasured.** `CredentialStore::get()` says an implementation that
+        // can must raise instead; `WindowsCredentialStore` does. `robot-council/cli#54`
+        // measures the exit codes this tool actually produces, and this follows from it.
         // An unsuccessful read is a missing item, and the parser below would reach the same answer
         // from the empty stderr it leaves -- so this is an early exit rather than a decision, and
         // no input can kill its removal.

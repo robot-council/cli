@@ -174,7 +174,10 @@ it('agrees with its script about which exit code means "no such credential"', fu
     // `NOT_FOUND` and the script's `exit` literal are coupled by nothing but this test. Change
     // either alone and `available()` returns false on every machine, every gated test below skips,
     // and the suite is green.
-    expect(constantOf('SCRIPT'))->toContain(sprintf('exit %d', intConstantOf('NOT_FOUND')));
+    // Pinned to the read branch's own line rather than a bare `exit N`: the script also
+    // contains `exit 0` and `exit 4`, so the looser assertion passed for three different
+    // values of the constant and could not do the job its comment claims.
+    expect(constantOf('SCRIPT'))->toContain(sprintf('if ($null -eq $blob) { exit %d }', intConstantOf('NOT_FOUND')));
 });
 
 it('probes a target no service key can ever produce', function (): void {
@@ -315,7 +318,7 @@ it('tells a broken mechanism apart from a machine that holds no credential', fun
                 $got = (new App\Support\Credentials\WindowsCredentialStore)->get($argv[2]);
                 fwrite(STDOUT, $got === null ? 'NULL' : 'CREDENTIAL');
             } catch (RuntimeException $e) {
-                fwrite(STDOUT, 'THREW: '.$e->getMessage());
+                fwrite(STDOUT, 'THREW '.$e::class.': '.$e->getMessage());
             }
             PHP;
 
@@ -346,8 +349,8 @@ it('tells a broken mechanism apart from a machine that holds no credential', fun
     // it through the same broken mechanism.
     [, $broken] = $child('Z:\no-such-dir');
 
-    expect($broken)->toStartWith('THREW:')
-        ->and($broken)->toContain('exited 1');
+    expect($broken)->toStartWith('THREW '.CredentialStoreFailed::class.':')
+        ->and($broken)->toContain('the helper exited 1)');
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
 it('keeps two services apart rather than overwriting one with the other', function (): void {

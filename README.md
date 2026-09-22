@@ -269,7 +269,7 @@ A credential stored before harnesses were told apart is here. Pass
 
 All three were produced by running the bridge on 2026-09-21 rather than read off the source, which is why the second line of the first one says `cursor, claude`. All three go to stderr, prefixed `robot-council:`. `mcp`'s stdout is a protocol stream a harness parses, so nothing else ever goes there.
 
-**The list of enrolled harnesses is a lower bound.** It is built by asking about each harness `laravel/agent-detector` knows, because no credential store can list its keys, so a harness named by hand that the detector has never heard of will not appear in it.
+**The list of enrolled harnesses is a lower bound**, for two reasons. It is built by asking about each harness `laravel/agent-detector` knows, because no credential store can list its keys, so a harness named by hand that the detector has never heard of will not appear in it. And a harness whose credential cannot be read — a credential store that has broken since the command started — is reported as not enrolled rather than aborting the refusal, so the list stays short rather than being replaced by a different error.
 
 ### Any other harness
 

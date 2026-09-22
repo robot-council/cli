@@ -74,6 +74,10 @@ final class SecretToolStore implements CredentialStore
 
         $read->run();
 
+        // **Both a missing item and a failure land here, and whether this backend can tell
+        // them apart is unmeasured.** `CredentialStore::get()` says an implementation that
+        // can must raise instead; `WindowsCredentialStore` does. `robot-council/cli#54`
+        // measures the exit codes this tool actually produces, and this follows from it.
         if (! $read->isSuccessful()) {
             return null;
         }
