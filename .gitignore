@@ -7,5 +7,6 @@
 /.claude/worktrees
 /.phpunit.cache
 .phpunit.result.cache
+__pycache__/
 .DS_Store
 .env

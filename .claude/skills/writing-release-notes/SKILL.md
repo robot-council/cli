@@ -1,15 +1,15 @@
 ---
 name: writing-release-notes
 description: >-
-  GitHub Release conventions for the `robot-council/core` Composer package: the
+  GitHub Release conventions for the `robot-council/cli` command line: the
   em-dash release title (`vX.Y.Z — Theme`), a one-sentence milestone lead with an optional
   `**Breaking change**` callout, and a CLOSED, ordered heading vocabulary
   (`## Breaking changes`, `## What's new`, `## What's fixed`, `## Security`,
   `## Maintenance and tooling`) with one bullet per change formatted as
   `- <PR title> [#N](…/pull/N)` — using the API PR title (never a merge or squash commit
   subject), no `by @author`, inline code preserved. Covers the routing cascade and the bundled
-  generator, semantic versioning for a library consumers resolve by tag (below 1.0 the
-  minor is the Composer caret's breaking boundary), cutting a release (the `CHANGELOG.md` pull
+  generator, what a tag of this repository promises and to whom (a release marker rather than a
+  Composer constraint, kept to semantic versioning anyway), cutting a release (the `CHANGELOG.md` pull
   request, then the tag and the GitHub Release), and the retroactive-tag footer. Activate whenever drafting,
   rewriting, or critiquing a GitHub Release title or body, generating release notes, or cutting
   a tag for this repo.
@@ -17,29 +17,50 @@ description: >-
 
 # Writing Release Notes
 
-House style for GitHub Releases in `robot-council/core`. It applies to the **whole release
+House style for GitHub Releases in `robot-council/cli`. It applies to the **whole release
 range** — retroactive tags and new ones alike — so the releases page and `CHANGELOG.md` read as one
-consistent changelog. The audience is someone deciding whether to take this version of the package;
-lead with the theme, then bucket the changes.
+consistent changelog. The audience is a developer deciding whether to take this version of the
+command; lead with the theme, then bucket the changes.
+
+**This file was a byte-identical copy of `robot-council/core`'s** until `robot-council/cli#69`, and
+described that package throughout. What is still shared with it is shared because it was decided to
+be — the title shape, the closed heading vocabulary, the bullet and link format, the prose rules,
+and the cascade's *structure* are deliberately the same, so a reader moving between the two
+repositories is reading one convention. What differs is marked where it differs: the versioning
+section below, the bucket definitions, and the paths the cascade routes on.
 
 ## Versioning — what the number promises
 
-This repo is a **Composer library**: applications require `robot-council/core` and Composer
-resolves the constraint against its **git tags**. The tag is therefore a compatibility promise, not a
-milestone marker. Use **semantic versioning**: `MAJOR.MINOR.PATCH`, where a patch never breaks a
-consumer, a minor adds without breaking, and a major is the breaking boundary.
+**Nothing resolves these tags as a Composer constraint today.** This repository is a Laravel Zero
+application installed as a command, not a library an application requires. `composer.json` declares
+`"type": "project"`, it is not published on Packagist, and the install the README documents and has
+verified is:
 
-**Below 1.0 the breaking boundary moves to the minor**, because that is how Composer's caret reads it:
-`^0.3` means `>=0.3.0 <0.4.0` (and `^0.3.2` means `>=0.3.2 <0.4.0`), while `^1.2` means
-`>=1.2.0 <2.0.0`. So on `0.x`, a breaking change bumps the **minor**, and a patch must not break
-anyone already on that `^0.x` line; from `1.0.0` on, a breaking change bumps the **major**. When to
-cut a release, and when `1.0.0` happens, are not decided here.
+```bash
+composer global config repositories.robot-council vcs https://github.com/robot-council/cli.git
+composer global require robot-council/cli:dev-main
+```
+
+That pins a **branch**. So a tag's consumers are the GitHub Release and `CHANGELOG.md` — people
+reading what shipped — rather than a resolver. Decided on `robot-council/cli#69`; whether to publish
+to Packagist, and the `"type"` question that comes with it, is its own ticket.
+
+**Tag semantically anyway, and keep the 0.x rule.** Use `MAJOR.MINOR.PATCH`, and below 1.0 let a
+breaking change bump the **minor**, because that is how Composer's caret would read it if this were
+ever published: `^0.3` means `>=0.3.0 <0.4.0`, while `^1.2` means `>=1.2.0 <2.0.0`. Holding to it
+now costs nothing while nothing resolves a caret, and it means no tag ever broke a promise it had
+not yet made. From `1.0.0` on, a breaking change bumps the **major**. When to cut a release, and
+when `1.0.0` happens, are not decided here.
+
+**Breaking, for a command, is a change to what somebody types or parses**: a command or flag removed
+or renamed, output another program reads changed, a config key moved, or an enrolled machine having
+to re-enroll. It is not a changed class name — nothing requires this package and calls into it.
 
 ## Title
 
 `vX.Y.Z — <Theme>` — an **em dash** (`—`) with a space either side, never a hyphen, then a
-concise Title-Case theme (no trailing period). Examples: `v0.2.0 — Council Configuration`,
-`v0.3.0 — Config Publishing, Facade Helpers, and Migrations`.
+concise Title-Case theme (no trailing period). The one release this repository has cut is the
+example to follow: `v0.1.0 — Enrollment, Credential Storage, and the MCP Bridge`.
 
 The title is not cosmetic: it is also the version heading of the release's `CHANGELOG.md` entry
 (see *Cutting a release* below).
@@ -49,20 +70,26 @@ The title is not cosmetic: it is also the version heading of the release's `CHAN
 1. **Milestone lead** — one sentence naming the release's theme.
 2. **Breaking-change callout** (only when the release breaks something) — its **own paragraph**
    immediately after the lead, never appended to the lede sentence:
-   `**Breaking change** — <impact and required action>.` State what a consumer must *do* on
-   upgrade (republish or edit the config, run or adjust a migration, change a call site, update a
-   published view), not the semver mechanics. The itemized detail with PR links goes in the
-   `## Breaking changes` section below.
+   `**Breaking change** — <impact and required action>.` State what a developer must *do* on
+   upgrade (re-enroll the machine, rename a flag in a harness's MCP configuration, move a config
+   key, adjust whatever parses the bridge's output), not the semver mechanics. The itemized detail
+   with PR links goes in the `## Breaking changes` section below.
 3. **Buckets** — a **CLOSED** set of `##` headings, each included **only when it has items**,
    always in this order:
-   - `## Breaking changes` — anything a consumer must act on to upgrade: a removed or changed
-     public class, method, or facade signature in `src/`; a renamed or removed config key; a
-     migration or factory change; a published view change. Name the impact, not just the change.
-   - `## What's new` — new features, commands, config options, facade methods, migrations, views,
-     and integrations.
+   - `## Breaking changes` — anything a developer must act on to upgrade: a command or flag
+     removed or renamed; a change to output another program parses, such as the MCP bridge's
+     stdio protocol; a moved or removed config key; a credential-store change that makes an
+     enrolled machine re-enroll. Name the impact, not just the change. A changed class or method
+     signature is **not** breaking here — nothing requires this package and calls into it.
+   - `## What's new` — new commands, flags and options, config keys, harness integrations, and
+     anything a developer can now do that they could not before.
    - `## What's fixed` — bug fixes, regressions, correctness and performance fixes.
-   - `## Security` — vulnerability fixes and hardening (XSS, SSRF, CSP/security headers, auth,
-     egress, injection, sanitization).
+   - `## Security` — vulnerability fixes and hardening. Here that is mostly the credential: keeping
+     it out of argv, out of stdout and a log, out of an exception trace, and out of a file anything
+     else can read. The generator's keyword list is deliberately still `robot-council/core`'s, and
+     already carries `secret` and `credentials`; the web terms in it (SSRF, injection) stay because
+     this command has an API client. **A `security` label on the closing issue routes it whatever
+     the title says**, which is the mechanism to rely on.
    - `## Maintenance and tooling` — docs, CI, tests, refactors, dependency bumps, chores, and
      developer-experience / skills work.
 4. **Footer** — retroactively-tagged releases only: `_Retroactively tagged at \`<sha>\` (<date>)._`
@@ -73,7 +100,7 @@ Do **not** invent headings outside this closed set. If something doesn't obvious
 
 ## Line format
 
-- One bullet per change: `- <PR title> [#N](https://github.com/robot-council/core/pull/N)`.
+- One bullet per change: `- <PR title> [#N](https://github.com/robot-council/cli/pull/N)`.
 - **Use the PR title from the GitHub API** (`gh pr view N --json title`), **never the commit
   subject on `main`.** A merge commit's subject is a branch slug (`Merge pull request #N from
   robot-council/<branch>`), and this repo's squash setting (`COMMIT_OR_PR_TITLE`) takes the
@@ -81,7 +108,7 @@ Do **not** invent headings outside this closed set. If something doesn't obvious
   on `main` with no PR number in its subject — a direct commit, or each commit of a rebase merge —
   use the commit subject (strip any Conventional-Commit prefix and `[skip ci]` litter) and link the
   **short commit SHA**:
-  `` - <title> [`a1b2c3d`](https://github.com/robot-council/core/commit/<sha>) ``.
+  `` - <title> [`a1b2c3d`](https://github.com/robot-council/cli/commit/<sha>) ``.
   Every bullet is linked — `[#N]` for a PR, a backticked short SHA for a direct commit.
 - **No `by @author`.** On a single-maintainer repository attribution is noise. GitHub's
   auto-generated notes add it, which is one reason not to use them.
@@ -92,8 +119,8 @@ Do **not** invent headings outside this closed set. If something doesn't obvious
 
 - **Never use an ampersand (`&`)** — write "and". This applies to release titles, the lead, and
   every bullet.
-- **Use the Oxford comma** — `config, migrations, and a facade helper`, not
-  `config, migrations and a facade helper`.
+- **Use the Oxford comma** — `enrollment, credential storage, and the MCP bridge`, not
+  `enrollment, credential storage and the MCP bridge`.
 
 ## Routing (which bucket) — by title, closing-issue label, and diff shape
 
@@ -108,16 +135,25 @@ what makes it correct:
    `X-Powered-By`, password protection, internal-network, or "escape" of a script/HTML/JSON-LD sink.
 3. **Maintenance and tooling** — a `documentation` (or `build`) label on the closing issue. Checked
    before the fix verbs, because a maintenance title can open with `Correct` or `Stop`.
-4. **What's new** — the diff touches a published surface (`config/`, `database/`, `resources/`,
-   `routes/`), whatever its title says. `src/` is deliberately not on that list: a change there
-   routes on its title and on how test-heavy the diff is.
+4. **What's new** — the diff touches `config/`, whatever its title says: `config/commands.php`
+   decides which commands ship, which is the nearest thing this repository has to a published
+   surface. **`app/` is deliberately not on that list**, for the reason `robot-council/core` leaves
+   `src/` off its own: it holds the internals as well as the commands, and a new command and a bug
+   fix to an existing one live in the same directory — often the same file. A change there routes
+   on its title and on how test-heavy the diff is. `database/`, `resources/` and `routes/` are not
+   on the list either, because this repository has none of them.
 5. **What's fixed** — the title opens with `Fix`/`Resolve`/`Repair`/`Prevent`/`Guard`/`Restore`/
    `Correct`/`Harden`/`Stop`/`Avoid`.
 6. **Maintenance and tooling** — the diff is confined to tooling (`.github/`, `.claude/`, `tests/`,
-   `workbench/`, `composer.json`, `phpstan.neon.dist`, `phpstan-baseline.neon`, `phpunit.xml.dist`, `rector.php`,
+   `composer.json`, `composer.lock`, `box.json`, `phpstan.neon.dist`, `phpunit.xml.dist`, `rector.php`,
    top-level dotfiles, `CHANGELOG.md`, `CLAUDE.md`, `README.md`, `LICENSE.md`); or it adds more lines under
    `tests/` than elsewhere; or the title opens with a maintenance verb (`Refactor`, `Bump`,
    `Document`, …) or names tests, coverage, mutation, a skill, or a worktree.
+
+   `composer.lock` is on that list because **this repository commits it and `robot-council/core`
+   does not**, so a Dependabot bump lands as a manifest-and-lock diff here. `box.json` is the PHAR
+   build config. There is no `phpstan-baseline.neon` and deliberately so — `CLAUDE.md` says to fix
+   the errors instead — and no `workbench/`, which is a package's host application.
 7. **What's new** — everything else.
 
 ## Generating the body — [`gen_release_notes.py`](gen_release_notes.py)
@@ -141,7 +177,7 @@ so it doesn't also auto-list in a bucket).
 python3 .claude/skills/writing-release-notes/gen_release_notes.py <prev-tag> origin/main \
     --lead "One-sentence milestone theme." \
     --breaking "republish the config file and rename \`seats\` to \`members\`." \
-    --breaking-item "Rename the \`seats\` config key to \`members\` [#12](https://github.com/robot-council/core/pull/12)." \
+    --breaking-item "Rename the \`seats\` config key to \`members\` [#12](https://github.com/robot-council/cli/pull/12)." \
     --exclude 12 \
     > body.md
 ```
