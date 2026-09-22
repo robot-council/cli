@@ -79,7 +79,11 @@ final class Credentials
      *
      * @param  string  $service  The fleet's base URL.
      * @param  string  $harness  The harness asking.
-     * @return Credential|null The credential, or null.
+     * @return Credential|null The credential, or null when that harness has none.
+     *
+     * @throws CredentialStoreFailed When the store's mechanism failed, which is not the same
+     *                               answer as holding nothing. Not every store can tell the two
+     *                               apart -- see `CredentialStore::get()`.
      */
     public function get(string $service, string $harness): ?Credential
     {
@@ -91,6 +95,8 @@ final class Credentials
      *
      * @param  string  $service  The fleet's base URL.
      * @return Credential|null The credential, or null.
+     *
+     * @throws CredentialStoreFailed When the store's mechanism failed.
      */
     public function legacy(string $service): ?Credential
     {
@@ -125,6 +131,10 @@ final class Credentials
      * @param  string  $harness  The harness claiming it.
      * @return Credential|null What was claimed, or null when there was nothing to claim.
      *
+     * @throws CredentialStoreFailed When the leftover is still there, or when whether it is still
+     *                               there could not be established. Both messages name the claim
+     *                               and the leftover, because those are the two facts that decide
+     *                               what an operator does next.
      * @throws CredentialStoreFailed When the legacy entry is still readable after being forgotten,
      *                               which would leave it claimable by a second harness.
      */
@@ -147,7 +157,23 @@ final class Credentials
         // product holding the script, a policy change mid-session, a locked keychain -- this is the
         // only thing between a silent success and two harnesses presenting one installation's
         // credential.
-        if ($store->get($legacy) instanceof Credential) {
+        // **Rewrapped rather than allowed out.** `WindowsCredentialStore::get()` now raises when
+        // its mechanism is broken, and that message names the mechanism -- true, and the wrong two
+        // facts for this moment. What an operator needs here is that the credential WAS claimed,
+        // and that a leftover has to go by hand before another harness claims it too.
+        try {
+            $leftover = $store->get($legacy) instanceof Credential;
+        } catch (CredentialStoreFailed $credentialStoreFailed) {
+            throw new CredentialStoreFailed(sprintf(
+                'The credential was claimed for `%s`, but whether the one stored before harnesses were told apart is gone could not be checked: %s '
+                .'Check %s by hand before another harness claims it too.',
+                $harness,
+                $credentialStoreFailed->getMessage(),
+                $store->describe()
+            ), $credentialStoreFailed->getCode(), $credentialStoreFailed);
+        }
+
+        if ($leftover) {
             // Both sentences are asserted, so dropping either fails a test. Their ORDER is not:
             // swapping them leaves a message carrying the same two facts, and pinning the order
             // would make the test brittle to rewording while protecting nothing.
@@ -169,9 +195,15 @@ final class Credentials
      * **Probed one at a time, because no store can list its keys.** That is a subprocess apiece on
      * a keychain, so this is for a path that is already refusing and never for a hot one.
      *
+     * **The result is a lower bound.** A harness whose read fails is reported as not stored, so a
+     * machine whose credential store has broken mid-session lists fewer harnesses rather than
+     * failing to answer. That is the opposite of what `get()` does for a caller that wants a
+     * specific credential, and the difference is the point: this runs while the process is already
+     * refusing, and a diagnostic that aborts the diagnosis is worse than an incomplete one.
+     *
      * @param  string  $service  The fleet's base URL.
      * @param  list<string>  $harnesses  The harnesses to ask about.
-     * @return list<string> Those that have one, in the order given.
+     * @return list<string> Those that have one, in the order given; a lower bound.
      */
     public function storedAmong(string $service, array $harnesses): array
     {
@@ -189,7 +221,21 @@ final class Credentials
         // @pest-mutate-ignore: UnwrapArrayValues
         return array_values(array_filter(
             $harnesses,
-            static fn (string $harness): bool => $store->get(CredentialKey::for($service, $harness)) instanceof Credential
+            // **A broken mechanism is treated as "not listed" here, deliberately, and only here.**
+            // `WindowsCredentialStore::get()` now raises rather than reporting a fault as "no
+            // credential", which is right where a caller wants a specific credential. This is not
+            // that: it is a best-effort diagnostic assembled while the process is already refusing,
+            // and its own caller documents the result as a lower bound. Letting the throw out would
+            // discard a partial but true list and replace a refusal that names a remedy with one
+            // that names none -- including on the path where no harness resolved at all and the
+            // store is irrelevant to the operator's actual problem.
+            static function (string $harness) use ($store, $service): bool {
+                try {
+                    return $store->get(CredentialKey::for($service, $harness)) instanceof Credential;
+                } catch (CredentialStoreFailed) {
+                    return false;
+                }
+            }
         ));
     }
 

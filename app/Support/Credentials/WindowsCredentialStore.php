@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Support\Credentials;
 
+use Illuminate\Support\Sleep;
 use SensitiveParameter;
 use Symfony\Component\Process\Process;
 use Throwable;
@@ -343,18 +344,60 @@ final class WindowsCredentialStore implements CredentialStore
         }
     }
 
+    /**
+     * The credential for one service, or null when none is stored.
+     *
+     * **Null means "not enrolled", and nothing else.** A helper that exited for any other reason
+     * raises `CredentialStoreFailed` rather than being reported as an empty Credential Manager.
+     * That is a `RuntimeException`, which `ApiCommand` and `McpCommand` already catch around the
+     * credential and render as an error, so no caller needs changing for it.
+     *
+     * @param  string  $service  The credential key.
+     *
+     * @throws CredentialStoreFailed When the mechanism failed, as opposed to holding nothing.
+     */
     public function get(string $service): ?Credential
     {
-        [$exitCode, $output] = $this->readThroughPipe($this->target($service));
+        [$exitCode, $output, $errors] = $this->readThroughPipe($this->target($service));
 
-        // `NOT_FOUND` is the expected answer for a machine that is simply not enrolled; anything
-        // else non-zero is a broken mechanism, and both mean there is no credential to hand back.
-        if ($exitCode !== 0) {
+        // A machine that is simply not enrolled. The only answer that is not a fault.
+        if ($exitCode === self::NOT_FOUND) {
             return null;
+        }
+
+        // **Anything else non-zero is a broken mechanism, and saying so is the whole point of
+        // `NOT_FOUND` existing.** `probe()` already demands exactly that code; collapsing every
+        // other code into null here threw the distinction away at the one place a caller could act
+        // on it. Exit 1 is a refused `Add-Type` or a thrown script, exit 4 is the script's
+        // `default` branch, and neither means "no credential".
+        //
+        // `available()` is memoized for the life of the instance and one instance is resolved per
+        // command run, so the probe answers once, early -- a machine can pass it and then fail
+        // every later call. Reported as "not enrolled", the remedy an operator reaches for is to
+        // enroll again, which asks the service for a *new* credential and stores it through the
+        // same broken mechanism.
+        if ($exitCode !== 0) {
+            // Exit 1 alone covers three faults -- `Add-Type` refused, the script threw, or
+            // `CredReadW` failed with something other than `ERROR_NOT_FOUND` -- and only stderr
+            // tells them apart. It is already in hand, so naming it costs nothing.
+            throw new CredentialStoreFailed(rtrim(sprintf(
+                'Windows Credential Manager could not be read (the helper exited %d). %s',
+                $exitCode,
+                $this->firstLine($errors),
+            )));
         }
 
         $decoded = base64_decode(trim($output), true);
 
+        // **An accepted gap, stated rather than claimed impossible.** An earlier version of this
+        // comment said the script had no path here. It has: an entry whose blob is zero bytes
+        // makes `Read()` return an empty array rather than null, so the script writes an empty
+        // string and exits 0. Measured on 2026-09-21 against a throwaway target. `probe()`'s
+        // docblock names a second: a host that prefixed or mangled stdout would also land here.
+        //
+        // Both read as "not enrolled", which is the residue of the defect this method otherwise
+        // closes. Null rather than a throw, because an empty blob is not a credential and there is
+        // no exit code to name -- but it is a gap, not an impossibility.
         if ($decoded === false || $decoded === '') {
             return null;
         }
@@ -426,7 +469,7 @@ final class WindowsCredentialStore implements CredentialStore
      * to read its own write back.
      *
      * @param  string  $target  The Credential Manager target to read.
-     * @return array{0: int, 1: string} The exit code and what the child wrote on stdout.
+     * @return array{0: int, 1: string, 2: string} The exit code, stdout, and stderr.
      */
     private function readThroughPipe(string $target): array
     {
@@ -451,16 +494,77 @@ final class WindowsCredentialStore implements CredentialStore
 
         fclose($pipes[0]);
 
-        // Bounded, because nothing else bounds it here: `Process` owned the timeout on every other
-        // call, and a child that never writes would otherwise hold this read open forever.
-        stream_set_timeout($pipes[1], self::TIMEOUT_SECONDS);
+        // **The bound is a status poll, not a stream timeout, and that is measured rather than
+        // preferred.** Three mechanisms were tried on 2026-09-21 and two do not work on a Windows
+        // pipe:
+        //
+        // - `stream_set_blocking($pipe, false)` returns **false** and has no effect. A read against
+        //   a child sleeping five seconds returned after 5.27s.
+        // - `stream_select()` with a two-second timeout returned **2 immediately**, reporting both
+        //   pipes readable when neither was, so it cannot serve as a readiness check either.
+        // - `proc_get_status()` does not block, so polling it against a wall-clock deadline is a
+        //   bound that actually binds.
+        //
+        // Reading only after the child has exited is what makes that safe: at that point both
+        // streams are at EOF and come back immediately. It depends on the child being able to
+        // write everything without the parent draining, which was measured too -- 4,096 characters
+        // of stdout fit and the child exits, 8,192 blocks. The largest this call can return is
+        // 3,416, because `MAX_BLOB_BYTES` bounds what `put()` will store.
+        //
+        // A blob larger than that, written by something other than this store, makes the child
+        // block and this loop time out. That is a bounded failure with a message, not a hang.
+        $deadline = microtime(true) + self::TIMEOUT_SECONDS;
+
+        while (proc_get_status($handle)['running']) {
+            if (microtime(true) >= $deadline) {
+                proc_terminate($handle);
+                fclose($pipes[1]);
+                fclose($pipes[2]);
+                proc_close($handle);
+
+                throw new CredentialStoreFailed(sprintf(
+                    'Windows Credential Manager did not answer within %d seconds.',
+                    self::TIMEOUT_SECONDS,
+                ));
+            }
+
+            // Short enough not to add noticeable latency to a call that takes about 650ms, long
+            // enough not to spin a core while waiting for it. `Sleep` rather than `usleep()`,
+            // which the `strict()` arch preset forbids across `App\` -- and which a test could
+            // not have faked anyway.
+            Sleep::for(10)->milliseconds();
+        }
 
         $output = (string) stream_get_contents($pipes[1]);
+        $errors = (string) stream_get_contents($pipes[2]);
 
         fclose($pipes[1]);
         fclose($pipes[2]);
 
-        return [proc_close($handle), $output];
+        return [proc_close($handle), $output, $errors];
+    }
+
+    /**
+     * The first line of what the helper wrote on stderr, trimmed, for a message.
+     *
+     * One line rather than all of it: `Add-Type`'s failures run to several hundred bytes of
+     * PowerShell formatting, and the first line carries the cause. Nothing here can hold a
+     * credential -- the value travels on stdout, and this is the other stream.
+     *
+     * @param  string  $errors  What the child wrote on stderr.
+     * @return string The first non-empty line, or an empty string.
+     */
+    private function firstLine(string $errors): string
+    {
+        foreach (preg_split('/\R/', $errors) ?: [] as $line) {
+            $line = trim($line);
+
+            if ($line !== '') {
+                return $line;
+            }
+        }
+
+        return '';
     }
 
     /**

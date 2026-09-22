@@ -59,7 +59,28 @@ interface CredentialStore
     /**
      * The credential for one service, or null when none is stored.
      *
+     * **Null means "nothing is stored", and an implementation that can tell a broken mechanism
+     * apart from that must raise rather than return null for it.** Decided on
+     * `robot-council/cli#39`. The two are genuinely different answers: reported as "not enrolled",
+     * the remedy an operator reaches for is to enroll again, which asks the service for a new
+     * credential and stores it through the same broken mechanism -- creating an installation on
+     * the way and never stating the fault.
+     *
+     * `CredentialStoreFailed` is a `RuntimeException`, and `ApiCommand` and `McpCommand` wrap the
+     * credential resolution in a catch for it, so raising costs a caller nothing.
+     *
+     * **Only `WindowsCredentialStore` does this today, and that is a measurement gap rather than a
+     * decision.** Its helper defines a distinct exit code for "no such credential", so it can tell
+     * them apart. Whether `security` and `secret-tool` can is unmeasured -- `robot-council/cli#54`
+     * is where that is settled, and every store that turns out to be able to will follow this one.
+     * `UserFileStore` reads a JSON file and deliberately treats a corrupt one as empty, so a
+     * developer can re-enroll rather than hand-edit; whether that deserves the same treatment is a
+     * judgment recorded there too.
+     *
      * @param  string  $service  The service's base URL.
+     *
+     * @throws CredentialStoreFailed When the store could tell that its mechanism failed, as
+     *                               opposed to holding nothing.
      */
     public function get(string $service): ?Credential;
 

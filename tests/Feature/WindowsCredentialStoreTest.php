@@ -174,7 +174,10 @@ it('agrees with its script about which exit code means "no such credential"', fu
     // `NOT_FOUND` and the script's `exit` literal are coupled by nothing but this test. Change
     // either alone and `available()` returns false on every machine, every gated test below skips,
     // and the suite is green.
-    expect(constantOf('SCRIPT'))->toContain(sprintf('exit %d', intConstantOf('NOT_FOUND')));
+    // Pinned to the read branch's own line rather than a bare `exit N`: the script also
+    // contains `exit 0` and `exit 4`, so the looser assertion passed for three different
+    // values of the constant and could not do the job its comment claims.
+    expect(constantOf('SCRIPT'))->toContain(sprintf('if ($null -eq $blob) { exit %d }', intConstantOf('NOT_FOUND')));
 });
 
 it('probes a target no service key can ever produce', function (): void {
@@ -293,6 +296,61 @@ it('does not answer for a key that differs only in case', function (): void {
 
     expect($this->store->get($mixed)?->reveal())->toBe(WINDOWS_TOKEN)
         ->and($this->store->get($lower)?->reveal())->toBe('a-different-credential');
+})->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
+
+it('tells a broken mechanism apart from a machine that holds no credential', function (): void {
+    // Driven in subprocesses, because the fault has to be real: the child gets `TMP` pointed at a
+    // path that does not exist, which is the case `probe()`'s docblock names -- `Add-Type` needs a
+    // writable temporary directory for its compiler. Measured: the helper then exits 1 with
+    // `Add-Type : Could not find a part of the path`, where a healthy machine exits 3.
+    $child = static function (?string $temporaryDirectory): array {
+        // **Caught as `RuntimeException`, deliberately.** That is what `ApiCommand` and
+        // `McpCommand` wrap the credential resolution in, so catching the base class here asserts
+        // the fault reaches an operator rather than escaping to Collision. Asserting the class
+        // hierarchy directly was tried and removed: PHPStan proves it always true, which makes it
+        // a fact about the code rather than a test that could fail.
+        $code = <<<'PHP'
+            require $argv[1].'/vendor/autoload.php';
+            foreach (['Credential', 'CredentialStore', 'CredentialStoreFailed', 'WindowsCredentialStore'] as $class) {
+                require $argv[1].'/app/Support/Credentials/'.$class.'.php';
+            }
+            try {
+                $got = (new App\Support\Credentials\WindowsCredentialStore)->get($argv[2]);
+                fwrite(STDOUT, $got === null ? 'NULL' : 'CREDENTIAL');
+            } catch (RuntimeException $e) {
+                fwrite(STDOUT, 'THREW '.$e::class.': '.$e->getMessage());
+            }
+            PHP;
+
+        $process = new Process(
+            [PHP_BINARY, '-r', $code, \dirname(__DIR__, 2), 'https://broken-'.bin2hex(random_bytes(4)).'.example.test'],
+            timeout: WindowsCredentialStore::TIMEOUT_SECONDS * 2,
+        );
+
+        $process->setEnv($temporaryDirectory === null
+            ? []
+            : ['TMP' => $temporaryDirectory, 'TEMP' => $temporaryDirectory]);
+
+        $process->run();
+
+        return [$process->getExitCode(), trim($process->getOutput())];
+    };
+
+    // **Control first.** A child with a healthy environment must report NULL for a key nothing is
+    // filed under. Without it, a THREW below could be the harness failing rather than the branch
+    // under test, and the two are indistinguishable from the assertion alone.
+    [$healthyExit, $healthy] = $child(null);
+
+    expect($healthyExit)->toBe(0)
+        ->and($healthy)->toBe('NULL');
+
+    // The same call, on a machine whose helper cannot run. "Not enrolled" would be a lie here: the
+    // remedy it invites is to enroll again, which asks the service for a new credential and stores
+    // it through the same broken mechanism.
+    [, $broken] = $child('Z:\no-such-dir');
+
+    expect($broken)->toStartWith('THREW '.CredentialStoreFailed::class.':')
+        ->and($broken)->toContain('the helper exited 1)');
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
 it('keeps two services apart rather than overwriting one with the other', function (): void {

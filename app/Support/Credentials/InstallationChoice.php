@@ -47,9 +47,12 @@ final class InstallationChoice
      * @param  string|null  $flag  What `--harness` said, if anything.
      * @return Credential The credential to present.
      *
-     * @throws RuntimeException When no harness resolves, or none is stored for the one that did.
-     *                          Its message is written for a developer mid-wire-up and is safe to
-     *                          print: it names what is stored, never what is in it.
+     * @throws RuntimeException When no harness resolves, when none is stored for the one that did,
+     *                          or when the credential store itself could tell that its mechanism
+     *                          had failed. Every message is written for a developer mid-wire-up
+     *                          and is safe to print: they name what is stored, never what is in it.
+     *                          The third is why `remedies()` swallows a store failure -- a
+     *                          diagnostic that aborts the diagnosis is worse than a short one.
      */
     public function for(string $service, ?string $flag): Credential
     {
@@ -154,7 +157,18 @@ final class InstallationChoice
             );
         }
 
-        if ($this->credentials->legacy($service) instanceof Credential) {
+        // Swallowed for the same reason `storedAmong()` swallows its own: this runs while the
+        // process is already refusing, and a store that has broken since the command started must
+        // not replace a refusal that names a remedy with one that names none. A legacy credential
+        // that cannot be read is reported as absent, which sends the operator to `enroll` -- the
+        // right advice whether the entry is missing or unreadable.
+        try {
+            $legacy = $this->credentials->legacy($service) instanceof Credential;
+        } catch (CredentialStoreFailed) {
+            $legacy = false;
+        }
+
+        if ($legacy) {
             return 'A credential stored before harnesses were told apart is here. '
                 .'Pass --harness=<the harness it was enrolled as> to claim it, or run `robot-council enroll` again.';
         }

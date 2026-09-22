@@ -71,6 +71,11 @@ final class UserFileStore implements CredentialStore
 
     public function get(string $service): ?Credential
     {
+        // **This store returns null for a corrupt file, and that is a decision rather than the gap
+        // `CredentialStore::get()` describes.** `all()` reads an unparseable file as empty on
+        // purpose, so a developer whose JSON got mangled can re-enroll instead of hand-editing it.
+        // Raising here would take that away to report a fault the developer can already see, in a
+        // file whose path `describe()` prints.
         $value = $this->all()[$service] ?? null;
 
         return \is_string($value) ? new Credential($value) : null;
