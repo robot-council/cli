@@ -49,7 +49,7 @@ use Throwable;
  * `CredentialStore` says of every store here. What it buys is that the token is not in a process
  * list, not in a script, and not in a world-readable file.
  */
-final class WindowsCredentialStore implements CredentialStore
+final class WindowsCredentialStore implements CredentialStore, ReadsManyCredentials
 {
     /**
      * The prefix every credential is filed under, so the targets this store owns are greppable in
@@ -81,6 +81,15 @@ final class WindowsCredentialStore implements CredentialStore
      * mechanism that never reached `CredReadW` cannot produce.
      */
     private const int NOT_FOUND = 3;
+
+    /**
+     * The exit code the batched read uses for "every key raised".
+     *
+     * Distinct from an empty answer on purpose. A batch that could read nothing is a broken
+     * mechanism, and reporting it as an unenrolled machine is the conflation
+     * `robot-council/cli#39` refused -- at the scale of every harness at once.
+     */
+    private const int READ_ALL_FAILED = 5;
 
     /**
      * The interpreter the credential is piped into, named literally.
@@ -115,13 +124,13 @@ final class WindowsCredentialStore implements CredentialStore
      * How much the helper may write to one stream without the parent draining it, in bytes.
      *
      * **A floor, not the pipe's capacity.** Measured on 2026-09-22 by polling a child through the
-     * same `proc_open` mechanism `readThroughPipe()` uses and never reading: 4,096 bytes fit and the
+     * same `proc_open` mechanism `throughPipe()` uses and never reading: 4,096 bytes fit and the
      * child exits, 8,192 blocks. The true capacity is somewhere between, and this is the figure
      * safe to reason with.
      *
      * **Identical on stdout and stderr**, which was worth measuring rather than assuming --
      * `robot-council/cli#58` exists because the original bound reasoned about stdout alone.
-     * `readThroughPipe()` records what each stream can actually produce against it.
+     * `throughPipe()` records what each stream can actually produce against it.
      */
     public const int PIPE_BUFFER_BYTES = 4096;
 
@@ -152,7 +161,7 @@ final class WindowsCredentialStore implements CredentialStore
      *   about 732 bytes, because the first error is terminating and there is never a second to
      *   report. Without it the script runs on and emits an error per statement: 1,385 bytes at one
      *   error, **7,991 at ten**, and **22,809 at thirty** -- past `PIPE_BUFFER_BYTES` and into the
-     *   range where the child blocks and `readThroughPipe()` can only time out.
+     *   range where the child blocks and `throughPipe()` can only time out.
      *   `robot-council/cli#58` is where that was settled.
      * - **It is also what makes a broken mechanism report a failure.** Without it, a refused
      *   `Add-Type` is non-terminating, `Read()` leaves `$blob` null, and the script reaches
@@ -312,6 +321,31 @@ final class WindowsCredentialStore implements CredentialStore
                 [RobotCouncilCredential]::Write($target, [string] $env:ROBOT_COUNCIL_USERNAME, $blob)
                 exit 0
             }
+            'readMany' {
+                # Targets arrive base64-encoded, one per line; the answer is the INDEX of each one
+                # that exists. Reasoning in `getMany()`'s docblock, which costs no environment.
+                $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput())
+                $index = 0
+                $asked = 0
+                $failed = 0
+                while ($null -ne ($line = $reader.ReadLine())) {
+                    if ($line.Length -gt 0) {
+                        $asked++
+                        $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line))
+                        try {
+                            if ($null -ne [RobotCouncilCredential]::Read($decoded)) {
+                                [Console]::Out.WriteLine($index)
+                            }
+                        } catch { $failed++ }
+                    }
+                    $index++
+                }
+                # Every read failing is a broken mechanism, not an unenrolled machine, and silence
+                # would report it as the second. One failure among several is the omission the
+                # contract asks for; all of them is not.
+                if ($asked -gt 0 -and $failed -eq $asked) { exit 5 }
+                exit 0
+            }
             'forget' {
                 [RobotCouncilCredential]::Delete($target)
                 exit 0
@@ -382,7 +416,7 @@ final class WindowsCredentialStore implements CredentialStore
      */
     public function get(string $service): ?Credential
     {
-        [$exitCode, $output, $errors] = $this->readThroughPipe($this->target($service));
+        [$exitCode, $output, $errors] = $this->throughPipe('read', $this->target($service));
 
         // A machine that is simply not enrolled. The only answer that is not a fault.
         if ($exitCode === self::NOT_FOUND) {
@@ -427,6 +461,133 @@ final class WindowsCredentialStore implements CredentialStore
         }
 
         return new Credential($decoded);
+    }
+
+    /**
+     * The credentials for several services, asking Credential Manager once which of them exist.
+     *
+     * **The win is not "one process", it is "not fifteen `Add-Type` compiles".** `storedAmong()`
+     * asks about every harness the detector knows about while the command line is already refusing,
+     * and on this store that was a `powershell.exe` start apiece: `robot-council/cli#31` measured
+     * 11,656ms serial against 974ms batched, with the cost in the single compile rather than in the
+     * reads.
+     *
+     * **Why the batch answers existence rather than credentials.** The parent cannot drain the pipe
+     * while the child runs -- `stream_set_blocking()` has no effect on a Windows pipe and
+     * `stream_select()` reports a pipe readable when it is not, both measured for
+     * `robot-council/cli#58` -- so `throughPipe()` reads only after the child exits, which is safe
+     * only while the child's whole answer fits `PIPE_BUFFER_BYTES`. One credential does, at 3,416
+     * base64 characters against 4,096. **Two do not**, and fifteen overrun it twelvefold. A batch
+     * that carried blobs would therefore deadlock on any machine holding two large credentials and
+     * pass every test written against small ones. Existence costs a few bytes per hit, so the
+     * answer is bounded by construction rather than by a guess about credential sizes. The decision
+     * and its rejected alternatives are on `robot-council/cli#90`.
+     *
+     * **The answer is an index into the request, and that is load-bearing.** `ReadsManyCredentials`
+     * requires a key that could not be read to be omitted, so a bare sequence of answers would slip
+     * by one at the first omission and return every later credential against the wrong key --
+     * which, for a store whose whole point is that one harness never receives another's credential,
+     * is the worst available failure. An index names which key it answers for, so an omission costs
+     * nothing.
+     *
+     * **And the map comes back under the caller's own key.** `target()` maps a key through
+     * `WindowsCredentialTarget::for()` to `robot-council:<key>#<digest>`, so the string this store
+     * looks up is never the string the caller asked with. Credential Manager also matches targets
+     * case-insensitively and reports the casing it stored, so the script echoes nothing back: the
+     * caller's array supplies every key in the result.
+     *
+     * @param  list<string>  $services  The services to read, each already a full key.
+     * @return array<string, Credential> Keyed by service, holding only those with a credential.
+     *
+     * @throws CredentialStoreFailed When the mechanism failed, as opposed to holding nothing.
+     */
+    public function getMany(array $services): array
+    {
+        // No process for no question. The batch costs an `Add-Type` compile whatever it is given,
+        // and `storedAmong()` is not the only caller this contract can acquire.
+        if ($services === []) {
+            return [];
+        }
+
+        $found = [];
+
+        foreach ($this->existingAmong($services) as $index) {
+            // The index arrives from a subprocess, so it is checked rather than trusted. Anything
+            // outside the request is not a key this call asked about.
+            if (! \array_key_exists($index, $services)) {
+                continue;
+            }
+
+            $service = $services[$index];
+
+            try {
+                $credential = $this->get($service);
+            } catch (CredentialStoreFailed) {
+                // Omitted rather than raised, which is what `ReadsManyCredentials` asks of a batch:
+                // one unreadable key costs that key and no other.
+                //
+                // **What raises instead is every key failing**, which the helper reports with
+                // `READ_ALL_FAILED` rather than an empty answer. Silence there would report a
+                // broken mechanism as fifteen harnesses none of which is enrolled -- the
+                // conflation `robot-council/cli#39` refused, at the only scale where it would
+                // send an operator to re-enroll through the same broken store.
+                continue;
+            }
+
+            if ($credential instanceof Credential) {
+                $found[$service] = $credential;
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Which of these services hold a credential, as indices into the list given.
+     *
+     * One `powershell.exe` invocation. The targets travel on stdin, base64-encoded one per line, so
+     * a service key holding a newline cannot forge a record -- the same reasoning that keeps the
+     * credential out of argv, applied to the one input a caller controls here.
+     *
+     * @param  list<string>  $services  The services to ask about.
+     * @return list<int> Indices into `$services`, ascending.
+     *
+     * @throws CredentialStoreFailed When the mechanism failed.
+     */
+    private function existingAmong(array $services): array
+    {
+        $input = implode("\n", array_map(
+            fn (string $service): string => base64_encode($this->target($service)),
+            $services,
+        ))."\n";
+
+        [$exitCode, $output, $errors] = $this->throughPipe('readMany', '', $input);
+
+        if ($exitCode !== 0) {
+            throw new CredentialStoreFailed(sprintf(
+                '%s (the helper exited %d). %s',
+                $exitCode === self::READ_ALL_FAILED
+                    ? 'Windows Credential Manager refused every credential it was asked about'
+                    : 'Windows Credential Manager could not be asked which credentials it holds',
+                $exitCode,
+                $errors === '' ? 'It wrote nothing to stderr.' : 'It reported: '.trim($errors),
+            ));
+        }
+
+        $indices = [];
+
+        foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
+            $line = trim($line);
+
+            // A line that is not a plain index is a helper this code does not recognise, not a
+            // credential that exists. Dropping it cannot invent a hit; the worst it does is make a
+            // stored credential look absent, which `storedAmong()` already documents as its bound.
+            if ($line !== '' && ctype_digit($line)) {
+                $indices[] = (int) $line;
+            }
+        }
+
+        return $indices;
     }
 
     public function forget(string $service): void
@@ -478,9 +639,12 @@ final class WindowsCredentialStore implements CredentialStore
      * to read its own write back.
      *
      * @param  string  $target  The Credential Manager target to read.
+     * @param  string  $operation  The script operation to run.
+     * @param  string  $target  The target name, for an operation that takes one.
+     * @param  string|null  $input  What to write to the child's stdin, for an operation that reads it.
      * @return array{0: int, 1: string, 2: string} The exit code, stdout, and stderr.
      */
-    private function readThroughPipe(string $target): array
+    private function throughPipe(string $operation, string $target, ?string $input = null): array
     {
         $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
 
@@ -490,7 +654,7 @@ final class WindowsCredentialStore implements CredentialStore
             $pipes,
             null,
             [
-                'ROBOT_COUNCIL_OPERATION' => 'read',
+                'ROBOT_COUNCIL_OPERATION' => $operation,
                 'ROBOT_COUNCIL_TARGET' => $target,
                 'ROBOT_COUNCIL_USERNAME' => '',
             ] + $this->inheritedEnvironment(),
@@ -499,6 +663,18 @@ final class WindowsCredentialStore implements CredentialStore
 
         if (! \is_resource($handle)) {
             throw new CredentialStoreFailed('Windows Credential Manager could not be reached.');
+        }
+
+        // **Written before stdin closes, and the close is what ends the child's read.** The
+        // batched operation reads stdin to EOF; without the close it would wait for one forever.
+        //
+        // A write larger than `PIPE_BUFFER_BYTES` blocks until the child drains it, and the child
+        // does not drain until `Add-Type` has compiled -- about 700ms. That is a pause, not a
+        // deadlock: the child is waiting on nothing the parent holds, and its own output here is a
+        // few bytes per hit. Fifteen targets of a normal fleet URL come to about 1,800 bytes; a
+        // service key past roughly 160 characters is what pushes the write over the buffer.
+        if ($input !== null) {
+            fwrite($pipes[0], $input);
         }
 
         fclose($pipes[0]);
