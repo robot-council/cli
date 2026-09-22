@@ -535,11 +535,24 @@ documentation describes as submitted automatically as the next user message, and
 continuations with `loop_limit` rather than with a field on the payload -- which is why the script's
 own `stop_hook_active` guard never fires here and `loop_limit` is the only thing bounding it.
 
-**Not run against a harness.** Cursor 3.17.19 is installed on the machine this was written on, but it
-ships no headless agent binary -- there is no `cursor-agent` here -- so exercising a `stop` hook means
-driving the editor by hand, and nothing below did.
-[#72](https://github.com/robot-council/cli/issues/72) carries it, on the Windows machine that already
-runs Cursor against this fleet.
+**Not run against a harness**, and the reason is an account rather than a missing tool.
+[#72](https://github.com/robot-council/cli/issues/72) carries it.
+
+Cursor 3.17.19 is installed on the machine this was written on, and **`cursor agent` is a headless
+runner directly comparable to `claude -p`**: `-p/--print` with `--output-format text | json |
+stream-json`, which is what the Claude Code measurements above were taken with. Invoking it installs
+`cursor-agent` from `cursor.com/install` on first use; here that produced 2026.09.18-9a7762b in
+`~/.local/bin`, which is not on the default `PATH`. `cursor agent status` then reported **`Not logged
+in`**, and `cursor agent login` is a browser flow, so nothing was run.
+
+This is corrected from an earlier reading of "no headless binary", which came from looking for a
+`cursor-agent` on `PATH` and reading the top of `cursor --help`. The `Subcommands` block naming
+`agent` is at the bottom of that same output. A narrower question than the one that mattered,
+answered in the reassuring direction.
+
+**Whether `cursor agent -p` runs `stop` hooks at all is itself unmeasured**, and it is the first
+thing #72 should establish. `claude -p` does, which the section above records, but that is a
+measurement about a different harness and carries nothing here.
 
 What *was* run, on 2026-09-22: given a planted sink and Cursor's documented stdin, the script printed
 
