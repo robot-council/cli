@@ -49,6 +49,53 @@ final class KeychainStore implements CredentialStore
     public const int TIMEOUT_SECONDS = 15;
 
     /**
+     * The exit code `security` uses for an item that is not in the keychain.
+     *
+     * **Measured, because the assumption it replaces was wrong.** `robot-council/cli#39` reasoned
+     * that `security` "exits non-zero both for a missing item and for a failure, so collapsing them
+     * there loses nothing", and left this store returning null for every failure. On macOS 26.6.2
+     * on 2026-09-22, with a successful lookup as the control:
+     *
+     * | case | exit |
+     * | --- | --- |
+     * | the item is found | `0` |
+     * | the item is absent | **`44`**, `The specified item could not be found in the keychain` |
+     * | an unknown subcommand | `1` |
+     *
+     * **The distinction this buys is narrower than it looks, and the bound is worth stating.**
+     * Five ways of making the lookup fail for a reason other than absence were tried, and every
+     * one answered `44` with that same message:
+     *
+     * | attempted fault | exit |
+     * | --- | --- |
+     * | a keychain file that does not exist | `44` |
+     * | a malformed keychain file | `44` |
+     * | a directory passed as the keychain | `44` |
+     * | a **locked** keychain holding the item | `44` |
+     * | `HOME` pointing at a path that does not exist | `44` |
+     * | an unknown flag | `2` |
+     * | an unknown subcommand | `1` |
+     *
+     * So `find-generic-password` answers `44` for anything it can read as "no such item", and
+     * something else only for invocations it cannot parse -- which this store, whose arguments are
+     * fixed, never makes. **The `!== 0` branch below is therefore defensive rather than
+     * load-bearing**: it exists so a code nobody has seen is reported instead of silently read as
+     * "not enrolled", and no test can reach it without replacing the binary.
+     *
+     * The case that is genuinely not improved is a **locked keychain**, which is reported as not
+     * enrolled. That is a property of the tool rather than of this code.
+     *
+     * `robot-council/cli#85` asks the same question of `secret-tool`.
+     */
+    // Reported UNCOVERED rather than survived, which is a coverage artifact and not a gap: a
+    // `const` declaration executes on no line, so the mutation run never reaches the tests that
+    // depend on it. Measured instead by planting `43`, which turns FOUR tests red -- `it pins
+    // NOT_FOUND to what `security` actually exits with` on the number itself, and three others
+    // through `CredentialStoreFailed`, because every absent lookup then raises.
+    // @pest-mutate-ignore: DecrementInteger, IncrementInteger
+    public const int NOT_FOUND = 44;
+
+    /**
      * What `security -g` prefixes the password line with on stderr.
      */
     private const string PASSWORD_PREFIX = 'password: ';
@@ -129,16 +176,34 @@ final class KeychainStore implements CredentialStore
 
         $read->run();
 
-        // **Both a missing item and a failure land here, and whether this backend can tell
-        // them apart is unmeasured.** `CredentialStore::get()` says an implementation that
-        // can must raise instead; `WindowsCredentialStore` does. `robot-council/cli#54`
-        // measures the exit codes this tool actually produces, and this follows from it.
-        // An unsuccessful read is a missing item, and the parser below would reach the same answer
-        // from the empty stderr it leaves -- so this is an early exit rather than a decision, and
-        // no input can kill its removal.
-        // @pest-mutate-ignore: RemoveEarlyReturn
-        if (! $read->isSuccessful()) {
+        $exitCode = $read->getExitCode();
+
+        // A machine that is simply not enrolled. The only answer here that is not a fault.
+        if ($exitCode === self::NOT_FOUND) {
             return null;
+        }
+
+        // **Anything else non-zero is a broken mechanism, and reporting it is the whole point of
+        // `NOT_FOUND` existing.** `CredentialStore::get()` requires an implementation that can tell
+        // the two apart to raise rather than return null, because "not enrolled" sends an operator
+        // to enroll again -- which stores a new credential through the same broken mechanism and
+        // never states the fault. `WindowsCredentialStore` has done this since cli#39; cli#54
+        // measured that `security` carries the same distinction and this store was discarding it.
+        //
+        // `getExitCode()` is null when the process never started, which is a fault rather than an
+        // absence, so it lands here too.
+        if ($exitCode !== 0) {
+            // Nothing inside this branch can be reached from a test, for the reason the constant's
+            // docblock measures: every way of making the lookup fail answers `44`, and the codes
+            // that are not `44` come from invocations this store's fixed argument list cannot make.
+            // `UnwrapRtrim` and `CoalesceRemoveLeft` below are both message formatting on that
+            // path, so no input separates them from the original.
+            // @pest-mutate-ignore: UnwrapRtrim, CoalesceRemoveLeft
+            throw new CredentialStoreFailed(rtrim(sprintf(
+                'The macOS Keychain could not be read: `security` exited %s. %s',
+                $exitCode ?? 'without starting',
+                $read->getErrorOutput()
+            )));
         }
 
         $value = $this->password($read->getErrorOutput());
