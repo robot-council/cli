@@ -77,6 +77,32 @@ final class WindowsCredentialTarget
     public const int MAX_BLOB_BYTES = 2560;
 
     /**
+     * The longest service key Windows will store, in UTF-16 code units.
+     *
+     * Both stores pass the service key as the credential's user name, which the Credential Manager
+     * UI shows and which nothing here reads back, and `CredWriteW` refuses one over this length with
+     * Windows error 1734. So this is a ceiling on the key itself rather than on anything cosmetic.
+     *
+     * **512, not the documented `CRED_MAX_USERNAME_LENGTH` of 513**, which counts the terminator.
+     * Measured on 2026-09-22 from both sides: 512 stores, 513 is refused.
+     *
+     * **And the unit is code units, not bytes, which is the part that is easy to get wrong.**
+     * Measured across four alphabets on 2026-09-22, every one refusing at 513 code units:
+     *
+     * | key | characters stored | UTF-8 bytes at that size |
+     * | --- | ---: | ---: |
+     * | ASCII | 512 | 512 |
+     * | `e-acute` | 512 | 1,024 |
+     * | a kanji | 512 | 1,536 |
+     * | an emoji, a surrogate pair apiece | 256 | 1,024 |
+     *
+     * A check written with `strlen()` would therefore be wrong in the refusing direction, turning
+     * away a 512-character key of kanji that Windows stores without complaint. `userNameUnits()` is
+     * what to measure with.
+     */
+    public const int MAX_USER_NAME_UNITS = 512;
+
+    /**
      * The target one service key is filed under.
      *
      * @param  string  $service  The credential key, which nothing here parses.
@@ -85,6 +111,50 @@ final class WindowsCredentialTarget
     public static function for(string $service): string
     {
         return sprintf('%s%s#%s', self::PREFIX, $service, substr(hash('sha256', $service), 0, 16));
+    }
+
+    /**
+     * How long a string is in UTF-16 code units, which is the unit Windows counts a user name in.
+     *
+     * The same conversion `WindowsFfiCredentialStore::wide()` performs before handing the string to
+     * `advapi32`, so what is checked here and what is written there cannot disagree -- including for
+     * a key that is not valid UTF-8, where both see whatever the conversion substitutes.
+     *
+     * @param  string  $value  A UTF-8 string.
+     * @return int Its length in UTF-16 code units.
+     */
+    public static function userNameUnits(string $value): int
+    {
+        return \intdiv(\strlen(mb_convert_encoding($value, 'UTF-16LE', 'UTF-8')), 2);
+    }
+
+    /**
+     * Refuse a service key Windows will not store, before either store calls `CredWriteW`.
+     *
+     * **Here rather than in each store, so the two refuse at the same length with the same words.**
+     * That is the reason this class exists: a machine's `php.ini` decides which store it uses, and
+     * a key that one accepted and the other refused would make enrollment depend on a setting that
+     * has nothing to do with it.
+     *
+     * The message names the limit, matching the shape `MAX_BLOB_BYTES` already uses -- which exists
+     * because a failure reported through a read-back only says the value did not land, and the
+     * remedy for an over-long key is nothing like the remedy for a broken mechanism.
+     *
+     * @param  string  $service  The credential key.
+     *
+     * @throws CredentialStoreFailed When Windows would refuse it.
+     */
+    public static function assertStorable(string $service): void
+    {
+        $units = self::userNameUnits($service);
+
+        if ($units > self::MAX_USER_NAME_UNITS) {
+            throw new CredentialStoreFailed(sprintf(
+                'The service key is %d characters long, and Windows Credential Manager stores at most %d.',
+                $units,
+                self::MAX_USER_NAME_UNITS,
+            ));
+        }
     }
 
     /**

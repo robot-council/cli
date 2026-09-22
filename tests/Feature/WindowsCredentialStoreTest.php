@@ -413,6 +413,30 @@ it('tells a broken mechanism apart from a machine that holds no credential', fun
         ->and($broken)->toContain('the helper exited 1)');
 })->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
 
+it('stores a service key at the length ceiling and refuses one past it', function (): void {
+    // The same boundary the FFI store is held to, through this mechanism, so a machine's `php.ini`
+    // cannot change which keys enroll. The key travels as the credential's user name, which Windows
+    // caps at 512 UTF-16 code units.
+    $ceiling = WindowsCredentialTarget::MAX_USER_NAME_UNITS;
+    $atCeiling = 'https://'.str_repeat('a', $ceiling - \strlen('https://.example.test')).'.example.test';
+
+    expect(WindowsCredentialTarget::userNameUnits($atCeiling))->toBe($ceiling);
+
+    $this->written[] = $atCeiling;
+    $this->store->put($atCeiling, new Credential(WINDOWS_TOKEN));
+
+    expect($this->store->get($atCeiling)?->reveal())->toBe(WINDOWS_TOKEN);
+
+    $tooLong = $atCeiling.'x';
+
+    // **This path could not report the cause before.** The helper's .NET exception arrives as exit
+    // 1 with the Windows error number inside a message `put()` discards, so an over-long key and a
+    // refused `Add-Type` were the same answer -- `The credential could not be stored`, from the
+    // read-back rather than the write.
+    expect(fn () => $this->store->put($tooLong, new Credential(WINDOWS_TOKEN)))
+        ->toThrow(CredentialStoreFailed::class, (string) $ceiling);
+})->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
+
 it('keeps two services apart rather than overwriting one with the other', function (): void {
     $this->store->put($this->service, new Credential(WINDOWS_TOKEN));
     $this->store->put($this->other, new Credential('a-different-credential'));

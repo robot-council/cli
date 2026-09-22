@@ -339,6 +339,43 @@ it('refuses an empty credential rather than appearing to store one', function ()
     expect($this->store->get($this->service))->toBeNull();
 })->skip(requiresFfiCredentialManager(...), 'FFI cannot reach Credential Manager on this machine.');
 
+it('stores a service key at the length ceiling and refuses one past it', function (): void {
+    // **Both sides of the boundary, against a real Credential Manager**, with the sizes taken from
+    // the constant. The key travels as the credential's user name, which Windows caps at 512 UTF-16
+    // code units -- so this is a ceiling on the fleet URL plus harness, not on anything cosmetic.
+    $ceiling = WindowsCredentialTarget::MAX_USER_NAME_UNITS;
+    $atCeiling = 'https://'.str_repeat('a', $ceiling - \strlen('https://.example.test')).'.example.test';
+
+    expect(WindowsCredentialTarget::userNameUnits($atCeiling))->toBe($ceiling);
+
+    $this->written[] = $atCeiling;
+    $this->store->put($atCeiling, new Credential(FFI_TOKEN));
+
+    // The half that would break if the ceiling were set one too low: a key exactly at it still
+    // round-trips, target and all.
+    expect($this->store->get($atCeiling)?->reveal())->toBe(FFI_TOKEN);
+
+    $tooLong = $atCeiling.'x';
+
+    // And the half that would break if it were one too high: refused before `CredWriteW`, with a
+    // message naming the limit rather than Windows error 1734.
+    expect(fn () => $this->store->put($tooLong, new Credential(FFI_TOKEN)))
+        ->toThrow(CredentialStoreFailed::class, (string) $ceiling);
+})->skip(requiresFfiCredentialManager(...), 'FFI cannot reach Credential Manager on this machine.');
+
+it('stores a non-ASCII service key at the ceiling, which a byte-based rule would refuse', function (): void {
+    // 512 kanji is 1,536 UTF-8 bytes and Windows stores it. This is the round trip that proves the
+    // rule counts the right unit, rather than the arithmetic test alone.
+    $key = str_repeat("\u{6771}", WindowsCredentialTarget::MAX_USER_NAME_UNITS);
+
+    expect(\strlen($key))->toBeGreaterThan(WindowsCredentialTarget::MAX_USER_NAME_UNITS);
+
+    $this->written[] = $key;
+    $this->store->put($key, new Credential(FFI_TOKEN));
+
+    expect($this->store->get($key)?->reveal())->toBe(FFI_TOKEN);
+})->skip(requiresFfiCredentialManager(...), 'FFI cannot reach Credential Manager on this machine.');
+
 it('forgets a credential, and forgetting an absent one is not an error', function (): void {
     $this->store->put($this->service, new Credential(FFI_TOKEN));
 
