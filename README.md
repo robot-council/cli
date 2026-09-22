@@ -290,6 +290,24 @@ waiting for it.
 prints nothing and exits 0 when the fleet has been quiet, and the script below ends the turn on empty
 output. That one line is the whole difference between a hook and a loop.
 
+**Nothing will ever arrive unless somebody on the fleet holds `coordinator:direct`.** A directive is
+the only event that reaches a waiting session unconditionally, and posting one needs that ability --
+which enrollment can never ask for, and which an admin grants from the dashboard afterwards. Every
+other way into a sink needs it too: reassigning a task, cancelling one, forcing a lock open. A task
+claim always assigns to whoever claimed it, and narration reaches no sink at all. Decided on
+[#112](https://github.com/robot-council/cli/issues/112), where the alternatives are recorded.
+
+So a machine can be enrolled, its bridge following the feed, its sink written and its stop hook
+wired into every harness, and still receive nothing at all -- because no installation on that fleet
+was ever granted the ability to send. **Every part reports healthy and the symptom is silence**,
+which is indistinguishable from a fleet that genuinely has nothing to say. Wiring the hook up is
+worth doing anyway; it costs nothing while the fleet is quiet. Just know which of the two you are
+looking at.
+
+**A session does not need the ability to receive.** Holding none of it is the ordinary, correct
+state for a machine that only listens, and it is what enrollment grants. The ability is needed by
+whoever sends.
+
 ### The script every harness runs
 
 One script serves all three harnesses. Fill in the two values at the top and give the path to
