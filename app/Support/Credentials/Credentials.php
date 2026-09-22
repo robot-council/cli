@@ -200,8 +200,10 @@ final class Credentials
     /**
      * Which of the given harnesses have a credential stored for one fleet.
      *
-     * **Probed one at a time, because no store can list its keys.** That is a subprocess apiece on
-     * a keychain, so this is for a path that is already refusing and never for a hot one.
+     * **Probed by key, because no store can list its keys.** A store that declares
+     * `ReadsManyCredentials` answers them all in one call; the rest are asked one at a time, which
+     * is a subprocess apiece on a keychain. Either way this is for a path that is already refusing
+     * and never for a hot one.
      *
      * **The result is a lower bound.** A harness whose read fails is reported as not stored, so a
      * machine whose credential store has broken mid-session lists fewer harnesses rather than
@@ -217,6 +219,11 @@ final class Credentials
     {
         $store = $this->store();
 
+        $found = $this->readMany($store, array_map(
+            static fn (string $harness): string => CredentialKey::for($service, $harness),
+            $harnesses
+        ));
+
         // `array_values` is load-bearing for the DECLARED type rather than for this method's one
         // caller, which does `implode()` and cannot tell the difference. `array_filter` preserves
         // keys, so dropping it returns `array<int<0, max>, string>` where the signature promises
@@ -226,25 +233,67 @@ final class Credentials
         //
         // The marker carries no prose on its own line: v5.0.2 captures the rest of that line and
         // compares it against mutator names, so a trailing explanation silently suppresses nothing.
+        //
+        // It sits on the `return` rather than higher up: a marker above a node suppresses within
+        // THAT node, so leaving it on the assignment above would have silenced nothing here and
+        // left this mutant surviving with an annotation that looked like it covered it.
         // @pest-mutate-ignore: UnwrapArrayValues
         return array_values(array_filter(
             $harnesses,
-            // **A broken mechanism is treated as "not listed" here, deliberately, and only here.**
-            // `WindowsCredentialStore::get()` now raises rather than reporting a fault as "no
-            // credential", which is right where a caller wants a specific credential. This is not
-            // that: it is a best-effort diagnostic assembled while the process is already refusing,
-            // and its own caller documents the result as a lower bound. Letting the throw out would
-            // discard a partial but true list and replace a refusal that names a remedy with one
-            // that names none -- including on the path where no harness resolved at all and the
-            // store is irrelevant to the operator's actual problem.
-            static function (string $harness) use ($store, $service): bool {
-                try {
-                    return $store->get(CredentialKey::for($service, $harness)) instanceof Credential;
-                } catch (CredentialStoreFailed) {
-                    return false;
-                }
-            }
+            // **The ORDER given is the order returned**, and that is why this filters the input
+            // rather than reading the map's own keys. A batching store decides its own output
+            // order, and `remedies()` prints this list to a person.
+            static fn (string $harness): bool => isset($found[CredentialKey::for($service, $harness)])
         ));
+    }
+
+    /**
+     * The credentials among these keys that the store holds, batched where it can be.
+     *
+     * **A broken mechanism is treated as "not stored" here, deliberately, and only here.**
+     * `WindowsCredentialStore::get()` raises rather than reporting a fault as "no credential",
+     * which is right where a caller wants a specific credential. This is not that: it is a
+     * best-effort diagnostic assembled while the process is already refusing, and its caller
+     * documents the result as a lower bound. Letting the throw out would discard a partial but true
+     * list and replace a refusal that names a remedy with one that names none -- including on the
+     * path where no harness resolved at all and the store is irrelevant to the operator's actual
+     * problem.
+     *
+     * **The two paths degrade differently, and the contract is what keeps them comparable.** The
+     * loop catches per key, so one unreadable key costs that key. `ReadsManyCredentials` requires
+     * the same of a batch -- omit what could not be read, do not throw -- because a batch that
+     * threw would take every key with it. The `catch` around it is for a store that cannot run at
+     * all, where there is nothing partial to keep.
+     *
+     * @param  CredentialStore  $store  The store to ask.
+     * @param  list<string>  $keys  The credential keys.
+     * @return array<string, Credential> Those that have a credential, keyed by key.
+     */
+    private function readMany(CredentialStore $store, array $keys): array
+    {
+        if ($store instanceof ReadsManyCredentials) {
+            try {
+                return $store->getMany($keys);
+            } catch (CredentialStoreFailed) {
+                return [];
+            }
+        }
+
+        $found = [];
+
+        foreach ($keys as $key) {
+            try {
+                $credential = $store->get($key);
+            } catch (CredentialStoreFailed) {
+                continue;
+            }
+
+            if ($credential instanceof Credential) {
+                $found[$key] = $credential;
+            }
+        }
+
+        return $found;
     }
 
     /**
