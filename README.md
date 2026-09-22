@@ -497,10 +497,11 @@ claude -p 'Say READY and stop.' --output-format json < /dev/null | jq '.num_turn
 robot-council pending --peek; echo "rc=$?"     # and whether it survived
 ```
 
-**`--peek` is not read-only, whatever its name suggests.** It drains the sink and writes it back, so
-a bridge appending between those two steps can have its event reordered or dropped
-([#71](https://github.com/robot-council/cli/issues/71)). On a live fleet that is a real if narrow
-risk, and it is a reason to verify once rather than to leave the command in a loop.
+**`--peek` is read-only**, and safe to run beside a live bridge. It takes a shared lock and reads;
+it never truncates and never writes. Until
+[#71](https://github.com/robot-council/cli/issues/71) it drained the sink and wrote it back, so an
+event the bridge appended in that window could be ordered behind older ones or, at the bound,
+dropped.
 
 Read `num_turns` and the sink together, because each failure looks like success on its own:
 

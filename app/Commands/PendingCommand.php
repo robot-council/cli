@@ -65,31 +65,13 @@ final class PendingCommand extends Command
 
         $pending = new PendingEvents($service, $harness, $this->stringOption('project'));
 
-        $events = $this->option('peek') === true ? $this->peek($pending) : $pending->drain();
+        $events = $this->option('peek') === true ? $pending->peek() : $pending->drain();
 
         foreach ($events as $event) {
             $this->line($this->describe($event));
         }
 
         return self::SUCCESS;
-    }
-
-    /**
-     * What is waiting, without taking it.
-     *
-     * @return list<array<array-key, mixed>> The events.
-     */
-    private function peek(PendingEvents $pending): array
-    {
-        if ($pending->isEmpty()) {
-            return [];
-        }
-
-        $events = $pending->drain();
-
-        $pending->add($events);
-
-        return $events;
     }
 
     /**
