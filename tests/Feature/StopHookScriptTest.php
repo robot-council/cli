@@ -224,7 +224,7 @@ it('is syntactically valid shell', function (): void {
 
     unlink($script);
 
-    expect($code)->toBe(0, 'bash -n rejected the documented script: '.$error);
+    expect($code)->toBe(0, 'bash -n rejected the documented script: '.firstLineOf($error));
 })->skip(fn (): bool => bashBinary() === null, 'No bash on this machine to check the script with.');
 
 it('answers a Cursor payload with followup_message, BOM and all', function (): void {
@@ -293,7 +293,7 @@ it('strips the BOM, so the payload it leaves behind can be parsed', function ():
 
     $result = runStopHook(CURSOR_BOM_PAYLOAD, 'rebase your branch from otherdev', $probe);
 
-    expect($result['code'])->toBe(0, 'the payload the script left behind did not parse: '.$result['err']);
+    expect($result['code'])->toBe(0, 'the payload the script left behind did not parse: '.firstLineOf($result['err']));
 })->skip(fn (): bool => bashBinary() === null, 'No bash on this machine to run the script with.');
 
 it('would not parse without the strip, which is what makes the test above discriminate', function (): void {
@@ -310,5 +310,5 @@ it('would not parse without the strip, which is what makes the test above discri
 
     $result = runScript($without.$probe, CURSOR_BOM_PAYLOAD, 'rebase your branch from otherdev');
 
-    expect($result['code'])->toBe(9);
+    expect($result['code'])->toBe(9, 'removing the strip did not make the payload unparseable: '.firstLineOf($result['err']));
 })->skip(fn (): bool => bashBinary() === null, 'No bash on this machine to run the script with.');
