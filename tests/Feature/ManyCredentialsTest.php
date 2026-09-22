@@ -97,14 +97,19 @@ it('reports a batching store and a looping one identically, given the same crede
 
 it('keeps the harnesses it could read when one key is unreadable', function (): void {
     // **The lower bound, on the looping path.** One broken key costs that key and no other.
+    //
+    // **The unreadable key is FIRST, and that placement is the whole test.** With it last, a loop
+    // that abandoned every remaining key on the first failure would answer identically to one that
+    // skipped it. Measured: with the unreadable key last, changing `continue` to `break` passed
+    // this file and all 227 tests in the suite.
     $store = new ProbeStore;
-    enroll($store, 'claude');
+    enroll($store, 'codex');
     enroll($store, 'cursor');
-    $store->unreadable = [CredentialKey::for(MANY_FLEET, 'cursor')];
+    $store->unreadable = [CredentialKey::for(MANY_FLEET, 'claude')];
 
-    $found = new Credentials([$store])->storedAmong(MANY_FLEET, ['claude', 'cursor']);
+    $found = new Credentials([$store])->storedAmong(MANY_FLEET, ['claude', 'codex', 'cursor']);
 
-    expect($found)->toBe(['claude']);
+    expect($found)->toBe(['codex', 'cursor']);
 });
 
 it('keeps the harnesses it could read when a BATCHING store cannot read one key', function (): void {
@@ -154,8 +159,9 @@ it('asks nothing at all when given no harnesses', function (): void {
     $store = new BatchingProbeStore(new ProbeStore);
 
     expect(new Credentials([$store])->storedAmong(MANY_FLEET, []))->toBeEmpty()
-        // A batch of nothing is still a process start on the store this exists for, so the empty
-        // case is worth not paying for. One call carrying an empty list would also be correct;
-        // this pins which one ships, so a change is a decision rather than a drift.
-        ->and($store->batches)->toBe([[]]);
+        // **The name of this test is the assertion.** A batch is a `powershell.exe` start on the
+        // store this whole capability exists for, so asking it about nothing spends a process to
+        // learn nothing. The looping path already does nothing here, because a `foreach` over an
+        // empty list does nothing; this is what makes the batching path agree rather than diverge.
+        ->and($store->batches)->toBeEmpty();
 });

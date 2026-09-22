@@ -271,6 +271,12 @@ final class Credentials
      */
     private function readMany(CredentialStore $store, array $keys): array
     {
+        // Nothing to ask about. The loop below would do nothing anyway, and a batch would spend a
+        // `powershell.exe` start to learn nothing, so this is what keeps the two paths agreeing.
+        if ($keys === []) {
+            return [];
+        }
+
         if ($store instanceof ReadsManyCredentials) {
             try {
                 return $store->getMany($keys);
@@ -288,6 +294,17 @@ final class Credentials
                 continue;
             }
 
+            // The caller asks `isset()`, which is false for a null value, so storing one would not
+            // change what `storedAmong()` answers -- which is why `InstanceOfToTrue` survives here
+            // however this is tested. It is not equivalent to the ANALYZER: planting it fails
+            // `composer analyse` twice, on `if.alwaysTrue` and on this method returning
+            // `array<string, Credential|null>` where it promises `array<string, Credential>`.
+            // Killing it with a test would duplicate a check another gate already makes better,
+            // so it is annotated instead, which is what the survivor criterion asks for.
+            //
+            // The marker carries no prose on its own line: v5.0.2 captures the rest of that line
+            // and compares it against mutator names, so a trailing explanation suppresses nothing.
+            // @pest-mutate-ignore: InstanceOfToTrue
             if ($credential instanceof Credential) {
                 $found[$key] = $credential;
             }
