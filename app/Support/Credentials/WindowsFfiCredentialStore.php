@@ -464,6 +464,13 @@ final class WindowsFfiCredentialStore implements CredentialStore
         $userBuffer = $this->wide($userName);
         $blob = $advapi->new('unsigned char['.max(1, $length).']');
 
+        // **The one place the raw token is an argument to something not marked sensitive.**
+        // `FFI::memcpy()` is an internal function, so a throw here would put `$blobBytes` in a trace
+        // frame that PHP captures and Collision renders. It cannot throw on this call: the
+        // destination was allocated at `max(1, $length)` and the copy is exactly `$length`, so the
+        // size can exceed neither side, and `$blob` came from a guarded allocation. Written down
+        // because the reasoning is what makes it safe, and a future edit that decoupled the
+        // allocation from the copy length would take that away silently.
         if ($length > 0) {
             FFI::memcpy($blob, $blobBytes, $length);
         }
