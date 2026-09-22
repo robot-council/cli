@@ -540,7 +540,14 @@ own `stop_hook_active` guard never fires here and `loop_limit` is the only thing
 
 Cursor 3.17.19 is installed on the machine this was written on, and **`cursor agent` is a headless
 runner directly comparable to `claude -p`**: `-p/--print` with `--output-format text | json |
-stream-json`, which is what the Claude Code measurements above were taken with. Invoking it installs
+stream-json`, which is what the Claude Code measurements above were taken with.
+
+**That subcommand is version-dependent, and its absence is silent.** A `cursor` CLI that does not
+know `agent` treats every argument as a path to open, so `cursor agent login` opens two empty
+editor tabs named `agent` and `login` rather than reporting an unknown subcommand -- observed on
+Cursor 3.7.21, the version the MCP section above records for the Windows machine, where
+`cursor agent foo` likewise opens `foo`. Check `cursor --help` for a `Subcommands` block naming
+`agent` before concluding anything from what running it does. Invoking it installs
 `cursor-agent` from `cursor.com/install` on first use; here that produced 2026.09.18-9a7762b in
 `~/.local/bin`, which is not on the default `PATH`. `cursor agent status` then reported **`Not logged
 in`**, and `cursor agent login` is a browser flow, so nothing was run.
