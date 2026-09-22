@@ -63,7 +63,36 @@ final class PendingEvents
             return;
         }
 
-        $this->write([...$this->read(), ...$events]);
+        $handle = $this->openForWriting();
+
+        try {
+            if (! flock($handle, LOCK_EX)) {
+                throw new RuntimeException(sprintf('Could not lock `%s` to leave fleet events in.', $this->path()));
+            }
+
+            // Read and write under ONE lock on ONE handle. Two `flock` calls on two handles would
+            // deadlock this process against itself, and a read outside the lock is the defect this
+            // replaces: a concurrent `add()` landing between the two halves was overwritten whole.
+            $contents = stream_get_contents($handle);
+
+            $kept = $this->bound([
+                ...$this->decode($contents === false ? '' : $contents),
+                ...$events,
+            ]);
+
+            $encoded = json_encode($kept, JSON_THROW_ON_ERROR);
+
+            rewind($handle);
+
+            if (! ftruncate($handle, 0) || fwrite($handle, $encoded) === false) {
+                throw new RuntimeException(sprintf('Could not write fleet events to `%s`.', $this->path()));
+            }
+
+            fflush($handle);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
     }
 
     /**
@@ -107,11 +136,54 @@ final class PendingEvents
     }
 
     /**
+     * Everything waiting, leaving the sink exactly as it was.
+     *
+     * **This is not `drain()` with the truncate removed, and the difference is the point.** The
+     * first version of `--peek` was `drain()` followed by `add()`, which emptied the sink and put
+     * it back: a bridge appending in that window had its event ordered behind older ones, or
+     * dropped outright once the sink was at `MAX_EVENTS`, and a process dying between the two
+     * halves lost everything (`robot-council/cli#71`). A read that does not write cannot do any of
+     * that.
+     *
+     * `LOCK_SH` rather than `LOCK_EX`, because several readers are harmless and only a writer has
+     * to be excluded -- and a hook peeking must never make the bridge wait to record an event.
+     *
+     * @return list<array<array-key, mixed>> What is waiting, oldest first.
+     */
+    public function peek(): array
+    {
+        $path = $this->path();
+
+        if (! is_file($path)) {
+            return [];
+        }
+
+        $handle = fopen($path, 'r');
+
+        if ($handle === false) {
+            return [];
+        }
+
+        try {
+            if (! flock($handle, LOCK_SH)) {
+                return [];
+            }
+
+            $contents = stream_get_contents($handle);
+
+            return $this->decode($contents === false ? '' : $contents);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    /**
      * Whether anything is waiting, without taking it.
      */
     public function isEmpty(): bool
     {
-        return $this->read() === [];
+        return $this->peek() === [];
     }
 
     /**
@@ -139,41 +211,19 @@ final class PendingEvents
     }
 
     /**
-     * Everything currently waiting, without taking it.
+     * The sink, open for reading and writing, created narrow if it is absent.
      *
-     * @return list<array<array-key, mixed>> The events.
+     * @return resource The open handle, which the caller locks, uses and closes.
+     *
+     * @throws RuntimeException When the sink cannot be created or opened.
      */
-    private function read(): array
-    {
-        $path = $this->path();
-
-        if (! is_file($path)) {
-            return [];
-        }
-
-        $contents = @file_get_contents($path);
-
-        return $this->decode($contents === false ? '' : $contents);
-    }
-
-    /**
-     * Replace the sink's contents, keeping only the newest events.
-     *
-     * @param  list<array<array-key, mixed>>  $events  Everything to keep.
-     *
-     * @throws RuntimeException When the sink cannot be written.
-     */
-    private function write(array $events): void
+    private function openForWriting(): mixed
     {
         $directory = $this->directory();
 
         if (! is_dir($directory) && ! mkdir($directory, 0o700, true) && ! is_dir($directory)) {
             throw new RuntimeException(sprintf('Could not create `%s` to leave fleet events in.', $directory));
         }
-
-        $kept = \count($events) > self::MAX_EVENTS
-            ? \array_slice($events, -self::MAX_EVENTS)
-            : $events;
 
         $path = $this->path();
 
@@ -184,11 +234,29 @@ final class PendingEvents
             @chmod($path, 0o600);
         }
 
-        $encoded = json_encode($kept, JSON_THROW_ON_ERROR);
+        // `c+` rather than `w+`: it does not truncate on open, so the handle can be locked BEFORE
+        // anything is destroyed. `w+` would empty the file for any concurrent reader in the window
+        // between opening and taking the lock.
+        $handle = fopen($path, 'c+');
 
-        if (file_put_contents($path, $encoded, LOCK_EX) === false) {
-            throw new RuntimeException(sprintf('Could not write fleet events to `%s`.', $path));
+        if ($handle === false) {
+            throw new RuntimeException(sprintf('Could not open `%s` to leave fleet events in.', $path));
         }
+
+        return $handle;
+    }
+
+    /**
+     * The newest events a sink may keep.
+     *
+     * @param  list<array<array-key, mixed>>  $events  Everything on offer, oldest first.
+     * @return list<array<array-key, mixed>> What fits.
+     */
+    private function bound(array $events): array
+    {
+        return \count($events) > self::MAX_EVENTS
+            ? \array_slice($events, -self::MAX_EVENTS)
+            : $events;
     }
 
     /**

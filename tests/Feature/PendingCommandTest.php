@@ -98,6 +98,49 @@ it('leaves what is waiting alone when only peeking', function (): void {
         ->and(pendingSink()->isEmpty())->toBeFalse();
 });
 
+it('peeks without writing the sink at all, not merely without emptying it', function (): void {
+    // **The sink is written with whitespace no encoder here produces.** That is what makes this
+    // test discriminate: the first `--peek` drained and wrote the events back, which re-encoded
+    // them compact, so the file changed even though it ended up holding the same events
+    // (cli#71). Asserting "still non-empty afterwards" passed against that. Asserting the BYTES
+    // does not.
+    $sink = pendingSink();
+
+    $sink->add([waitingEvent('keep me exactly as I am')]);
+
+    $pretty = json_encode($sink->drain(), JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR);
+
+    file_put_contents($sink->path(), $pretty);
+
+    expect(Artisan::call('pending', ['--project' => 'probe', '--peek' => true]))->toBe(0)
+        ->and(Artisan::output())->toContain('keep me exactly as I am')
+        // Byte-for-byte, so a truncate-and-rewrite is visible even when it restores the same
+        // events. A write is what loses a concurrent append, whether or not it loses this one.
+        ->and(file_get_contents($sink->path()))->toBe($pretty);
+});
+
+it('peeks a sink it cannot write, which is the same property observed from outside', function (): void {
+    $sink = pendingSink();
+
+    $sink->add([waitingEvent('readable but not writable')]);
+
+    chmod($sink->path(), 0o400);
+
+    // The guard is the control: where the mode does not actually deny writing -- running as root,
+    // or a filesystem that ignores it -- this proves nothing and says so rather than passing.
+    if (is_writable($sink->path())) {
+        chmod($sink->path(), 0o600);
+        $this->markTestSkipped('The sink is still writable at mode 0400, so this cannot discriminate.');
+    }
+
+    try {
+        expect(Artisan::call('pending', ['--project' => 'probe', '--peek' => true]))->toBe(0)
+            ->and(Artisan::output())->toContain('readable but not writable');
+    } finally {
+        chmod($sink->path(), 0o600);
+    }
+});
+
 it('reads the sink of the harness it is told it is, and no other', function (): void {
     // **The failure this guards is silent.** A `pending` that resolved the harness differently from
     // the bridge beside it would read an empty sink and report a quiet fleet.
@@ -140,6 +183,46 @@ it('keeps only the newest events when the fleet outruns the agent', function ():
     expect($waiting)->toHaveCount(PendingEvents::MAX_EVENTS)
         ->and($waiting[0]['body'])->toBe('event 2')
         ->and($waiting[PendingEvents::MAX_EVENTS - 1]['body'])->toBe('event '.(PendingEvents::MAX_EVENTS + 1));
+});
+
+it('keeps a full sink intact across a peek, and still takes the next event', function (): void {
+    // Criteria 2 and 3 of cli#71, and they are **consequences rather than races**. The old
+    // `--peek` drained and wrote back, so an append landing in that window was re-ordered behind
+    // older events and, at the bound, dropped: `write()` keeps the TAIL, and the tail was the
+    // peeked events. A peek that performs no write cannot do either, whatever the timing, which
+    // is why this is asserted deterministically instead of with sleeping processes.
+    $sink = pendingSink();
+
+    $sink->add(array_map(
+        static fn (int $n): array => waitingEvent('event '.$n),
+        range(1, PendingEvents::MAX_EVENTS)
+    ));
+
+    // **Re-encoded with whitespace before the peek, and that is what makes the byte assertion
+    // below discriminate.** Compared against a sink the store itself wrote, a drain-and-write-back
+    // produces byte-identical output -- the same encoder, the same events -- so the comparison
+    // would pass against the very implementation this test exists to refuse. Measured: without
+    // this line the test stays green with the old `peek()` planted.
+    $raw = json_encode($sink->drain(), JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR);
+
+    file_put_contents($sink->path(), $raw);
+
+    $before = $sink->peek();
+
+    expect($before)->toHaveCount(PendingEvents::MAX_EVENTS)
+        ->and($before[0]['body'])->toBe('event 1')
+        ->and(file_get_contents($sink->path()))->toBe($raw);
+
+    // The append a concurrent bridge would have made.
+    $sink->add([waitingEvent('arrived during the peek')]);
+
+    $after = $sink->drain();
+
+    expect($after)->toHaveCount(PendingEvents::MAX_EVENTS)
+        // The newcomer is kept and is LAST, rather than displaced behind what the peek put back.
+        ->and($after[PendingEvents::MAX_EVENTS - 1]['body'])->toBe('arrived during the peek')
+        // The oldest went, which is the bound doing its job rather than the peek losing anything.
+        ->and($after[0]['body'])->toBe('event 2');
 });
 
 it('treats a corrupt sink as an empty one', function (): void {
