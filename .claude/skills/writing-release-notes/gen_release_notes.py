@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate a GitHub Release note body for `robot-council/core` per the
+Generate a GitHub Release note body for `robot-council/cli` per the
 `writing-release-notes` skill: em-dash-title-ready, milestone lead + optional
 breaking-change callout, a closed heading vocabulary, and one linked bullet per
 change (a `[#N]` PR link, or a backticked short SHA for a direct commit).
@@ -159,16 +159,28 @@ LABEL_SEC = {"security"}
 
 # A change confined to these is tooling or prose whatever its title says. Top-level
 # dotfiles (`.editorconfig`, `.gitattributes`, `.gitignore`) count too; see _is_maint.
-MAINT_PREFIXES = (".github/", ".claude/", "tests/", "workbench/")
-MAINT_FILES = {"composer.json", "phpstan.neon.dist", "phpstan-baseline.neon", "phpunit.xml.dist", "rector.php",
-               "CHANGELOG.md", "CLAUDE.md", "README.md", "LICENSE.md"}
+#
+# `workbench/` is absent because this repository has none: it is an application, not a
+# package with a host app to boot. `composer.lock` and `box.json` are present because this
+# repository commits its lock (unlike `robot-council/core`) and builds a PHAR, so a bump or
+# a build-config change is maintenance here in a way it could not be there. There is no
+# `phpstan-baseline.neon` and deliberately so -- CLAUDE.md says to fix the errors instead.
+MAINT_PREFIXES = (".github/", ".claude/", "tests/")
+MAINT_FILES = {"composer.json", "composer.lock", "box.json", "phpstan.neon.dist", "phpunit.xml.dist",
+               "rector.php", "CHANGELOG.md", "CLAUDE.md", "README.md", "LICENSE.md"}
 
-# Published, consumer-visible surfaces of the package: what an application installing it
-# receives through config publishing, migrations, factories, views, and routes. A change
-# touching one is a product change, not maintenance. `src/` is deliberately absent: it
-# holds internals as well as the public API, so it flows through the fix-verb and
-# test-dominance rules below instead.
-USER_FACING_PREFIXES = ("config/", "database/", "resources/", "routes/")
+# Surfaces whose change is a product change whatever the title says. For a command line
+# that is `config/commands.php`, which decides which commands ship -- the nearest thing this
+# repository has to a published surface.
+#
+# **`app/` is deliberately absent, for the reason `robot-council/core` leaves `src/` out**:
+# it holds internals as well as the public surface. `app/Commands/` carries a new command
+# and a bug fix to an existing one in the same directory, and often the same file, so it
+# flows through the fix-verb and test-dominance rules below instead.
+#
+# `database/`, `resources/` and `routes/` are gone rather than kept harmlessly: none exists
+# here, and a list naming directories a reader will not find describes a different project.
+USER_FACING_PREFIXES = ("config/",)
 
 FIX_VERBS = re.compile(r"^(Fix|Resolve|Repair|Prevent|Guard|Restore|Correct|Harden|Stop|Avoid)\b")
 MAINT_VERBS = re.compile(

@@ -57,13 +57,44 @@ class Routing(unittest.TestCase):
         self.assertEqual(g.bucket("s", self.TITLE, paths=["CLAUDE.md"]), "maint")
 
     def test_source_changes_still_route_by_title_and_diff_shape(self):
-        paths = ["CLAUDE.md", "src/RobotCouncilServiceProvider.php"]
+        paths = ["CLAUDE.md", "app/Commands/ApiCommand.php"]
         self.assertEqual(g.bucket("s", self.TITLE, paths=paths, other_lines=10), "new")
         self.assertEqual(g.bucket("s", "Fix the provider name", paths=paths, other_lines=10), "fix")
         self.assertEqual(g.bucket("s", self.TITLE, paths=paths, test_lines=20, other_lines=10), "maint")
 
     def test_published_surface_still_wins(self):
-        self.assertEqual(g.bucket("s", self.TITLE, paths=["CLAUDE.md", "config/robot-council.php"]), "new")
+        self.assertEqual(g.bucket("s", self.TITLE, paths=["CLAUDE.md", "config/commands.php"]), "new")
+
+    def test_app_is_not_a_published_surface(self):
+        """`app/` holds the commands AND the internals, so it must not force `new`.
+
+        This is the rule `robot-council/core` applies to `src/`, and the reason is the same:
+        a new command and a bug fix to an existing one live in the same directory. If `app/`
+        were user-facing, every credential fix would be announced as a feature.
+        """
+        fix = ["app/Support/Credentials/WindowsCredentialStore.php"]
+        self.assertEqual(g.bucket("s", "Fix a broken read", paths=fix, other_lines=10), "fix")
+        self.assertEqual(g.bucket("s", self.TITLE, paths=fix, test_lines=20, other_lines=10), "maint")
+
+    def test_this_repository_commits_its_lock_so_a_bump_is_maintenance(self):
+        """`composer.lock` is committed here and is not in `robot-council/core`.
+
+        A Dependabot bump touching only the manifest and the lock is tooling whatever its
+        title says, rather than relying on the title opening with a maintenance verb.
+        """
+        self.assertEqual(g.bucket("s", self.TITLE, paths=["composer.json", "composer.lock"]), "maint")
+        self.assertEqual(g.bucket("s", self.TITLE, paths=["box.json"]), "maint")
+
+    def test_directories_this_repository_does_not_have_are_not_published_surfaces(self):
+        """`database/`, `resources/` and `routes/` are `robot-council/core`'s, not this one's.
+
+        Kept as a test rather than only a deletion, because a path list that names
+        directories a reader will not find is how the whole skill came to describe the wrong
+        repository. These route by title now, like any other unrecognised path.
+        """
+        for path in ("database/migrations/x.php", "resources/views/x.blade.php", "routes/web.php"):
+            self.assertEqual(g.bucket("s", "Fix a broken read", paths=[path], other_lines=10), "fix",
+                             msg=f"{path} should route by title, not force `new`")
 
 
 if __name__ == "__main__":
