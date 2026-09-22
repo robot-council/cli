@@ -4,6 +4,34 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.2.0 — The Fleet Follower and the Stop-Hook Handoff (2026-09-22)
+
+The bridge now follows the fleet feed, keeps what concerns this session in a sink, and every supported harness has a documented stop hook that hands those events to the agent at a turn boundary.
+
+### What's new
+- Follow the fleet feed and leave what concerns this session [#70](https://github.com/robot-council/cli/pull/70)
+- Call advapi32 through FFI where it is available [#64](https://github.com/robot-council/cli/pull/64)
+
+### What's fixed
+- Tell a missing Keychain item from a broken `security` [#86](https://github.com/robot-council/cli/pull/86)
+- Make --peek read the sink instead of emptying it and writing it back [#80](https://github.com/robot-council/cli/pull/80)
+- Refuse a service key Windows Credential Manager will not store [#67](https://github.com/robot-council/cli/pull/67)
+- Bound what the helper writes to stderr, not just to stdout [#65](https://github.com/robot-council/cli/pull/65)
+
+### Maintenance and tooling
+- Carry the author address robot-council/core already uses [#97](https://github.com/robot-council/cli/pull/97)
+- Declare the command line a library, not a project [#96](https://github.com/robot-council/cli/pull/96)
+- Read several credentials in one call, behind an optional capability [#95](https://github.com/robot-council/cli/pull/95)
+- Run the README's stop-hook script, so it cannot break unnoticed [#92](https://github.com/robot-council/cli/pull/92)
+- Make a dead child report its own cause, and record the rate [#89](https://github.com/robot-council/cli/pull/89)
+- Say why the stop-hook script tolerates a BOM, and correct which parsers do not [#87](https://github.com/robot-council/cli/pull/87)
+- Cover re-enrolling over an existing Keychain credential, and settle four survivors [#82](https://github.com/robot-council/cli/pull/82)
+- Run the Cursor stop hook against a live fleet [#81](https://github.com/robot-council/cli/pull/81)
+- Stop routing security-area work to the Security heading [#79](https://github.com/robot-council/cli/pull/79)
+- Describe this repository in the release-notes skill [#77](https://github.com/robot-council/cli/pull/77)
+- Document a stop hook per harness that hands over waiting fleet events [#74](https://github.com/robot-council/cli/pull/74)
+- Derive the repository the release notes are about [#68](https://github.com/robot-council/cli/pull/68)
+
 ## v0.1.0 — Enrollment, Credential Storage, and the MCP Bridge (2026-09-21)
 
 The first release: enroll a machine once, keep its credential in the operating system's own store, and serve the fleet's coordination tools to an agent harness over stdio.
