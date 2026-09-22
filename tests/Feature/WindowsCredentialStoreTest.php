@@ -181,6 +181,62 @@ it('agrees with its script about which exit code means "no such credential"', fu
     expect(constantOf('SCRIPT'))->toContain(sprintf('if ($null -eq $blob) { exit %d }', intConstantOf('NOT_FOUND')));
 });
 
+it('stops at the first error, which is what bounds what the helper writes to stderr', function (): void {
+    // **`readThroughPipe()` does not drain either stream before the child exits**, so the bound it
+    // relies on is that the helper never writes more than a pipe holds without draining --
+    // `PIPE_BUFFER_BYTES`, measured. `robot-council/cli#58` asked whether stderr can break that,
+    // since a fault is exactly when stderr gets used.
+    //
+    // This line is the structural reason it cannot, and that is causal rather than asserted:
+    // removing it and re-running took stderr from about 732 bytes to **7,991 at ten C# errors** and
+    // **22,809 at thirty**, past `PIPE_BUFFER_BYTES` and into the range where the child blocks.
+    // With `Stop` the first error is terminating, so there is never a second one to report.
+    //
+    // **And it guards a second property, which is the one that would hurt more.** Without `Stop`, a
+    // refused `Add-Type` is non-terminating, the script runs on, `Read()` leaves `$blob` null, and
+    // it reaches `exit 3` -- `NOT_FOUND`. A machine whose helper cannot compile at all would then
+    // report "no such credential" from every `get()`, and `available()`, which demands exactly that
+    // code from its probe, would pass. That is the defect `robot-council/cli#39` closed, reached
+    // through a different door. Both were measured on 2026-09-22.
+    expect(constantOf('SCRIPT'))->toContain("\$ErrorActionPreference = 'Stop'");
+});
+
+it('writes far less to stderr than a pipe holds, even when `Add-Type` fails', function (): void {
+    // The measurement `robot-council/cli#58` asked for, kept as a guard rather than left in prose.
+    // Driven with `TMP` at a path that does not exist, which is what makes `Add-Type`'s compiler
+    // fail -- the same fault the broken-mechanism test uses. `Process` drains both streams, so this
+    // measures what the helper WANTS to write rather than what happens to fit.
+    $process = new Process(
+        [WindowsCredentialStore::INTERPRETER, '-NoProfile', '-NonInteractive', '-Command', constantOf('SCRIPT')],
+        timeout: WindowsCredentialStore::TIMEOUT_SECONDS * 2,
+    );
+
+    $process->setEnv([
+        'ROBOT_COUNCIL_OPERATION' => 'read',
+        'ROBOT_COUNCIL_TARGET' => WindowsCredentialTarget::PROBE_PREFIX.bin2hex(random_bytes(8)),
+        'ROBOT_COUNCIL_USERNAME' => '',
+        'TMP' => 'Z:\no-such-dir',
+        'TEMP' => 'Z:\no-such-dir',
+    ]);
+
+    $process->run();
+
+    $errors = $process->getErrorOutput();
+
+    // **Control first, and it is the whole test.** A healthy run writes nothing to stderr at all,
+    // so the size assertion below would pass on a run where `Add-Type` never failed -- proving
+    // nothing, in the reassuring direction. This requires the fault to have actually happened.
+    expect($process->getExitCode())->toBe(1)
+        ->and($errors)->toContain('Add-Type')
+        ->and($errors)->not->toBeEmpty();
+
+    $written = \strlen($errors);
+
+    // The claim: comfortably inside what a pipe takes without draining. Measured at 361 bytes for
+    // this fault and 744 for a compile failure, against 4,096.
+    expect($written)->toBeLessThan(WindowsCredentialStore::PIPE_BUFFER_BYTES);
+})->skip(requiresCredentialManager(...), 'Credential Manager is not reachable on this machine.');
+
 it('probes a target no service key can ever produce', function (): void {
     // `available()` reads a target under this prefix and requires "no such credential". If a real
     // credential could sit there -- which it could, for a service key of `:availability-probe`,
