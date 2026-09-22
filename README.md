@@ -309,6 +309,12 @@ export ROBOT_COUNCIL_HARNESS=claude          # claude, codex or cursor
 
 payload=$(cat)
 
+# Cursor's payload arrives with a UTF-8 BOM before the `{` (measured; see the Cursor section).
+# Inert when there is none. The substring matching below survives a BOM either way, but `php`
+# refuses a BOMed document -- and `php` is already a dependency of the last block, so it is what
+# an author who replaces the matching with parsing reaches for first.
+payload=${payload#$'\xef\xbb\xbf'}
+
 # The loop guard. Claude Code and Codex set `stop_hook_active` once they have continued a turn;
 # Cursor counts instead and is capped by `loop_limit` in its own configuration.
 case "$payload" in
@@ -585,12 +591,28 @@ The fleet has news:
 `stop_hook_active` is absent, which is why the script's own loop guard never fires here and
 `loop_limit` is the only thing bounding it -- now measured rather than read from the documentation.
 
-**The payload arrives with a UTF-8 BOM, and that is a trap worth the line.** Measured: the first
-three bytes on stdin are `ef bb bf`, before the `{`. The script survives it because it matches on
-substrings, and a `case` against `*'"loop_count"'*` does not care what precedes the brace. **A hook
-that pipes stdin to `jq`, or to any strict JSON parser, fails on it** -- and by this script's own
-design a payload it cannot read ends the turn with the sink untouched, so the failure reads exactly
-like a quiet fleet. Strip the BOM before parsing, or match on substrings as this one does.
+**The payload arrives with a UTF-8 BOM.** Measured: the first three bytes on stdin are `ef bb bf`,
+before the `{`. What that costs depends on the parser, and the obvious guess is wrong. Measured on
+macOS 26.6.2, each reading controlled against the same document without a BOM:
+
+| parser | a BOMed payload |
+| --- | --- |
+| `jq` 1.7.1 | parsed, correct value. `src/jv_parse.c` has skipped a leading BOM since at least the `jq-1.6` tag |
+| PHP 8.4.23 `json_decode` | refused -- `Syntax error`, which does not mention a BOM |
+| Python 3.9.6 `json.loads` | refused -- `Unexpected UTF-8 BOM (decode using utf-8-sig)` |
+
+All three still refuse genuinely malformed input, so the table records what the parsers do rather
+than an instrument that cannot tell the two apart.
+
+**`php` is the row that matters here**, because this script already invokes it to encode the reply,
+so it is the nearest tool to hand for anyone who replaces the substring matching with parsing -- and
+its message names a syntax error rather than the BOM. By this script's own design a payload it
+cannot read ends the turn with the sink untouched, so that failure reads exactly like a quiet fleet.
+The script strips the BOM at the top for that reason; the matching would survive without it.
+
+**Claude Code's payload carries no BOM**, measured on 2.1.236: the first bytes on stdin are
+`{"session_id"`. **Codex's is unmeasured**, because it is installed on no machine this project is
+worked from -- which is not the same as having looked.
 
 **On Windows the `command` is a path to a `.cmd`, not to the bash script.** Cursor's execution log
 names the mechanism `windows_temp_file`: it writes the command to a temporary script and runs that.
