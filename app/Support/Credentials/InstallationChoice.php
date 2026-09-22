@@ -73,15 +73,24 @@ final class InstallationChoice
         // belongs to whichever harness enrolled it, which this process cannot know, so adopting it
         // on a detected name would be the inference #21 refused arriving by a side door. A flag or
         // an environment variable is a person saying which it was.
+        $legacyRuledOut = false;
+
         if ($named !== null) {
             $adopted = $this->credentials->adopt($service, $named);
 
             if ($adopted instanceof Credential) {
                 return $adopted;
             }
+
+            // **Reaching here is itself the answer about the legacy key.** `adopt()` begins by
+            // reading it, and claims it when it is there -- so a null return means it looked and
+            // found nothing. A raise would have left through this call rather than arriving here.
+            // Carrying that spares the second read the refusal used to make, and, more than the
+            // subprocess, stops the two halves of one refusal being computed from two answers.
+            $legacyRuledOut = true;
         }
 
-        throw new RuntimeException($this->missing($service, $harness));
+        throw new RuntimeException($this->missing($service, $harness, $legacyRuledOut));
     }
 
     /**
@@ -118,12 +127,15 @@ final class InstallationChoice
      *
      * @param  string  $service  The fleet's base URL.
      * @param  string  $harness  The harness that resolved.
+     * @param  bool  $legacyRuledOut  Whether the legacy key has already been read on this path and
+     *                                held nothing, which is true exactly when `adopt()` ran and
+     *                                returned null.
      * @return string The message.
      */
-    private function missing(string $service, string $harness): string
+    private function missing(string $service, string $harness, bool $legacyRuledOut): string
     {
         return sprintf('This machine is not enrolled as `%s` against that fleet. ', $harness)
-            .$this->remedies($service);
+            .$this->remedies($service, $legacyRuledOut);
     }
 
     /**
@@ -135,10 +147,22 @@ final class InstallationChoice
      * already refusing. A harness named by hand that the detector has never heard of will not
      * appear, which the wording allows for.
      *
+     * **The legacy key is read at most once per refusal.** `adopt()` reads it on the named-harness
+     * path, and this method used to read it again to write the message -- two subprocesses on a
+     * keychain, on a path already failing, where the second could return nothing the first did not.
+     * Worse than the cost: the two reads could **disagree**, because `adopt()` lets a
+     * `CredentialStoreFailed` out while this method catches one and reports the entry absent. A
+     * store breaking between them produced a refusal whose halves were computed against different
+     * answers, with nothing in the message saying so (#93).
+     *
      * @param  string  $service  The fleet's base URL.
+     * @param  bool  $legacyRuledOut  Whether the caller already read the legacy key and found
+     *                                nothing. False means nobody has looked -- which is the
+     *                                `unresolved()` path, reached before any read happens -- and
+     *                                this method makes the one read itself.
      * @return string The remedies.
      */
-    private function remedies(string $service): string
+    private function remedies(string $service, bool $legacyRuledOut = false): string
     {
         $stored = $this->credentials->storedAmong($service, MachineIdentity::knownHarnesses());
 
@@ -155,6 +179,10 @@ final class InstallationChoice
         // not replace a refusal that names a remedy with one that names none. A legacy credential
         // that cannot be read is reported as absent, which sends the operator to `enroll` -- the
         // right advice whether the entry is missing or unreadable.
+        if ($legacyRuledOut) {
+            return 'Run `robot-council enroll` first.';
+        }
+
         try {
             $legacy = $this->credentials->legacy($service) instanceof Credential;
         } catch (CredentialStoreFailed) {
