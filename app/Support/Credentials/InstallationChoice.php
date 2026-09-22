@@ -95,17 +95,10 @@ final class InstallationChoice
      */
     private function named(?string $flag): ?string
     {
-        if (\is_string($flag) && $flag !== '') {
-            return MachineIdentity::harness($flag);
-        }
-
-        $fromEnvironment = getenv(self::VARIABLE);
-
-        if (\is_string($fromEnvironment) && trim($fromEnvironment) !== '') {
-            return MachineIdentity::harness(trim($fromEnvironment));
-        }
-
-        return null;
+        // Delegated, so this and `pending` cannot disagree about which harness a process is: the
+        // bridge picks a credential by that answer and `pending` finds the bridge's sink by it, and
+        // a disagreement would be an empty sink beside a full one (cli#60).
+        return MachineIdentity::namedHarness($flag);
     }
 
     /**

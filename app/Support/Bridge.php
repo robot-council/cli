@@ -71,6 +71,10 @@ final class Bridge
         private readonly Session $session,
         private readonly string $service,
         private readonly int $heartbeatSeconds = self::HEARTBEAT_SECONDS,
+
+        // Optional, because the loop's own guarantees must not depend on it: a bridge with no
+        // follower forwards tool calls exactly as it did before one existed (cli#60).
+        private readonly ?FleetFollower $follower = null,
     ) {}
 
     /**
@@ -264,6 +268,11 @@ final class Bridge
 
             $this->nextHeartbeat = time() + $this->heartbeatSeconds;
         }
+
+        // Read before the renewal rather than after it: a renewal that throws is caught below and
+        // backed off, and putting the feed after it would make a service that refuses renewals also
+        // stop the feed being read.
+        $this->follower?->tick($diagnostic);
 
         if ($this->session->expiringWithin(self::RENEW_WITHIN_SECONDS) && time() >= $this->nextRenewAttempt) {
             try {
