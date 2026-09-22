@@ -542,12 +542,22 @@ Cursor 3.17.19 is installed on the machine this was written on, and **`cursor ag
 runner directly comparable to `claude -p`**: `-p/--print` with `--output-format text | json |
 stream-json`, which is what the Claude Code measurements above were taken with.
 
-**That subcommand is version-dependent, and its absence is silent.** A `cursor` CLI that does not
-know `agent` treats every argument as a path to open, so `cursor agent login` opens two empty
-editor tabs named `agent` and `login` rather than reporting an unknown subcommand -- observed on
-Cursor 3.7.21, the version the MCP section above records for the Windows machine, where
-`cursor agent foo` likewise opens `foo`. Check `cursor --help` for a `Subcommands` block naming
-`agent` before concluding anything from what running it does. Invoking it installs
+**`agent` is routed by the `cursor` launcher script, not by the Cursor binary, and invoking the
+binary directly fails silently.** On macOS `/usr/local/bin/cursor` is a 142-line shell script whose
+routing is three branches: `editor` and anything unrecognized go to the editor CLI, and `agent`
+`exec`s `~/.local/bin/cursor-agent`, installing it from `cursor.com/install` first if it is missing
+and enforcing a minimum version. The editor CLI treats arguments it does not recognize as **paths to
+open**, so bypassing the script turns `cursor agent login` into two empty editor tabs named `agent`
+and `login`, with no error.
+
+**`cursor --help` does not discriminate**, which is what makes this worth writing down. Cursor 3.7.21
+on Windows lists `agent` under `Subcommands` in the help printed by `cursor.exe`, and that same
+invocation does not route it -- the binary advertises a subcommand the launcher implements. Both
+3.7.21 and 3.17.19 list it; only one of the two invocations acted on it.
+
+So **call `cursor-agent` directly** rather than through `cursor agent`, and install it from
+`cursor.com/install` where it is missing. That is one binary with one behavior, instead of a
+launcher whose presence decides what the same command line means. Invoking it installs
 `cursor-agent` from `cursor.com/install` on first use; here that produced 2026.09.18-9a7762b in
 `~/.local/bin`, which is not on the default `PATH`. `cursor agent status` then reported **`Not logged
 in`**, and `cursor agent login` is a browser flow, so nothing was run.
