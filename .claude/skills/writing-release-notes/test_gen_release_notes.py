@@ -68,3 +68,67 @@ class Routing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RemoteParsing(unittest.TestCase):
+    """`owner/repo` out of a git remote URL, without a checkout or a network."""
+
+    def test_reads_the_shapes_github_actually_hands_out(self):
+        for url in (
+            "https://github.com/robot-council/cli.git",
+            "https://github.com/robot-council/cli",
+            "git@github.com:robot-council/cli.git",
+            "ssh://git@github.com/robot-council/cli.git",
+            "https://github.com/robot-council/cli/",
+        ):
+            self.assertEqual(g.parse_remote(url), "robot-council/cli", url)
+
+    def test_strips_only_a_trailing_dot_git(self):
+        # A repository legitimately named with a dot must survive.
+        self.assertEqual(g.parse_remote("git@github.com:o/my.repo.git"), "o/my.repo")
+        self.assertEqual(g.parse_remote("git@github.com:o/my.repo"), "o/my.repo")
+
+    def test_refuses_what_is_not_a_remote(self):
+        # The point of the whole ticket: a non-answer must be a non-answer, not something
+        # plausible. A path-style remote names no GitHub repository.
+        for url in ("", None, "   ", "/srv/git/bare.git", "not a url"):
+            self.assertIsNone(g.parse_remote(url), repr(url))
+
+
+class RepoDerivation(unittest.TestCase):
+    """Which repository a run is about, derived rather than defaulted."""
+
+    @staticmethod
+    def runner(results):
+        """A fake command runner: maps the first two argv words to (code, stdout)."""
+        def run(args):
+            return results.get(" ".join(args[:2]), (1, ""))
+        return run
+
+    def test_prefers_gh_which_knows_the_configured_repository(self):
+        run = self.runner({"gh repo": (0, "robot-council/cli")})
+        self.assertEqual(g.derive_repo(run), "robot-council/cli")
+
+    def test_falls_back_to_the_origin_remote_when_gh_cannot_answer(self):
+        run = self.runner({
+            "gh repo": (1, ""),
+            "git remote": (0, "git@github.com:robot-council/cli.git"),
+        })
+        self.assertEqual(g.derive_repo(run), "robot-council/cli")
+
+    def test_ignores_a_gh_answer_that_is_not_a_repository(self):
+        # `gh` exiting 0 with something unusable must not be taken as an answer.
+        run = self.runner({
+            "gh repo": (0, "not-a-repo"),
+            "git remote": (0, "https://github.com/robot-council/cli.git"),
+        })
+        self.assertEqual(g.derive_repo(run), "robot-council/cli")
+
+    def test_returns_nothing_when_there_is_no_github_remote(self):
+        # The case the ticket names: a checkout with no GitHub remote must produce nothing, so the
+        # caller can name the flag rather than fall back to a repository that happens to exist.
+        run = self.runner({"gh repo": (1, ""), "git remote": (0, "/srv/git/bare.git")})
+        self.assertIsNone(g.derive_repo(run))
+
+    def test_returns_nothing_when_there_is_no_remote_at_all(self):
+        self.assertIsNone(g.derive_repo(self.runner({})))
