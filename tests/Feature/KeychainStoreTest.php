@@ -238,6 +238,26 @@ it('returns null for a key it holds nothing for', function (): void {
     expect($this->store->get($this->service))->toBeNull();
 })->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
 
+it('replaces the credential for a key it already holds, which is what re-enrolling does', function (): void {
+    // **The path a developer takes after a credential is rotated or revoked, and nothing covered
+    // it** (cli#46). `put()` passes `-U` so a second write updates rather than refusing, and no
+    // test called `put()` twice for the same key, so `RemoveArrayItem` on `-U` survived.
+    //
+    // Measured on macOS 26.6.2: without `-U` the second `security add-generic-password` exits 45
+    // with `The specified item already exists in the keychain` and leaves the FIRST value in
+    // place. `put()` ignores the exit code -- `security` exits 0 on a mismatch, so it proves
+    // nothing -- and decides on the read-back, which then finds the old credential and raises.
+    // So dropping `-U` turns this test red through `CredentialStoreFailed`, not through a wrong
+    // value.
+    $this->store->put($this->service, new Credential('FIRST-TOKEN'));
+
+    expect($this->store->get($this->service)?->reveal())->toBe('FIRST-TOKEN');
+
+    $this->store->put($this->service, new Credential('SECOND-TOKEN'));
+
+    expect($this->store->get($this->service)?->reveal())->toBe('SECOND-TOKEN');
+})->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
+
 it('forgets one key without disturbing another', function (): void {
     $kept = $this->service;
     $dropped = $this->other;
