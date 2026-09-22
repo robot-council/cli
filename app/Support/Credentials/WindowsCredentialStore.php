@@ -511,14 +511,7 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
 
         $found = [];
 
-        foreach ($this->existingAmong($services) as $index) {
-            // The index arrives from a subprocess, so it is checked rather than trusted. Anything
-            // outside the request is not a key this call asked about.
-            if (! \array_key_exists($index, $services)) {
-                continue;
-            }
-
-            $service = $services[$index];
+        foreach ($this->existingAmong($services) as $service) {
 
             try {
                 $credential = $this->get($service);
@@ -550,7 +543,7 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
      * credential out of argv, applied to the one input a caller controls here.
      *
      * @param  list<string>  $services  The services to ask about.
-     * @return list<int> Indices into `$services`, ascending.
+     * @return list<string> The services it named, a sublist of the ones given.
      *
      * @throws CredentialStoreFailed When the mechanism failed.
      */
@@ -574,20 +567,50 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
             ));
         }
 
-        $indices = [];
+        return self::servicesNamedIn($output, $services);
+    }
+
+    /**
+     * The services a helper's answer named, given the list it was asked about.
+     *
+     * **Public and static so a test can drive it with output no helper would produce.** The
+     * script is a constant, so a test cannot make it answer with a junk line or an index past
+     * the request -- and those are exactly the two branches below. Left inside the process call
+     * they were unreachable from any test: measured by hand mutation on 2026-09-22, both
+     * survived with the covering suite green. `arguments()` is public for the same kind of
+     * reason, and named in its own docblock.
+     *
+     * **Nothing here can invent a hit.** A line this does not recognise is dropped, so the worst
+     * a malformed answer costs is a stored credential looking absent, which `storedAmong()`
+     * already documents as its bound. The opposite -- inventing a service that was not asked
+     * about -- is what the range check refuses, and that one matters: the answer feeds a `get()`
+     * whose argument is a credential key.
+     *
+     * @param  string  $output  What the helper wrote on stdout.
+     * @param  list<string>  $services  The services it was asked about, in order.
+     * @return list<string> Those it named, in the order it named them.
+     */
+    public static function servicesNamedIn(string $output, array $services): array
+    {
+        $named = [];
 
         foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
             $line = trim($line);
 
-            // A line that is not a plain index is a helper this code does not recognise, not a
-            // credential that exists. Dropping it cannot invent a hit; the worst it does is make a
-            // stored credential look absent, which `storedAmong()` already documents as its bound.
-            if ($line !== '' && ctype_digit($line)) {
-                $indices[] = (int) $line;
+            if ($line === '' || ! ctype_digit($line)) {
+                continue;
             }
+
+            $index = (int) $line;
+
+            if (! \array_key_exists($index, $services)) {
+                continue;
+            }
+
+            $named[] = $services[$index];
         }
 
-        return $indices;
+        return $named;
     }
 
     public function forget(string $service): void

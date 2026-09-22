@@ -261,3 +261,41 @@ it('omits the key it could not read and answers for the rest', function (): void
         ->and($found[$claude]->reveal())->toBe(BATCH_TOKEN.'-claude')
         ->and($found)->not->toHaveKey($oversized);
 })->skip(batchedReadNeedsCredentialManager(...), 'Credential Manager is not reachable on this machine.');
+
+it('reads the helper answer it understands and drops the rest', function (string $label, string $output, array $expected): void {
+    // **These run on every platform, and they are the only tests here that do.** Everything else in
+    // this file needs a reachable Credential Manager, so on ubuntu and macOS -- most of the CI
+    // matrix -- nothing else exercises a line of this parsing.
+    //
+    // They also exist because the two branches below could not be reached any other way. The script
+    // is a constant, so no test can make it answer with a junk line or an index past the request;
+    // hand mutation on 2026-09-22 confirmed both branches survived with the suite green while the
+    // parsing lived inside the process call.
+    $services = ['alpha', 'bravo', 'charlie'];
+
+    expect(WindowsCredentialStore::servicesNamedIn($output, $services))->toBe($expected, $label);
+})->with([
+    ['one hit', "1\n", ['bravo']],
+    ['several, in the order named', "2\n0\n", ['charlie', 'alpha']],
+    ['nothing found', '', []],
+    ['trailing blank lines', "0\n\n\n", ['alpha']],
+    ['carriage returns, as a Windows child writes them', "0\r\n2\r\n", ['alpha', 'charlie']],
+    // An index past the request would otherwise reach `get()` as a credential key.
+    ['an index past the request', "3\n", []],
+    ['a negative index', "-1\n", []],
+    // A line that is not an index at all. Without the check `(int)` makes it 0, which invents a hit
+    // on the first service -- the one failure mode here that could report a credential that is not
+    // there rather than miss one that is.
+    ['a line that is not a number', "abc\n", []],
+    ['a number with something after it', "1x\n", []],
+    ['junk beside a real hit', "abc\n1\n", ['bravo']],
+    ['nothing but junk', "not-an-index\n", []],
+]);
+
+it('invents nothing when the helper answers with a service it was never asked about', function (): void {
+    // The control that makes the cases above mean something: the same parser, given an answer it
+    // does understand, returns the service. Without it every expectation of `[]` would pass against
+    // a parser that returned `[]` for everything.
+    expect(WindowsCredentialStore::servicesNamedIn("0\n", ['only']))->toBe(['only'])
+        ->and(WindowsCredentialStore::servicesNamedIn("1\n", ['only']))->toBeEmpty();
+});
