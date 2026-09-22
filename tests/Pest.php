@@ -20,8 +20,14 @@ pest()->extend(TestCase::class)->in(__DIR__);
  * avoid a fatal redeclaration, so a helper two of them need belongs in the bootstrap.
  *
  * The frames after the first line add nothing an instance needs, and the cap keeps a runaway trace
- * out of the failure output. **Nothing here can hold a credential**: the stores return their value
- * on stdout, and what these children pass as an argument is the service key, which is not secret.
+ * out of the failure output. **The cap counts characters rather than bytes**, because a byte cut
+ * lands mid-character on anything non-ASCII and emits invalid UTF-8 into the one line that exists
+ * to be read -- measured: a 300-byte cut of a line of 3-byte characters fails `mb_check_encoding`.
+ * The guard moves with it, since a character cap read against a byte length would append the
+ * ellipsis to a line it had not shortened.
+ *
+ * **Nothing here can hold a credential**: the stores return their value on stdout, and what these
+ * children pass as an argument is the service key, which is not secret.
  *
  * @param  string  $errors  What the child wrote on stderr.
  * @return string The first non-empty line, capped, or a phrase saying there was none.
@@ -32,7 +38,7 @@ function firstLineOf(string $errors): string
         $line = trim($line);
 
         if ($line !== '') {
-            return \strlen($line) > 300 ? substr($line, 0, 300).'…' : $line;
+            return mb_strlen($line) > 300 ? mb_substr($line, 0, 300).'…' : $line;
         }
     }
 
