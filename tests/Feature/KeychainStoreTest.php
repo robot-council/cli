@@ -34,6 +34,7 @@ declare(strict_types=1);
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\CredentialStoreFailed;
 use App\Support\Credentials\KeychainStore;
+use Symfony\Component\Process\Process;
 
 /**
  * Narrow a value that may be null, so `bin2hex()` is given a string or the test fails saying so.
@@ -236,6 +237,40 @@ it('refuses a credential that is only whitespace or carries a newline', function
 
 it('returns null for a key it holds nothing for', function (): void {
     expect($this->store->get($this->service))->toBeNull();
+})->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
+
+it('pins NOT_FOUND to what `security` actually exits with for an absent item', function (): void {
+    // **The constant is a claim about another program, so it is asserted against that program.**
+    // `get()` returns null only for this code and raises for anything else, so if a macOS release
+    // renumbered it, every lookup would start raising `CredentialStoreFailed` on a machine that is
+    // merely not enrolled -- and nothing in the suite would say why. This is the test that fails
+    // with the reason attached.
+    //
+    // Driven through `security` rather than through the store, because the store's own answer for
+    // this code is `null`, which is also its answer for a code it does not recognise once the
+    // constant is wrong. Reading the exit code directly is the only thing that discriminates.
+    $absent = new Process([
+        '/usr/bin/security', 'find-generic-password',
+        '-a', $this->service, '-s', KeychainStore::SERVICE, '-g',
+    ], timeout: KeychainStore::TIMEOUT_SECONDS);
+
+    $absent->run();
+
+    // The control, in the same test: a lookup that SUCCEEDS exits 0. Without it, a `security` that
+    // answered 44 for everything -- including a stored item -- would satisfy the assertion below
+    // while telling us nothing about whether 44 means absence.
+    $this->store->put($this->service, new Credential('PRESENT-FOR-THE-CONTROL'));
+
+    $found = new Process([
+        '/usr/bin/security', 'find-generic-password',
+        '-a', $this->service, '-s', KeychainStore::SERVICE, '-g',
+    ], timeout: KeychainStore::TIMEOUT_SECONDS);
+
+    $found->run();
+
+    expect($found->getExitCode())->toBe(0, '`security` should exit 0 for an item it holds')
+        ->and($absent->getExitCode())->toBe(KeychainStore::NOT_FOUND)
+        ->and($absent->getErrorOutput())->toContain('could not be found in the keychain');
 })->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
 
 it('replaces the credential for a key it already holds, which is what re-enrolling does', function (): void {
