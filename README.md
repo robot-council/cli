@@ -166,7 +166,7 @@ Add `"ROBOT_COUNCIL_HARNESS": "cursor"` to that `env` block. **Here the recommen
 
 **Verified 2026-09-21**, on Cursor 3.7.21 and Windows 11 Pro 25H2 (build 26200.8875), against a live fleet: the block above (without a `type` field) is the shape that launched. Cursor's [MCP docs](https://cursor.com/docs/mcp) put `command`, `args`, and `env` under `mcpServers.<id>` for stdio servers, and name `~/.cursor/mcp.json` (global) and `.cursor/mcp.json` (project) as the config locations. The same page's STDIO field table lists `type: "stdio"` as required while its examples omit it; the run that connected omitted it.
 
-After enroll with `--harness=cursor`, Settings → Tools & MCP showed the server connected. Reloading it there closed the old stdio process and started a new one: the fleet's agents list marked the previous session `gone` and showed a new `active` session for the same machine, harness `cursor`, last seen within seconds. That is the control that matters — the dashboard reading changes with the reload, so the variable reached the process and a session started on the service.
+After enroll with `--harness=cursor`, Settings, then Tools & MCP, showed the server connected. Reloading it there closed the old stdio process and started a new one: the fleet's agents list marked the previous session `gone` and showed a new `active` session for the same machine, harness `cursor`, last seen within seconds. That is the control that matters — the dashboard reading changes with the reload, so the variable reached the process and a session started on the service.
 
 Put the entry in the **global** file when the fleet URL is yours. A project `.cursor/mcp.json` is shared with whoever opens that checkout; this repository does not ship one, because the URL is per deployment rather than part of the CLI source.
 
@@ -275,6 +275,357 @@ All three were produced by running the bridge on 2026-09-21 rather than read off
 ### Any other harness
 
 Anything that speaks MCP over stdio works: the server command is `robot-council mcp` and the one environment variable is `ROBOT_COUNCIL_SERVICE`. The bridge writes protocol to stdout and diagnostics to stderr, and never mixes them.
+
+## Handing fleet events to an agent at a turn boundary
+
+The bridge follows the fleet's change feed while an agent works and leaves whatever concerns that
+session in a sink. `robot-council pending` prints what is waiting and clears it, and a harness's
+**stop hook** is what calls it -- so the moment an agent would otherwise go idle, it picks up the
+directive or the handed-back task instead.
+
+**This is a turn boundary, not a wake-up.** An agent that stopped an hour ago stays stopped. Nothing
+here pushes into an idle session, and the one mechanism that could is still gated
+([#62](https://github.com/robot-council/cli/issues/62)). What this removes is the narrower case,
+which is also the common one: an agent finishes a task and goes idle while a directive is already
+waiting for it.
+
+**A hook that always continues the turn is a session that never stops.** `robot-council pending`
+prints nothing and exits 0 when the fleet has been quiet, and the script below ends the turn on empty
+output. That one line is the whole difference between a hook and a loop.
+
+### The script every harness runs
+
+One script serves all three harnesses. Fill in the two values at the top and give the path to
+whichever configuration below matches the harness.
+
+```bash
+#!/usr/bin/env bash
+# Hand waiting fleet events to the agent at a turn boundary.
+set -u
+
+export ROBOT_COUNCIL_SERVICE=https://your-fleet.example.com
+export ROBOT_COUNCIL_HARNESS=claude          # claude, codex or cursor
+# export ROBOT_COUNCIL_PROJECT=org/repo      # only if the bridge was given --project
+
+payload=$(cat)
+
+# The loop guard. Claude Code and Codex set `stop_hook_active` once they have continued a turn;
+# Cursor counts instead and is capped by `loop_limit` in its own configuration.
+case "$payload" in
+  *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
+esac
+
+# **Which shape to answer with is read from the payload, never passed in.** A wrong argument would
+# be unrecoverable: `pending` clears the sink as it reads, so by the time a harness discards an
+# answer it does not understand, the events are already gone and nothing reports it. Cursor's stop
+# payload carries `loop_count`; Claude Code's and Codex's carry `stop_hook_active`.
+case "$payload" in
+  *'"loop_count"'*) shape=cursor ;;
+  *) shape=block ;;
+esac
+
+# Nothing below this line runs until the shape is decided, so a payload this script cannot read
+# ends the turn with the sink untouched.
+waiting=$(robot-council pending ${ROBOT_COUNCIL_PROJECT:+--project="$ROBOT_COUNCIL_PROJECT"}) || exit 0
+
+# Quiet ends the turn. This line is the whole difference between a hook and a session that
+# never stops.
+[ -z "$waiting" ] && exit 0
+
+# Encoded rather than interpolated: an event body is another developer's agent's words, and it
+# carries quotes and newlines. `php` is on any machine this command line runs on.
+RC_NEWS="The fleet has news:
+$waiting" php -r '$m = getenv("RC_NEWS"); echo json_encode(
+    $argv[1] === "cursor"
+        ? ["followup_message" => $m]
+        : ["decision" => "block", "reason" => $m]
+);' -- "$shape"
+```
+
+Save it as `robot-council-stop-hook`, make it executable, and put it where the harness can run it.
+`robot-council` has to be on the `PATH` the harness hands the hook, or the script needs an absolute
+path in place of it -- and that path needs quoting if it contains a space, for the reason the Claude
+Code MCP section above records.
+
+**The two values live in the script rather than in the harness configuration**, and that is not
+arbitrary. `exit 2` makes Claude Code print the entire hook command string into the transcript
+(measured below), so anything put there is one misconfigured hook away from being transcript
+content. The script is also the only one of the two places that all three harnesses can reach:
+Cursor's `stop` entry has no `env` key at all, and the MCP block's `env` configures the bridge's
+process rather than the hook's.
+
+**The sink is keyed by the service, the harness and the project**, so a hook that resolves any of
+the three differently from the bridge beside it reads an empty sink and reports a quiet fleet.
+Uncomment `ROBOT_COUNCIL_PROJECT` wherever the bridge was given `--project`.
+
+**The script fails open, on purpose and invisibly.** `|| exit 0` means a missing `robot-council`, an
+unset `ROBOT_COUNCIL_SERVICE`, or a harness it cannot name all end the turn normally rather than
+blocking it -- the right direction, because a broken hook must not trap an agent in a turn it cannot
+finish. The cost is that every one of those looks exactly like a fleet with nothing to say. That is
+what the verification below is for, and it is worth running once per machine rather than trusting the
+silence.
+
+### Claude Code
+
+In `.claude/settings.json`, at project or user level:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/robot-council-stop-hook",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`~/bin/robot-council-stop-hook` works too: a `command` with no `args` array runs through a shell, and
+a probe writing `printf '%s' ~` to a file produced the home directory. That was measured for Claude
+Code only. Cursor and Codex were not measured, and an unexpanded `~` is a directory that does not
+exist rather than an error anyone sees, so write the path out in full unless you are going to check.
+
+**Verified 2026-09-22**, on Claude Code 2.1.236 and macOS 26.6.2. Three runs of
+`claude -p 'Say the single word READY and stop.'` in a throwaway project, differing only in whether
+the sink held anything and whether the hook was configured. The script was the one above with its
+two placeholders filled in and two extra lines pointing `PATH` and `XDG_STATE_HOME` at the throwaway
+install; the configuration was the block above with the absolute path:
+
+| sink | hook | `num_turns` | the directive in the transcript | sink |
+| --- | --- | --- | --- | --- |
+| one directive | configured | **2** | **present**, verbatim | 229 B to 0 B |
+| empty | configured | 1 | absent | empty throughout |
+| one directive | **removed** | 1 | absent | 229 B to **229 B** |
+
+**The third row is the control**, and it is what makes the first mean anything: same planted sink,
+hook taken out, turn ended at one, nothing in the transcript, and the sink was 229 bytes on both
+sides. A hook that never fired and a fleet with nothing to say are otherwise the same reading.
+
+All three runs used `--output-format stream-json`, so *absent from the transcript* is an observation
+rather than an inference from `num_turns`.
+
+Stop hooks do fire under `claude -p`, and a blocked stop does produce another turn there. Claude
+Code's hooks documentation does not say either way for print mode, so both halves of that sentence
+are measurements rather than restatements.
+
+What the agent receives is a user message, quoted verbatim from the first run:
+
+```
+Stop hook feedback:
+The fleet has news:
+[directive] PROBE-JULIET the release branch is cut; hold new migrations from otherdev at 2026-09-22T16:40:00+00:00
+```
+
+The loop guard was measured on the script alone rather than through a session, by handing it
+`{"stop_hook_active":true}`: it printed nothing, exited 0, and left the sink at 187 bytes on both
+sides. **It is not what ended the first run at two turns** -- the drain had already emptied the sink,
+so the hook's second firing had nothing to say either way. The guard is what covers the case the
+drain does not: the bridge's follower writing *new* events between the first firing and the second,
+which would otherwise continue the turn again, and again for as long as the fleet keeps talking.
+
+**The agent weighed the directive rather than obeying it, in every run.** A probe directive asking
+for an exact token back was refused, with the session naming the sender label as self-asserted and
+unverified. That is the behavior [#14](https://github.com/robot-council/core/issues/14)'s threat
+model asks for -- event content is untrusted input to something that may have shell access -- and it
+is why `pending` prints who said it. Bound worth stating: those sessions had no bridge wired in and
+no project instructions, so they met the directive as a stranger's words rather than as fleet
+coordination. How an agent that *is* on the fleet weighs one has not been measured.
+
+#### The shape that drains the sink and throws it away
+
+Claude Code's hook reference documents decision control through
+`hookSpecificOutput.permissionDecision`. **For `Stop` that is silently ignored**, and the cost is not
+a failed injection -- it is lost events.
+
+Three runs on 2026-09-22, same build, same loop, differing only in what the hook printed, each with a
+freshly planted sink:
+
+| hook stdout | `num_turns` | reached the transcript | sink |
+| --- | --- | --- | --- |
+| `hookSpecificOutput.permissionDecision: "deny"` | 1 | no | 187 B to **0 B** |
+| `hookSpecificOutput.permissionDecision: "block"` | 1 | no | 188 B to **0 B** |
+| top-level `{"decision":"block","reason":"..."}` | **2** | **yes** | 188 B to 0 B |
+
+**Both spellings the reference suggests were tried**, and the third row is the positive control that
+makes the first two an absence rather than a broken probe: same harness, same loop, same planted
+sink, injecting correctly.
+
+The sink is emptied either way, and that is the whole problem. `robot-council pending` drains on
+read, so by the time the harness discards the hook's output the events are already gone. Nothing
+errors, nothing is logged, and every surface afterwards says the fleet had been quiet.
+
+Top-level `{"decision":"block","reason":"..."}` is the shape that works, and it is what the script
+prints.
+
+`exit 2` with the text on stderr also continues the turn, and is the wrong choice here for a
+measurable reason: Claude Code prefixes the injected message with **the entire hook command string**
+in square brackets. Measured on the same day, a hook whose command carried its configuration in
+environment assignments put every one of them into the transcript. That is the leak this project
+already refuses when it keeps the credential out of harness configuration, arriving through a
+different door, and it is why the script above holds its own values instead.
+
+#### Verifying it once, on the machine it is installed on
+
+A hook that never fired and a fleet with nothing to say read the same, so this needs the control
+rather than the happy path. Run it with something genuinely waiting -- a teammate posting a directive
+is the ordinary way to get there.
+
+**`--peek` needs the same two values the hook has**, because they live in the script and not in your
+shell, and it exits 1 without them while printing nothing on stdout. Read `$?`, or an unconfigured
+command and an empty sink are the same reading:
+
+```bash
+export ROBOT_COUNCIL_SERVICE=https://your-fleet.example.com
+export ROBOT_COUNCIL_HARNESS=claude
+
+robot-council pending --peek; echo "rc=$?"     # rc=1 means it could not look, not that nothing waits
+claude -p 'Say READY and stop.' --output-format json < /dev/null | jq '.num_turns'
+robot-council pending --peek; echo "rc=$?"     # and whether it survived
+```
+
+**`--peek` is not read-only, whatever its name suggests.** It drains the sink and writes it back, so
+a bridge appending between those two steps can have its event reordered or dropped
+([#71](https://github.com/robot-council/cli/issues/71)). On a live fleet that is a real if narrow
+risk, and it is a reason to verify once rather than to leave the command in a loop.
+
+Read `num_turns` and the sink together, because each failure looks like success on its own:
+
+| `num_turns` | sink afterward | what happened |
+| --- | --- | --- |
+| 2 | empty | the hook fired and the harness accepted its output |
+| 1 | **empty** | the hook ran and its output was discarded: the wrong JSON shape, `php` missing, or the `timeout` firing after the drain |
+| 1 | still full | the drain never happened: the hook never ran, or it ran and failed open |
+
+**The third row has more causes than a missing file**, and they are the ones the script is built to
+fail open on: `robot-council` not on the hook's `PATH`, an unset `ROBOT_COUNCIL_SERVICE`, a harness
+it cannot name. A `ROBOT_COUNCIL_PROJECT` that disagrees with the bridge's `--project` also lands
+here, because the drain empties a *different* sink and leaves this one untouched. Check those before
+checking `chmod +x`.
+
+Then run it again with nothing waiting. `num_turns` of 1 there is the turn ending normally, which is
+what stops the hook from becoming a loop.
+
+### Cursor
+
+In `~/.cursor/hooks.json` (global) or `.cursor/hooks.json` (project):
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "stop": [
+      {
+        "command": "/absolute/path/to/robot-council-stop-hook",
+        "loop_limit": 10
+      }
+    ]
+  }
+}
+```
+
+Set `ROBOT_COUNCIL_HARNESS=cursor` in the script. Cursor returns `followup_message`, which its
+documentation describes as submitted automatically as the next user message, and it caps
+continuations with `loop_limit` rather than with a field on the payload -- which is why the script's
+own `stop_hook_active` guard never fires here and `loop_limit` is the only thing bounding it.
+
+**Not run against a harness**, and the reason is an account rather than a missing tool.
+[#72](https://github.com/robot-council/cli/issues/72) carries it.
+
+Cursor 3.17.19 is installed on the machine this was written on, and **`cursor agent` is a headless
+runner directly comparable to `claude -p`**: `-p/--print` with `--output-format text | json |
+stream-json`, which is what the Claude Code measurements above were taken with.
+
+**`agent` is routed by the `cursor` launcher script, not by the Cursor binary, and invoking the
+binary directly fails silently.** On macOS `/usr/local/bin/cursor` is a 142-line shell script whose
+routing is three branches: `editor` and anything unrecognized go to the editor CLI, and `agent`
+`exec`s `~/.local/bin/cursor-agent`, installing it from `cursor.com/install` first if it is missing
+and enforcing a minimum version. The editor CLI treats arguments it does not recognize as **paths to
+open**, so bypassing the script turns `cursor agent login` into two empty editor tabs named `agent`
+and `login`, with no error.
+
+**`cursor --help` does not discriminate**, which is what makes this worth writing down. Cursor 3.7.21
+on Windows lists `agent` under `Subcommands` in the help printed by `cursor.exe`, and that same
+invocation does not route it -- the binary advertises a subcommand the launcher implements. Both
+3.7.21 and 3.17.19 list it; only one of the two invocations acted on it.
+
+So **call `cursor-agent` directly** rather than through `cursor agent`, and install it from
+`cursor.com/install` where it is missing. That is one binary with one behavior, instead of a
+launcher whose presence decides what the same command line means. Invoking it installs
+`cursor-agent` from `cursor.com/install` on first use; here that produced 2026.09.18-9a7762b in
+`~/.local/bin`, which is not on the default `PATH`. `cursor agent status` then reported **`Not logged
+in`**, and `cursor agent login` is a browser flow, so nothing was run.
+
+This is corrected from an earlier reading of "no headless binary", which came from looking for a
+`cursor-agent` on `PATH` and reading the top of `cursor --help`. The `Subcommands` block naming
+`agent` is at the bottom of that same output. A narrower question than the one that mattered,
+answered in the reassuring direction.
+
+**Whether `cursor agent -p` runs `stop` hooks at all is itself unmeasured**, and it is the first
+thing #72 should establish. `claude -p` does, which the section above records, but that is a
+measurement about a different harness and carries nothing here.
+
+What *was* run, on 2026-09-22: given a planted sink and Cursor's documented stdin, the script printed
+
+```
+{"followup_message":"The fleet has news:\n[directive] PROBE-INDIA cursor shape from otherdev at 2026-09-22T16:40:00+00:00"}
+```
+
+and cleared the sink. So the claim is that the script emits the documented shape and selects it from
+the payload correctly, not that Cursor accepts it.
+
+`beforeMCPExecution` and `afterMCPExecution` are outbound only -- they gate and audit rather than
+feed the agent -- so wiring this to the bridge's own MCP traffic is not available. `stop` is the hook
+that matches a turn boundary, but it is **not** Cursor's only injecting hook: `postToolUse` and
+`postToolUseFailure` carry `additional_context`, and `sessionStart` carries it too. Read from Cursor's
+hooks documentation on 2026-09-22 and none of it run. `postToolUse` is the interesting one and is
+deliberately not documented here -- it would deliver fleet events after every tool call rather than
+once a turn, which is a different trade in interruption and cost than the one
+[#59](https://github.com/robot-council/cli/issues/59) settled.
+
+### Codex
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/robot-council-stop-hook",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Set `ROBOT_COUNCIL_HARNESS=codex` in the script.
+
+**Not run, and the block above is this project's arrangement rather than a quoted example.** Codex is
+not installed on the machine this was written on. What was checked, on 2026-09-22, is that OpenAI's
+hooks reference gives `{"decision": "block", "reason": "..."}` as the continuation output and
+`stop_hook_active` as the loop guard -- the same two the Claude Code path uses, which is why the
+script needs no Codex-specific branch. The nesting, `type`, and `timeout` around them are copied from
+the Claude Code shape because the reference presents the same structure; the file it belongs in, and
+the equivalent `[[hooks.Stop]]` block for `config.toml`, were not confirmed. Send a correction if it
+does not fire.
+
+### Solo
+
+**Not run, and nothing about it was checked.** Solo is not installed on the machine this was written
+on, and no Solo documentation was read. If it launches one of the harnesses above, that harness's
+section is the whole of it -- but that is the expectation recorded in
+[#6](https://github.com/robot-council/cli/issues/6), not a measurement.
 
 ## Development
 
