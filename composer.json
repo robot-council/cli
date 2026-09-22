@@ -8,7 +8,7 @@
         "laravel-zero"
     ],
     "homepage": "https://github.com/robot-council/cli",
-    "type": "project",
+    "type": "library",
     "license": "MIT",
     "authors": [
         {
