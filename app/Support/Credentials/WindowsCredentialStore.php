@@ -112,6 +112,20 @@ final class WindowsCredentialStore implements CredentialStore
     public const int ENVIRONMENT_BUDGET = 8192;
 
     /**
+     * How much the helper may write to one stream without the parent draining it, in bytes.
+     *
+     * **A floor, not the pipe's capacity.** Measured on 2026-09-22 by polling a child through the
+     * same `proc_open` mechanism `readThroughPipe()` uses and never reading: 4,096 bytes fit and the
+     * child exits, 8,192 blocks. The true capacity is somewhere between, and this is the figure
+     * safe to reason with.
+     *
+     * **Identical on stdout and stderr**, which was worth measuring rather than assuming --
+     * `robot-council/cli#58` exists because the original bound reasoned about stdout alone.
+     * `readThroughPipe()` records what each stream can actually produce against it.
+     */
+    public const int PIPE_BUFFER_BYTES = 4096;
+
+    /**
      * The largest blob `CredWriteW` accepts, in bytes.
      *
      * `CRED_MAX_CREDENTIAL_BLOB_SIZE`, held on `WindowsCredentialTarget` so both Windows stores
@@ -130,6 +144,22 @@ final class WindowsCredentialStore implements CredentialStore
      * The credential itself travels base64-encoded, in both directions. That is transport encoding
      * and not protection -- it is there because stdout is decoded through the console's code page,
      * which mangles arbitrary bytes, and base64 is ASCII whatever that code page is.
+     *
+     * **`$ErrorActionPreference = 'Stop'` on the first line is load-bearing for two separate
+     * properties, and a test pins it.** Measured on 2026-09-22 by removing it and re-running:
+     *
+     * - **It is what bounds stderr.** With it, 1, 10 and 30 distinct C# compiler errors all produce
+     *   about 732 bytes, because the first error is terminating and there is never a second to
+     *   report. Without it the script runs on and emits an error per statement: 1,385 bytes at one
+     *   error, **7,991 at ten**, and **22,809 at thirty** -- past `PIPE_BUFFER_BYTES` and into the
+     *   range where the child blocks and `readThroughPipe()` can only time out.
+     *   `robot-council/cli#58` is where that was settled.
+     * - **It is also what makes a broken mechanism report a failure.** Without it, a refused
+     *   `Add-Type` is non-terminating, `Read()` leaves `$blob` null, and the script reaches
+     *   `exit 3` -- which is `NOT_FOUND`. So a machine where the helper cannot compile at all would
+     *   report "no such credential" from every `get()`, and `available()`'s probe, which demands
+     *   exactly that code, would pass. That is the defect `robot-council/cli#39` closed, arriving
+     *   through a different door.
      */
     private const string SCRIPT = <<<'POWERSHELL'
         $ErrorActionPreference = 'Stop'
@@ -479,13 +509,40 @@ final class WindowsCredentialStore implements CredentialStore
         //   bound that actually binds.
         //
         // Reading only after the child has exited is what makes that safe: at that point both
-        // streams are at EOF and come back immediately. It depends on the child being able to
-        // write everything without the parent draining, which was measured too -- 4,096 characters
-        // of stdout fit and the child exits, 8,192 blocks. The largest this call can return is
-        // 3,416, because `MAX_BLOB_BYTES` bounds what `put()` will store.
+        // streams are at EOF and come back immediately. It depends on the child being able to write
+        // everything without the parent draining, and **both streams have to clear that bar, not
+        // just stdout** -- stderr has its own buffer, and a fault is exactly when it gets used.
+        // `robot-council/cli#58` is where that was measured; the figures are below.
         //
-        // A blob larger than that, written by something other than this store, makes the child
-        // block and this loop time out. That is a bounded failure with a message, not a hang.
+        // **The threshold is the same on both streams**, and `PIPE_BUFFER_BYTES` records it:
+        // 4,096 bytes fit and the child exits, 8,192 blocks, identical for stdout and stderr.
+        //
+        // **stdout.** The largest this call can return is 3,416 characters, because
+        // `MAX_BLOB_BYTES` bounds what `put()` will store. A blob larger than that, written by
+        // something other than this store, makes the child block and this loop time out. That is a
+        // bounded failure with a message, not a hang.
+        //
+        // **stderr, which is the half #58 asked about.** The largest a real failure produced is
+        // **744 bytes**, against the 4,096 that fit. The concern behind the ticket was that
+        // `Add-Type` emits a diagnostic per compiler error with source context and nothing bounds
+        // how many -- measured, that is not what happens:
+        //
+        // - 1, 3, 10 and 30 distinct C# errors all produced about 732 bytes. PowerShell reports the
+        //   **first** `Add-Type` diagnostic and a couple of source lines, not one record per error.
+        // - `$ErrorActionPreference = 'Stop'`, the script's first line, is the structural reason.
+        //   It makes the first error terminating, so there is no second one to report. Removing it
+        //   is what would make this bound stop holding.
+        // - A missing `TEMP`, the other fault on record, produced 361 bytes.
+        //
+        // **And the caller cannot inflate it.** The script is fixed at 5,881 characters and the one
+        // caller-controlled input is the target, which travels in the environment. Targets of 6,000
+        // characters, and targets built of newlines, quotes, `$(...)`, format specifiers and
+        // non-ASCII, all produced **zero** bytes of stderr: the target reaches a .NET method that
+        // either succeeds or throws a message naming an error number, and never reaches a formatter
+        // that would echo it.
+        //
+        // So stderr cannot approach the buffer, and this loop does not drain it. If the script ever
+        // grows a second error path, or loses `'Stop'`, that is the assumption to re-measure.
         $deadline = microtime(true) + self::TIMEOUT_SECONDS;
 
         while (proc_get_status($handle)['running']) {
