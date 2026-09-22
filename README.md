@@ -389,8 +389,15 @@ In `.claude/settings.json`, at project or user level:
 
 `~/bin/robot-council-stop-hook` works too: a `command` with no `args` array runs through a shell, and
 a probe writing `printf '%s' ~` to a file produced the home directory. That was measured for Claude
-Code only. Cursor and Codex were not measured, and an unexpanded `~` is a directory that does not
-exist rather than an error anyone sees, so write the path out in full unless you are going to check.
+Code only. **Codex was not measured**, and an unexpanded `~` is a directory that does not exist
+rather than an error anyone sees, so write the path out in full unless you are going to check.
+
+**Cursor was exercised, and the question did not arise there.** On Windows the entry has to point at
+a `.cmd` rather than at a bash script, so the path was absolute and a `~` never appeared; Cursor's
+execution log names the mechanism `windows_temp_file`, which tells you it writes a temporary script
+but not whether a shell would have expanded anything in it. Whether a Cursor `command` is
+shell-interpreted is therefore **still open**, on Windows and on macOS alike. The Cursor section
+below records what was run instead of inferring from it.
 
 **Verified 2026-09-22**, on Claude Code 2.1.236 and macOS 26.6.2. Three runs of
 `claude -p 'Say the single word READY and stop.'` in a throwaway project, differing only in whether
@@ -536,8 +543,112 @@ documentation describes as submitted automatically as the next user message, and
 continuations with `loop_limit` rather than with a field on the payload -- which is why the script's
 own `stop_hook_active` guard never fires here and `loop_limit` is the only thing bounding it.
 
-**Not run against a harness**, and the reason is an account rather than a missing tool.
-[#72](https://github.com/robot-council/cli/issues/72) carries it.
+**Verified 2026-09-22**, on Cursor 3.7.21 and Windows 11 Pro 26200, against a live fleet, by driving
+the editor's own agent rather than a headless runner -- there is none on Windows, for the reason
+below. Three turns of `say hello and stop`, differing only in whether the sink held anything and
+whether the hook was configured:
+
+| sink | hook | hook executions | the directive in the conversation | sink |
+| --- | --- | --- | --- | --- |
+| one directive | configured | **2** | **present**, verbatim | 182 B to 0 B |
+| empty | configured | 1 | absent | empty throughout |
+| one directive | **removed** | 0 | absent | 182 B to **182 B** |
+
+**The third row is the control**, and it is what makes the first mean anything: same planted sink,
+`hooks.json` moved aside, nothing injected, and the sink was 182 bytes on both sides.
+
+The first two rows come from **one** turn rather than two. The hook fired, drained the sink and
+continued the turn; the agent worked on what arrived; and when it stopped again the hook fired a
+second time against the now-empty sink, printed nothing, and let the turn end. Cursor's stop payload
+carries `loop_count`, and the two firings arrived as `0` and `1`.
+
+**Cursor adds no wrapper.** What arrives is a user message carrying the script's bytes and nothing
+else, quoted verbatim from the first run:
+
+```
+The fleet has news:
+[directive] cli#72 probe: confirm Cursor submits followup_message as the next user message. from an unnamed session
+```
+
+`The fleet has news:` is the script's own line. Claude Code prefixes its equivalent with
+`Stop hook feedback:`; Cursor prefixes nothing, so whatever the hook prints is the whole message.
+
+**The stop payload, as it actually arrives** -- previously taken from Cursor's documentation:
+
+```json
+{"conversation_id":"…","generation_id":"…","model":"default","status":"completed",
+ "loop_count":0,"input_tokens":21434,"output_tokens":27,"cache_read_tokens":5504,
+ "cache_write_tokens":0,"session_id":"…","hook_event_name":"stop","cursor_version":"3.7.21",
+ "workspace_roots":["/d:/GitHub Repos/robot-council/cli"],"user_email":"…","transcript_path":"…"}
+```
+
+`stop_hook_active` is absent, which is why the script's own loop guard never fires here and
+`loop_limit` is the only thing bounding it -- now measured rather than read from the documentation.
+
+**The payload arrives with a UTF-8 BOM, and that is a trap worth the line.** Measured: the first
+three bytes on stdin are `ef bb bf`, before the `{`. The script survives it because it matches on
+substrings, and a `case` against `*'"loop_count"'*` does not care what precedes the brace. **A hook
+that pipes stdin to `jq`, or to any strict JSON parser, fails on it** -- and by this script's own
+design a payload it cannot read ends the turn with the sink untouched, so the failure reads exactly
+like a quiet fleet. Strip the BOM before parsing, or match on substrings as this one does.
+
+**On Windows the `command` is a path to a `.cmd`, not to the bash script.** Cursor's execution log
+names the mechanism `windows_temp_file`: it writes the command to a temporary script and runs that.
+A bash script is not directly executable on Windows whatever the shell answer turns out to be, so
+the entry points at a two-line `.cmd` that invokes Git Bash on the hook:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "stop": [
+      {
+        "command": "C:\\Users\\<you>\\bin\\robot-council-stop-hook.cmd",
+        "loop_limit": 10
+      }
+    ]
+  }
+}
+```
+
+```bat
+@echo off
+"C:\Program Files\Git\bin\bash.exe" "%USERPROFILE%\bin\robot-council-stop-hook"
+```
+
+stdin passes through the shim untouched. **Whether Cursor would have interpreted a shell line
+directly is still unmeasured**, and the shim is deliberately the arrangement that does not depend on
+the answer.
+
+**The two environment variables reach the hook by being written into the script**, which is what the
+section above recommends and what was run here. A `stop` entry has no `env` key, and prefixing them
+onto `command` was not tried -- it would depend on the same unmeasured shell question.
+
+**`hooks.json` is picked up without restarting Cursor.** Measured: the file was written at
+17:45:36 UTC and `cursor.hooks.*.log` recorded `Reloading hooks configuration...` at 17:45:37.777Z
+and `Loaded 1 user hook(s) for steps: stop` at 17:45:38.019Z. Settings, then Hooks, shows the loaded
+entry and an **Execution Log** -- which is the instrument to reach for, because it distinguishes a
+hook that fired and said nothing from one that never fired at all.
+
+**But it watches for writes, not for removal, and that one bit me.** Moving `hooks.json` aside to
+disable the hook did nothing: Settings went on showing `Configured Hooks (1)`, and the hook went on
+firing and draining the sink. Writing a config with an empty `hooks` object instead produced
+`Reloading hooks configuration...` and `Loaded 0 user hook(s) for steps:` within a second, and the
+entry disappeared from Settings. **Disable a Cursor hook by writing an empty configuration, not by
+deleting the file** -- otherwise it keeps running while every visible sign says it is gone, which for
+this hook means it keeps emptying the sink.
+
+Two things in those logs are noise rather than a fault. `ERROR: Failed to parse project hooks
+configuration` is followed immediately by `No project hooks configuration found`, and this
+repository ships no `.cursor/hooks.json` -- Cursor logs an error for an absent project config. And
+the log files report **0 bytes** while holding content, because the size is not flushed to the
+directory entry while Cursor holds the handle; read them rather than measuring them.
+
+**`robot-council` was not on `PATH` on the machine this was run on**, and that is worth stating
+because of how it failed. With a bare `robot-council` the hook's `|| exit 0` turned
+`command not found` into a turn that ended quietly -- byte-identical to a quiet fleet, with nothing
+anywhere reporting it. The script here names the executable absolutely. Check the binary resolves
+before trusting a quiet run.
 
 Cursor 3.17.19 is installed on the machine this was written on, and **`cursor agent` is a headless
 runner directly comparable to `claude -p`**: `-p/--print` with `--output-format text | json |
@@ -568,9 +679,24 @@ This is corrected from an earlier reading of "no headless binary", which came fr
 `agent` is at the bottom of that same output. A narrower question than the one that mattered,
 answered in the reassuring direction.
 
-**Whether `cursor agent -p` runs `stop` hooks at all is itself unmeasured**, and it is the first
-thing #72 should establish. `claude -p` does, which the section above records, but that is a
-measurement about a different harness and carries nothing here.
+**Whether `cursor agent -p` runs `stop` hooks at all is still unmeasured**, and on Windows it cannot
+be measured at all: `cursor-agent` is not installable there. `cursor.com/install` is a bash script
+whose `uname -s` case accepts `Linux*` and `Darwin*` and exits 1 on anything else, and it mentions
+Windows nowhere. The runs recorded below drove the **editor's** agent instead, which is a different
+question with a different answer and is labelled as such.
+
+**And the Windows launcher does not route `agent` at all**, which the paragraph above predicts and
+which is worth having measured directly rather than inferred twice over. `cursor.cmd` on Windows is
+seven lines that hand every argument to the editor CLI, with none of the macOS launcher's branches:
+
+```bat
+"%~dp0..\..\..\Cursor.exe" "%~dp0..\out\cli.js" %*
+```
+
+So `cursor agent --help` on 3.7.21 prints the **editor's** help, exits 0, and reports no error --
+while listing, at the bottom of that same output, `agent  Start the Cursor agent in your terminal.`
+The binary advertises a subcommand it does not implement. Reading that help is how this was got
+wrong in both directions before it was run.
 
 What *was* run, on 2026-09-22: given a planted sink and Cursor's documented stdin, the script printed
 
