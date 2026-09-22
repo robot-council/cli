@@ -350,6 +350,12 @@ final class WindowsCredentialStore implements CredentialStore
             ));
         }
 
+        // The key travels as the credential's user name, which Windows caps. Checked before the
+        // call because this path cannot report the cause afterwards: the helper's .NET exception
+        // arrives as exit 1 with the Windows error number buried in a message `put()` discards, so
+        // an over-long key and a refused `Add-Type` would be the same answer.
+        WindowsCredentialTarget::assertStorable($service);
+
         $this->run('write', $this->target($service), $service, base64_encode($token));
 
         // Not the exit code. The other two stores read back because a store that reports success

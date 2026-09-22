@@ -170,6 +170,11 @@ final class WindowsFfiCredentialStore implements CredentialStore
             ));
         }
 
+        // The key travels as the credential's user name, which Windows caps. Checked before the
+        // call so an over-long key fails saying so, rather than through `CredWriteW` returning a
+        // Windows error number that means nothing to the developer reading it.
+        WindowsCredentialTarget::assertStorable($service);
+
         [$wrote, $error] = $this->write($this->target($service), $service, $token);
 
         if (! $wrote) {
