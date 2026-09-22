@@ -13,3 +13,15 @@ parameters:
         - tests
         - rector.php
     tmpDir: build/phpstan
+    # A C struct's fields are reached through `FFI\CData`'s C-level property handlers rather than
+    # through declared properties -- reflection reports no methods and no properties on the class at
+    # all -- so `$credential->CredentialBlobSize` has nothing for PHPStan to find. This is what
+    # `universalObjectCratesClasses` is for: it says the class carries arbitrary properties, so a
+    # read yields `mixed` and `WindowsFfiCredentialStore` narrows it with a real check rather than a
+    # cast. The dynamic half, calling a C function, is handled in code instead -- `Advapi32` and
+    # `Kernel32` declare those signatures so every call site is checked for arity and type.
+    #
+    # This is not a baseline, and there is still none: no error on any line of this project's own
+    # code is exempted by it.
+    universalObjectCratesClasses:
+        - FFI\CData

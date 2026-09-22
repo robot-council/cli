@@ -18,6 +18,7 @@ use App\Support\Credentials\KeychainStore;
 use App\Support\Credentials\SecretToolStore;
 use App\Support\Credentials\UserFileStore;
 use App\Support\Credentials\WindowsCredentialStore;
+use App\Support\Credentials\WindowsFfiCredentialStore;
 
 const TOKEN = 'rcouncil_1|SuPeRsEcReTvAlUe0123456789abcdef';
 const OTHER = 'https://other.example.test';
@@ -147,10 +148,17 @@ it('is the last candidate, behind every store that can be absent', function (): 
     // compared the two, which can only fail if the test's copy of the list diverges -- on ubuntu
     // it asserted `UserFileStore === UserFileStore` and would have stayed green with
     // `WindowsCredentialStore` removed from the candidates entirely.
+    //
+    // **The two Windows stores' relative order is load-bearing, not incidental.** Both reach the
+    // same Credential Manager and write interchangeable entries; the FFI one calls `advapi32`
+    // in-process and the PowerShell one starts a subprocess to do it. `store()` takes the first
+    // available candidate, so listing the FFI store second would mean a machine that has FFI never
+    // uses it, with nothing to report that but a suite still passing. `robot-council/cli#50`.
     expect(array_map(fn (CredentialStore $store): string => $store::class, Credentials::candidates()))
         ->toBe([
             KeychainStore::class,
             SecretToolStore::class,
+            WindowsFfiCredentialStore::class,
             WindowsCredentialStore::class,
             UserFileStore::class,
         ]);

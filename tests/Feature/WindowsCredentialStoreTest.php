@@ -25,6 +25,7 @@ declare(strict_types=1);
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\CredentialStoreFailed;
 use App\Support\Credentials\WindowsCredentialStore;
+use App\Support\Credentials\WindowsCredentialTarget;
 use Symfony\Component\Process\Process;
 
 const WINDOWS_TOKEN = 'rcouncil_1|SuPeRsEcReTvAlUe0123456789abcdef';
@@ -185,7 +186,10 @@ it('probes a target no service key can ever produce', function (): void {
     // credential could sit there -- which it could, for a service key of `:availability-probe`,
     // back when the probe target was `TARGET_PREFIX` plus a colon -- then a machine enrolled
     // against that key would have its own token read as a broken mechanism.
-    expect(constantOf('PROBE_PREFIX'))->not->toStartWith(WindowsCredentialStore::TARGET_PREFIX);
+    //
+    // Read from `WindowsCredentialTarget`, which now owns both prefixes so the two Windows stores
+    // cannot drift to different ones. `TARGET_PREFIX` is this store's name for the same value.
+    expect(WindowsCredentialTarget::PROBE_PREFIX)->not->toStartWith(WindowsCredentialStore::TARGET_PREFIX);
 });
 
 it('carries the service key without parsing it', function (): void {
