@@ -29,7 +29,7 @@ Example (cut v0.3.0 from the previous tag):
   gh release create v0.3.0 --title 'v0.3.0 — Theme' --notes-file body.md --verify-tag
 
 Options:
-  --repo O/R          GitHub repo (default: robot-council/core)
+  --repo O/R          GitHub repo (default: derived from this checkout)
   --lead TEXT         one-sentence milestone lead (recommended; else a TODO placeholder)
   --breaking TEXT     impact/action for the "**Breaking change** —" callout paragraph
   --breaking-item T   an itemized "## Breaking changes" bullet (repeatable)
@@ -38,11 +38,54 @@ Options:
 """
 import argparse, json, re, subprocess, sys
 
-DEFAULT_REPO = "robot-council/core"
-
-
 def sh(args):
     return subprocess.run(args, capture_output=True, text=True).stdout
+
+
+def run(args):
+    """Run a command, returning (returncode, stdout-stripped). Errors are the caller's to read."""
+    p = subprocess.run(args, capture_output=True, text=True)
+    return p.returncode, p.stdout.strip()
+
+
+REMOTE = re.compile(
+    r"""^(?:https?://[^/]+/            # https://github.com/
+         |(?:ssh://)?[^@]+@[^:/]+[:/]) # git@github.com: or ssh://git@host/
+        (?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$""",
+    re.X,
+)
+
+
+def parse_remote(url):
+    """`owner/repo` from a git remote URL, or None when it is not one.
+
+    Kept pure and separate from the commands that produce a URL so the parsing is testable
+    without a checkout, a remote, or a network.
+    """
+    m = REMOTE.match((url or "").strip())
+    return f"{m.group('owner')}/{m.group('repo')}" if m else None
+
+
+def derive_repo(runner=run):
+    """The repository this checkout belongs to, or None.
+
+    **Derived rather than defaulted, because a default is right in one repository and silently
+    wrong in every other one** (cli#57). This script is copied between repositories, and a stale
+    default emits links that RESOLVE -- to unrelated pull requests in the repository it came
+    from -- which is what makes the failure hard to notice.
+
+    `gh` first, because it knows the repository a checkout is configured against even when the
+    remote is named something other than `origin`; the remote is the fallback for a checkout with
+    no `gh` available.
+    """
+    code, out = runner(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+
+    if code == 0 and "/" in out:
+        return out
+
+    code, out = runner(["git", "remote", "get-url", "origin"])
+
+    return parse_remote(out) if code == 0 else None
 
 
 # ---- prose helpers -------------------------------------------------------
@@ -315,7 +358,7 @@ def main():
     ap = argparse.ArgumentParser(description="Generate a release-note body (writing-release-notes skill).")
     ap.add_argument("prev", help="previous ref/tag (use '-' for repo root)")
     ap.add_argument("new", help="new ref/tag being released")
-    ap.add_argument("--repo", default=DEFAULT_REPO)
+    ap.add_argument("--repo", default=None)
     ap.add_argument("--lead", default=None)
     ap.add_argument("--breaking", default=None, help="impact/action for the breaking-change callout")
     ap.add_argument("--breaking-item", action="append", default=[], help="a '## Breaking changes' bullet")
@@ -323,6 +366,19 @@ def main():
                     help="PR number to omit from the auto-buckets (already covered elsewhere; repeatable)")
     ap.add_argument("--footer", default=None)
     a = ap.parse_args()
+
+    # **Derived, and a failure to derive is fatal rather than a fallback** (cli#57). Falling back
+    # to a repository that happens to exist produces links that resolve, to unrelated pull requests
+    # somewhere else, which is the reassuring kind of wrong: the output is well-formed and
+    # plausible, and nothing about it invites a second look.
+    if a.repo is None:
+        a.repo = derive_repo()
+
+    if not a.repo:
+        sys.exit(
+            "Could not tell which GitHub repository this checkout belongs to: `gh repo view` "
+            "answered nothing usable and `origin` is not a GitHub remote. Pass --repo OWNER/NAME."
+        )
 
     # PRs itemized in a breaking bullet (or explicitly excluded) must not also auto-list in a bucket.
     excl = set(a.exclude) | {int(n) for item in a.breaking_item for n in re.findall(r"#(\d+)", item)}
