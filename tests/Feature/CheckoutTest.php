@@ -121,6 +121,12 @@ it('proposes nothing rather than something wrong', function (string $remote): vo
     // are refused rather than cleaned up.
     'an owner carrying a character GitHub never issues' => ['https://github.com/UAMS Web/uams-statamic'],
     'a name carrying one' => ['git@github.com:UAMS-Web/uams~statamic.git'],
+    // The service refuses a segment that begins with a hyphen or is nothing but dots. A repository
+    // is rejected rather than normalized, because a changed name is a different repository.
+    'an owner beginning with a hyphen, which reads as a flag' => ['git@github.com:-leading-hyphen/name.git'],
+    'a name beginning with a hyphen' => ['git@github.com:owner/-leading-hyphen.git'],
+    'a traversal-shaped owner' => ['git@github.com:../evil.git'],
+    'a name left as nothing but dots once the suffix is stripped' => ['git@github.com:owner/...git'],
 ]);
 
 it('reads the work location from the absolute git directory', function (string $gitDir, ?string $expected): void {
@@ -135,10 +141,16 @@ it('reads the work location from the absolute git directory', function (string $
     // A repository that merely lives under a directory called `worktrees` is not a worktree: what
     // decides it is the segment before the LAST one, which here is the repository's own directory.
     'a repository stored under a directory named worktrees' => ['/x/worktrees/foo/.git', Checkout::PRIMARY],
-    // The service matches a work location against `/^[a-z0-9._-]+$/D`, so a capital in a directory
-    // name would be refused with a 422 rather than stored.
+    // The service matches a work location against `/^(?!\.+$)[a-z0-9_.][a-z0-9._-]*$/D`, so a
+    // capital in a directory name would be refused with a 422 rather than stored.
     'an upper-case directory name becomes the lower-case label the service accepts' => ['/repo/.git/worktrees/Feature-A', 'feature-a'],
     'a space is dropped rather than refused' => ['/repo/.git/worktrees/my tree', 'mytree'],
+    // A location is normalized where a repository would be rejected: the operator who named the
+    // directory still recognizes the label, and no other place is named by mistake.
+    'a leading hyphen is dropped, since the service refuses one' => ['/repo/.git/worktrees/-wip', 'wip'],
+    'a lone hyphen leaves nothing to propose' => ['/repo/.git/worktrees/-', null],
+    'a name that is nothing but dots proposes nothing' => ['/repo/.git/worktrees/...', null],
+    'a leading dot is kept, which the service allows' => ['/repo/.git/worktrees/.tmp', '.tmp'],
     'empty' => ['', null],
 ]);
 
@@ -270,34 +282,64 @@ it('proposes only values the service will accept', function (): void {
     // Stronger than pinning the two numbers: these are the service's own patterns, and what is
     // asserted is that anything this class proposes satisfies them. A derived value the service
     // refuses is a defect here, since the developer never chose the charset.
-    $repositoryPattern = '/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/D';
-    $locationPattern = '/^[a-z0-9._-]+$/D';
+    // Copied from `robot-council/core`'s `Support\WorkIdentity` at `75f7562`. **These tightened
+    // between that pull request's draft and its merge**, adding the leading-hyphen and all-dots
+    // rules, and an earlier version of this test embedded the draft's looser pair -- so it passed
+    // while this class proposed eight values the service would refuse. The revision is named so
+    // the next reader can tell whether it has moved again.
+    $repositoryPattern = '/^(?!\.+\/)[A-Za-z0-9_.][A-Za-z0-9._-]*\/(?!\.+$)[A-Za-z0-9_.][A-Za-z0-9._-]*$/D';
+    $locationPattern = '/^(?!\.+$)[a-z0-9_.][a-z0-9._-]*$/D';
 
     $repositories = [
         'git@github.com:UAMS-Web/uams-statamic.git',
         'https://github.com/UAMS-Web/uams-statamic',
         'https://www.github.com/Owner/Name.Dot_Under-Dash',
+        'git@github.com:_under/score.git',
+        'git@github.com:.dot/.dot.git',
+        // Adversarial, and the reason this loop skips nulls: proposing nothing is always allowed,
+        // so what is asserted is that anything actually proposed is acceptable to the service.
+        'git@github.com:-leading-hyphen/name.git',
+        'git@github.com:owner/-leading-hyphen.git',
+        'git@github.com:../evil.git',
+        'git@github.com:owner/...git',
+        'git@github.com:UAMS Web/uams-statamic.git',
     ];
 
     foreach ($repositories as $remote) {
         $repository = Checkout::repositoryFromRemote($remote);
 
+        if ($repository === null) {
+            continue;
+        }
+
         expect($repository)->toMatch($repositoryPattern)
-            ->and(mb_strlen((string) $repository))->toBeLessThanOrEqual(Checkout::MAX_REPOSITORY);
+            ->and(mb_strlen($repository))->toBeLessThanOrEqual(Checkout::MAX_REPOSITORY);
     }
 
     $gitDirs = [
         '/repo/.git',
         '/repo/.git/worktrees/uams-statamic-a',
         '/repo/.git/worktrees/Feature-A',
+        '/repo/.git/worktrees/-wip',
+        '/repo/.git/worktrees/.tmp',
+        '/repo/.git/worktrees/_scratch',
         '/repo/.git/worktrees/'.str_repeat('a', Checkout::MAX_LOCATION + 20),
+        '/repo/.git/worktrees/-wip',
+        '/repo/.git/worktrees/-',
+        '/repo/.git/worktrees/...',
+        '/repo/.git/worktrees/..',
+        '/repo/.git/worktrees/my tree',
     ];
 
     foreach ($gitDirs as $gitDir) {
         $location = Checkout::locationFromGitDir($gitDir);
 
+        if ($location === null) {
+            continue;
+        }
+
         expect($location)->toMatch($locationPattern)
-            ->and(mb_strlen((string) $location))->toBeLessThanOrEqual(Checkout::MAX_LOCATION);
+            ->and(mb_strlen($location))->toBeLessThanOrEqual(Checkout::MAX_LOCATION);
     }
 });
 

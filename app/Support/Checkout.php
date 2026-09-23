@@ -75,6 +75,22 @@ final class Checkout
     private const array HOSTS = ['github.com', 'www.github.com'];
 
     /**
+     * The shape one side of `owner/name` must have.
+     *
+     * **`robot-council/core` is the authority, and this mirrors its `Support\WorkIdentity` at
+     * `75f7562`.** A segment may not begin with a hyphen and may not be nothing but dots. Both
+     * rules arrived between that pull request's draft and its merge, and both matter: a leading
+     * hyphen reads as a flag to anything that later builds a command line, and `..` reads as a
+     * traversal to anything that joins it to a path.
+     */
+    private const string SEGMENT = '/^[A-Za-z0-9_.][A-Za-z0-9._-]*$/D';
+
+    /**
+     * The shape a work location must have, which is the lower-case form of the same rule.
+     */
+    private const string LOCATION = '/^[a-z0-9_.][a-z0-9._-]*$/D';
+
+    /**
      * Which GitHub repository this checkout belongs to, or null when nothing can be said.
      *
      * @param  string|null  $directory  Where to ask from; the current working directory by default.
@@ -272,7 +288,21 @@ final class Checkout
      */
     private static function isIdentifier(string $value): bool
     {
-        return preg_match('/^[A-Za-z0-9._-]+$/', $value) === 1;
+        return preg_match(self::SEGMENT, $value) === 1 && ! self::isAllDots($value);
+    }
+
+    /**
+     * Whether a value is nothing but dots.
+     *
+     * `.` and `..` are directory entries rather than names, and a repository segment spelled `..`
+     * reads as a traversal to anything that later joins it to a path. The service refuses them,
+     * and a value refused there is one that should never have left here.
+     *
+     * @param  string  $value  The segment to judge.
+     */
+    private static function isAllDots(string $value): bool
+    {
+        return preg_match('/^\.+$/D', $value) === 1;
     }
 
     /**
@@ -297,8 +327,19 @@ final class Checkout
         // agreed to -- the failure `Support\MachineIdentity` exists to prevent.
         $reduced = preg_replace('/[^a-z0-9._-]/', '', strtolower($value)) ?? '';
 
+        // A leading hyphen is dropped rather than refused, which is the same normalizing this
+        // already does to a space: `-wip` is plainly meant to be `wip`, and the operator who named
+        // the directory still recognizes it. A repository segment is rejected instead, because its
+        // name is GitHub's and a normalized one names a different repository.
+        $reduced = ltrim($reduced, '-');
+
         $reduced = substr($reduced, 0, $limit);
 
-        return $reduced === '' ? null : $reduced;
+        // Nothing but dots normalizes to nothing anybody meant, so it proposes nothing.
+        if ($reduced === '' || self::isAllDots($reduced) || preg_match(self::LOCATION, $reduced) !== 1) {
+            return null;
+        }
+
+        return $reduced;
     }
 }
