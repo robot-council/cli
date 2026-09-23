@@ -571,6 +571,33 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
     }
 
     /**
+     * The refusal to raise when a process could not be started, naming the reason where there is one.
+     *
+     * **Public and static because the branch cannot be driven from a test.** Reaching it needs the
+     * operating system to refuse to start `powershell.exe`, and the interpreter path is a literal
+     * constant with no lever on it. What a test can do is pin what each answer reads like, which is
+     * the half that would otherwise go wrong unnoticed.
+     *
+     * **That `error_get_last()` survives the suppression was measured, not assumed.** Against
+     * `@proc_open(..., ['suppress_errors' => true])` on Windows 11 on 2026-09-23: a path that does
+     * not exist gives `proc_open(): CreateProcess failed: The system cannot find the file specified`,
+     * and a directory in place of a file gives `Access is denied`, against a control where a real
+     * executable starts. Those two point in completely different directions, which is the whole
+     * reason `robot-council/cli#91` wanted the reason rather than the fact.
+     *
+     * @param  string|null  $reason  What `error_get_last()` held, if anything.
+     * @return string The message for `CredentialStoreFailed`.
+     */
+    public static function unreachableBecause(?string $reason): string
+    {
+        if ($reason === null || trim($reason) === '') {
+            return 'Windows Credential Manager could not be reached, and the reason was not recorded.';
+        }
+
+        return sprintf('Windows Credential Manager could not be reached: %s', trim($reason));
+    }
+
+    /**
      * The services a helper's answer named, given the list it was asked about.
      *
      * **Public and static so a test can drive it with output no helper would produce.** The
@@ -671,6 +698,11 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
     {
         $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
 
+        // **Cleared first, so what is read back afterwards belongs to this call.** `error_get_last()`
+        // is process-wide and survives from wherever it was last set, so without this a failure here
+        // could be reported with a message some earlier, unrelated warning left behind.
+        error_clear_last();
+
         $handle = @proc_open(
             $this->arguments(),
             $descriptors,
@@ -685,7 +717,17 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
         );
 
         if (! \is_resource($handle)) {
-            throw new CredentialStoreFailed('Windows Credential Manager could not be reached.');
+            // **The `@` and `suppress_errors` are deliberate, and between them they used to throw
+            // the answer away.** A failure here is reported as a refusal rather than as a PHP
+            // warning, which is right -- but every instance then said only that the process could
+            // not start, never why. `robot-council/cli#91` is two of those, one on a GitHub runner
+            // and one on a developer machine, both agreeing on the mechanism and neither able to
+            // name it: a missing executable, an exhausted handle table and a denied access all
+            // read identically, and they point in completely different directions.
+            //
+            // The warning the `@` suppressed is still in `error_get_last()`, so the reason costs a
+            // read rather than a re-run.
+            throw new CredentialStoreFailed(self::unreachableBecause(error_get_last()['message'] ?? null));
         }
 
         // **Written before stdin closes, and the close is what ends the child's read.** The

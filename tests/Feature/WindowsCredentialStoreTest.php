@@ -167,14 +167,29 @@ it('is available on a machine that has the interpreter', function (): void {
             'ROBOT_COUNCIL_TARGET' => WindowsCredentialTarget::probe(),
             'ROBOT_COUNCIL_USERNAME' => '',
         ]);
-        $probe->run();
 
-        $why = sprintf(
-            ' A probe run here exited %s (%d means no such credential, which is what `available()` demands). Its stderr began: %s',
-            var_export($probe->getExitCode(), true),
-            intConstantOf('NOT_FOUND'),
-            firstLineOf($probe->getErrorOutput()),
-        );
+        // **Guarded, because the most likely reason to be here is the one that makes this throw.**
+        // `available()` answers false when `probe()` could not run, and `robot-council/cli#91`
+        // established that the way this machine fails is `proc_open()` refusing to start a process
+        // at all -- twice, once on a runner and once locally. Symfony raises rather than returning
+        // an exit code for that, so an unguarded `run()` would replace this message with an
+        // uncaught exception at exactly the instance the message was written for.
+        try {
+            $probe->run();
+
+            $why = sprintf(
+                ' A probe run here exited %s (%d means no such credential, which is what `available()` demands). Its stderr began: %s',
+                var_export($probe->getExitCode(), true),
+                intConstantOf('NOT_FOUND'),
+                firstLineOf($probe->getErrorOutput()),
+            );
+        } catch (Throwable $throwable) {
+            $why = sprintf(
+                ' A probe run here could not start at all: %s: %s',
+                $throwable::class,
+                firstLineOf($throwable->getMessage()),
+            );
+        }
     }
 
     expect($available)->toBeTrue('Credential Manager should be reachable where the interpreter is.'.$why);
@@ -334,27 +349,34 @@ it('writes nothing to the temporary directory when it reads a credential', funct
     $child->run();
 
     try {
+        // **The exit code is checked FIRST, and the order is the finding rather than a tidy-up.**
+        // `robot-council/cli#91` reproduced locally on 2026-09-23, and the instance reported
+        // `Failed asserting that two strings are identical` -- the assertion below, not this one.
+        // PHP CLI writes an uncaught exception to **stdout** under `display_errors`, so a child
+        // that died appended its fatal to the very string the control compares. The cause survived
+        // only because it landed in that comparison; a fatal that went to stderr instead would have
+        // produced the same mismatch with none of the explanation.
+        //
+        // A dead child's stdout is not worth comparing. This assertion carries the stderr, so it
+        // goes first and the control below runs only on a child that lived.
+        //
+        // `robot-council/cli#76` is why the message exists at all: the child calls `get()` without
+        // a `try`, and since `robot-council/cli#39` that method throws when the mechanism fails, so
+        // 255 is PHP's exit code for an uncaught exception. The first line carries the cause, and
+        // it cannot hold a credential -- the value travels on stdout, and `get()`'s argument is the
+        // service key.
+        expect($child->getExitCode())->toBe(0, sprintf(
+            'the child exited %s. Its stderr began: %s',
+            var_export($child->getExitCode(), true),
+            firstLineOf($child->getErrorOutput()),
+        ));
+
         // Control: the child really did see the decoy as its temporary directory. Without it, an
         // empty decoy is indistinguishable from a redirect that never took. Separators normalized,
         // because `sys_get_temp_dir()` returns backslashes and the path was built with a slash.
         $normalize = static fn (string $path): string => str_replace('\\', '/', $path);
 
         expect($normalize(trim($child->getOutput())))->toBe($normalize($decoy));
-
-        // **The exit code alone does not say why, and this test has failed twice on CI saying only
-        // `255`.** `robot-council/cli#76`. The child calls `get()` without a `try`, and since
-        // `robot-council/cli#39` that method *throws* when the mechanism fails -- so 255 is PHP's
-        // exit code for an uncaught exception, and the message naming the fault went to the
-        // child's stderr, which this assertion used to discard.
-        //
-        // The first line is what carries the cause: PHP puts `Uncaught <class>: <message>` there,
-        // and the frames that follow add nothing an instance needs. It cannot hold a credential --
-        // the value travels on stdout, and `get()`'s argument is the service key.
-        expect($child->getExitCode())->toBe(0, sprintf(
-            'the child exited %s. Its stderr began: %s',
-            var_export($child->getExitCode(), true),
-            firstLineOf($child->getErrorOutput()),
-        ));
 
         // **This assertion discriminates, and a near-identical one elsewhere did not.** A reading
         // credential store that used `Symfony\…\Process` here would leave `sf_proc_NN.out` and
@@ -617,4 +639,54 @@ it('keeps the script within the environment budget it is allowed', function (): 
     $script = end($arguments);
 
     expect(\strlen($script))->toBeLessThan(WindowsCredentialStore::ENVIRONMENT_BUDGET);
+});
+
+it('names why a process could not start, and says so when it cannot', function (string $label, ?string $reason, string $expected): void {
+    // **The branch this covers cannot be reached from a test**, because reaching it needs the
+    // operating system to refuse to start `powershell.exe` and the interpreter path is a literal
+    // constant. What is pinned here is what each answer reads like.
+    //
+    // `robot-council/cli#91` is two instances of the refusal that carried no reason at all -- one
+    // on a GitHub runner, one on a developer machine -- and the two Windows messages it will now
+    // carry point in opposite directions: a missing file is a broken installation, a denied access
+    // is a policy or a handle problem.
+    expect(WindowsCredentialStore::unreachableBecause($reason))->toBe($expected, $label);
+})->with([
+    [
+        'a missing interpreter',
+        'proc_open(): CreateProcess failed: The system cannot find the file specified',
+        'Windows Credential Manager could not be reached: proc_open(): CreateProcess failed: The system cannot find the file specified',
+    ],
+    [
+        'a denied access',
+        'proc_open(): CreateProcess failed: Access is denied',
+        'Windows Credential Manager could not be reached: proc_open(): CreateProcess failed: Access is denied',
+    ],
+    [
+        'nothing recorded',
+        null,
+        'Windows Credential Manager could not be reached, and the reason was not recorded.',
+    ],
+    [
+        'an empty string, which is not a reason',
+        '',
+        'Windows Credential Manager could not be reached, and the reason was not recorded.',
+    ],
+    [
+        'whitespace, which is not a reason either',
+        "  \n ",
+        'Windows Credential Manager could not be reached, and the reason was not recorded.',
+    ],
+]);
+
+it('says nothing about the credential when it cannot reach the store', function (): void {
+    // The refusal is built from an operating-system message and a fixed prefix, and neither can
+    // carry a credential -- but this store has leaked one through an exception before
+    // (`robot-council/cli#35`), so the property is asserted rather than assumed.
+    $reason = WindowsCredentialStore::unreachableBecause('proc_open(): CreateProcess failed: Access is denied');
+
+    expect($reason)->not->toContain(WINDOWS_TOKEN)
+        // The control: the assertion above would pass against any string at all, so this shows the
+        // token is the sort of thing it could have found.
+        ->and('a message holding '.WINDOWS_TOKEN)->toContain(WINDOWS_TOKEN);
 });
