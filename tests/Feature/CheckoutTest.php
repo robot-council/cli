@@ -31,6 +31,13 @@ function scratchDirectory(): string
 
 /**
  * Remove a directory tree, so a run leaves nothing behind.
+ *
+ * **The `chmod` is load-bearing, and its absence is invisible.** Git writes loose objects
+ * read-only -- mode 444 -- so `unlink()` refuses them on Windows and the tree survives. Every run
+ * then leaves a repository in the temporary directory, and nothing reports it because the removal
+ * is suppressed and the test has already passed. Measured: 36 of them accumulated before this was
+ * noticed, each holding a `.git/objects` entry with no write bit. On Windows `chmod` toggles the
+ * read-only attribute, which is exactly the bit in the way.
  */
 function removeDirectory(string $path): void
 {
@@ -45,7 +52,14 @@ function removeDirectory(string $path): void
 
         $full = $path.'/'.$entry;
 
-        is_dir($full) && ! is_link($full) ? removeDirectory($full) : @unlink($full);
+        if (is_dir($full) && ! is_link($full)) {
+            removeDirectory($full);
+
+            continue;
+        }
+
+        @chmod($full, 0666);
+        @unlink($full);
     }
 
     @rmdir($path);
