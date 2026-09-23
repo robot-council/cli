@@ -197,13 +197,28 @@ UAMS-Web/wordpress-importer/ci
 
 Leave the last segment off for a checkout that is not a worktree.
 
-#### Why it is written out rather than derived
+#### The label is now two fields, and both are read from the checkout
 
-A folder name is the obvious source and the wrong one, for three reasons, all of them measurable:
+The fleet stores **a repository and a work location** as separate fields rather than one label a reader has to parse, and the bridge proposes both from the checkout it is already running in. In an ordinary checkout you need neither flag:
 
-- **It loses the organization.** `uams-statamic` alone is not a repository; two organizations can both have one.
-- **It is whatever that machine called the directory.** A worktree at `uams-statamic-a` on one machine and `statamic-a` on another reports two projects for one thing, which defeats the comparison the label exists for.
-- **A path does not fit.** `ProjectId` accepts `[A-Za-z0-9._/-]` — forward slash is in it, **backslash is not** — so `C:\Users\Josh\Herd\uams-statamic-a` is refused by the service outright. A configuration that interpolates `${workspaceFolder}` fails at the far end, mid-wire-up, rather than where it was written.
+| field | read from | example |
+| --- | --- | --- |
+| repository | the `origin` remote, reduced to `owner/name` | `UAMS-Web/uams-statamic` |
+| work location | the git worktree's own name, or `primary` for the main checkout | `a`, `ci`, `primary` |
+
+Override either with `--repository` or `--work-location`, independently — naming one does not stop the other being read. A written value is judged by exactly the rules a read one is, so writing it out is not a way to send something the fleet will refuse.
+
+**A read value is a proposal, not a fact.** Neither field decides anything: they stay client-supplied, exactly as `--project` always has, and neither reaches an authorization decision. What changes is that they are right by default rather than right by diligence — a label typed once per worktree and never revisited is the kind that is wrong for months, because nothing ever contradicts it.
+
+**`--project` still works and is still sent.** The fleet splits it into the same two fields when a client names *neither*, so nothing needs changing to keep working.
+
+#### Why it was written out, and what reading it answers
+
+A folder name is the obvious source and the wrong one, for three reasons, all of them measurable. Reading the **remote** rather than the folder answers two of them, and the third is why a read value can still be overridden:
+
+- **A folder name loses the organization.** `uams-statamic` alone is not a repository; two organizations can both have one. *Answered:* `origin` carries `owner/name`.
+- **A path does not fit.** `ProjectId` accepts `[A-Za-z0-9._/-]` — forward slash is in it, **backslash is not** — so `C:\Users\Josh\Herd\uams-statamic-a` is refused by the service outright. A configuration that interpolates `${workspaceFolder}` fails at the far end, mid-wire-up, rather than where it was written. *Answered:* nothing derived is ever a path.
+- **A worktree is whatever that machine called the directory.** A worktree at `uams-statamic-a` on one machine and `statamic-a` on another reports two places for one thing, which defeats the comparison the label exists for. **Not answered, and not answerable by any derivation** — which is why the work location is a proposal and `--work-location` exists. If the fleet wants short, comparable labels, that is a naming convention to agree once and apply everywhere.
 
 One more for anyone tempted to derive it with a script: worktrees are often **siblings** of the primary checkout, so `…\uams-statamic` is a string prefix of `…\uams-statamic-a`. A prefix comparison matches the wrong one; anchor on the separator.
 

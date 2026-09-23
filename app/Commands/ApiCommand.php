@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Commands;
 
+use App\Support\Checkout;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
 use App\Support\Credentials\InstallationChoice;
@@ -33,6 +34,8 @@ use Throwable;
     {--service= : The service base URL, defaulting to ROBOT_COUNCIL_SERVICE}
     {--body= : A JSON body, for methods that take one}
     {--project= : The repository or workspace this call belongs to}
+    {--repository= : The GitHub repository this call belongs to, as owner/name; read from the checkout when omitted}
+    {--work-location= : Which working copy of that repository this is; read from the checkout when omitted}
     {--harness= : Which enrolled harness this process is, when detection cannot tell}')]
 final class ApiCommand extends Command
 {
@@ -75,7 +78,12 @@ final class ApiCommand extends Command
         $session = new Session($http, $service, $installation);
 
         try {
-            $session->start($this->stringOption('project'));
+            [$repository, $workLocation] = Checkout::resolve(
+                $this->stringOption('repository'),
+                $this->stringOption('work-location'),
+            );
+
+            $session->start($this->stringOption('project'), $repository, $workLocation);
         } catch (Throwable $throwable) {
             $this->components->error($this->readable($throwable, 'Could not start a session.'));
 
