@@ -40,7 +40,29 @@ final class Advapi32
     public function __construct(private readonly FFI $ffi) {}
 
     /**
-     * Bind the library.
+     * Bind the library, once per header for the life of the process.
+     *
+     * **A binding per instance was the cause of `robot-council/cli#118`, and the mechanism is a
+     * lifetime one.** `FFI::cdef()` builds a fresh `FFI` object carrying its own copy of every type
+     * the header declares, so two stores held two unrelated `ROBOT_CREDENTIALW` types. A `CData`
+     * allocated through one of them and still reachable when that binding was collected outlived
+     * the type it belongs to, and the next access reported whatever the wreckage looked like:
+     * `Attempt to assign read-only field 'Type'`, `Object of class FFI\CData could not be converted
+     * to int`, a credential size that is not a number, a non-zero size with an unusable blob
+     * pointer. Seven symptoms, one cause.
+     *
+     * Sharing the binding removes the hazard rather than narrowing it: there is one type per header
+     * per process, so nothing a struct belongs to can be collected while the struct is alive.
+     *
+     * **Bisected rather than guessed.** Four tests reproduce it deterministically, and removing any
+     * one of the three that precede the write makes it pass -- including one that compares two class
+     * constants and touches no FFI at all, whose only contribution is one more store built and torn
+     * down. That is what a lifetime fault looks like from the outside, and it is why loops of 300
+     * and 800 uniform rounds never reproduced it.
+     *
+     * **`Kernel32` is deliberately not changed.** Its header declares two functions and no struct,
+     * and both return an `int`, so no `CData` is ever allocated through it and there is nothing to
+     * outlive a type.
      *
      * **Loaded by bare name on purpose.** `advapi32.dll` is listed in
      * `HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`, so Windows resolves it
@@ -55,7 +77,14 @@ final class Advapi32
      */
     public static function bind(string $header): self
     {
-        return new self(self::translate(static fn (): FFI => FFI::cdef($header, 'advapi32.dll')));
+        // One `FFI` per header, keyed by it, so a second header would bind separately rather than
+        // silently receiving the first one's types.
+        /** @var array<string, FFI> $bound */
+        static $bound = [];
+
+        $bound[$header] ??= self::translate(static fn (): FFI => FFI::cdef($header, 'advapi32.dll'));
+
+        return new self($bound[$header]);
     }
 
     /**
