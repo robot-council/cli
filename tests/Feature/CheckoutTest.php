@@ -135,6 +135,10 @@ it('reads the work location from the absolute git directory', function (string $
     // A repository that merely lives under a directory called `worktrees` is not a worktree: what
     // decides it is the segment before the LAST one, which here is the repository's own directory.
     'a repository stored under a directory named worktrees' => ['/x/worktrees/foo/.git', Checkout::PRIMARY],
+    // The service matches a work location against `/^[a-z0-9._-]+$/D`, so a capital in a directory
+    // name would be refused with a 422 rather than stored.
+    'an upper-case directory name becomes the lower-case label the service accepts' => ['/repo/.git/worktrees/Feature-A', 'feature-a'],
+    'a space is dropped rather than refused' => ['/repo/.git/worktrees/my tree', 'mytree'],
     'empty' => ['', null],
 ]);
 
@@ -252,6 +256,49 @@ it('says nothing when the directory does not exist', function (): void {
     expect($missing)->not->toBeDirectory()
         ->and(Checkout::repository($missing))->toBeNull()
         ->and(Checkout::workLocation($missing))->toBeNull();
+});
+
+it('agrees with the bounds core actually enforces', function (): void {
+    // Written out rather than imported, because `core` is a separate package this one does not
+    // depend on. Read from its `Support\WorkIdentity` at `session-work-location`. If these drift,
+    // a session start fails with a 422 that names no field, on the developer's machine.
+    expect(Checkout::MAX_REPOSITORY)->toBe(140)
+        ->and(Checkout::MAX_LOCATION)->toBe(32);
+});
+
+it('proposes only values the service will accept', function (): void {
+    // Stronger than pinning the two numbers: these are the service's own patterns, and what is
+    // asserted is that anything this class proposes satisfies them. A derived value the service
+    // refuses is a defect here, since the developer never chose the charset.
+    $repositoryPattern = '/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/D';
+    $locationPattern = '/^[a-z0-9._-]+$/D';
+
+    $repositories = [
+        'git@github.com:UAMS-Web/uams-statamic.git',
+        'https://github.com/UAMS-Web/uams-statamic',
+        'https://www.github.com/Owner/Name.Dot_Under-Dash',
+    ];
+
+    foreach ($repositories as $remote) {
+        $repository = Checkout::repositoryFromRemote($remote);
+
+        expect($repository)->toMatch($repositoryPattern)
+            ->and(mb_strlen((string) $repository))->toBeLessThanOrEqual(Checkout::MAX_REPOSITORY);
+    }
+
+    $gitDirs = [
+        '/repo/.git',
+        '/repo/.git/worktrees/uams-statamic-a',
+        '/repo/.git/worktrees/Feature-A',
+        '/repo/.git/worktrees/'.str_repeat('a', Checkout::MAX_LOCATION + 20),
+    ];
+
+    foreach ($gitDirs as $gitDir) {
+        $location = Checkout::locationFromGitDir($gitDir);
+
+        expect($location)->toMatch($locationPattern)
+            ->and(mb_strlen((string) $location))->toBeLessThanOrEqual(Checkout::MAX_LOCATION);
+    }
 });
 
 it('bounds every git invocation', function (): void {

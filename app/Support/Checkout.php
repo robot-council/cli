@@ -47,13 +47,21 @@ final class Checkout
 
     /**
      * The longest repository this will propose, counting `owner/name` whole.
+     *
+     * **`robot-council/core` is the authority, and this mirrors it deliberately.** Its
+     * `Support\WorkIdentity` stores a repository in 140 characters, which is GitHub's own bound:
+     * an owner is at most 39 and a repository name at most 100, plus the separator. A value this
+     * command line sends that the service then refuses is a bug here, not there.
      */
-    public const int MAX_REPOSITORY = 128;
+    public const int MAX_REPOSITORY = 140;
 
     /**
      * The longest work location this will propose.
+     *
+     * Also `robot-council/core`'s number, and much shorter than a repository: a location is a
+     * label for one checkout, not a path.
      */
-    public const int MAX_LOCATION = 64;
+    public const int MAX_LOCATION = 32;
 
     /**
      * The only host whose remotes name a repository this fleet can talk about.
@@ -279,7 +287,15 @@ final class Checkout
      */
     private static function reduce(string $value, int $limit): ?string
     {
-        $reduced = preg_replace('/[^A-Za-z0-9._-]/', '', $value) ?? '';
+        // **Lower-cased, unlike a repository, because the service's charsets differ.**
+        // `robot-council/core`'s `Support\WorkIdentity` matches a work location against
+        // `/^[a-z0-9._-]+$/D` and a repository against `/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/D`.
+        // The difference is deliberate there: a repository name is GitHub's and keeps its case,
+        // while a location is a label this fleet compares across machines, and two spellings would
+        // read as two places. A worktree directory named `Feature-A` would otherwise derive a value
+        // the service refuses with a 422, which is the developer discovering a charset they never
+        // agreed to -- the failure `Support\MachineIdentity` exists to prevent.
+        $reduced = preg_replace('/[^a-z0-9._-]/', '', strtolower($value)) ?? '';
 
         $reduced = substr($reduced, 0, $limit);
 
