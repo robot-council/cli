@@ -50,6 +50,29 @@ final class FleetFollower
     private const array ALWAYS = ['directive'];
 
     /**
+     * The ability that also makes the fleet's own activity concern a session.
+     *
+     * Named here rather than imported, because this repository has no ability enum: the service
+     * owns that list, and a copy of it here would be a second place to keep right.
+     */
+    private const string COORDINATOR = 'coordinator:direct';
+
+    /**
+     * What a coordinating session hears about beyond its own work.
+     *
+     * **Narration is deliberately absent.** It is the one type `robot-council/core` restricts, and
+     * widening it here would put another developer's session's words into an agent with shell
+     * access on the strength of a client-side check. The types below are state changes the service
+     * already serves to every session; this only stops discarding them.
+     */
+    private const array COORDINATOR_HEARS = [
+        'session.stale', 'session.gone', 'session.resumed',
+        'task.created', 'task.claimed', 'task.started', 'task.blocked',
+        'task.completed', 'task.failed', 'task.released', 'task.reassigned', 'task.cancelled',
+        'lock.acquired', 'lock.released', 'lock.taken_over', 'lock.force_released',
+    ];
+
+    /**
      * Where the feed has been read to.
      */
     private ?int $cursor;
@@ -253,8 +276,25 @@ final class FleetFollower
         }
 
         // This session's own presence, decided by the sweep rather than by it.
-        return \in_array($type, ['session.stale', 'session.gone'], true)
-            && $this->sessionId($event) === $this->session->id();
+        if (\in_array($type, ['session.stale', 'session.gone'], true)
+            && $this->sessionId($event) === $this->session->id()) {
+            return true;
+        }
+
+        // **A coordinating session's work IS the other sessions**, so the branches above -- each
+        // scoped to a task it holds, a lease it took, or its own presence -- can never fire for it.
+        // Decided on `robot-council/cli#115`, which chose the ability this already grants rather
+        // than minting a second one, on the reasoning that the role which needs to watch is the
+        // role which needs to direct.
+        //
+        // **This settles WHAT arrives, and not WHEN.** `robot-council/cli#59` decided that delivery
+        // reaches an agent at a turn boundary, and a turn boundary is not a wake: a session idle
+        // between instructions has no turn ending, so from inside it a full sink and an empty one
+        // are indistinguishable. Measured on a live fleet: one agent took nine messages addressed
+        // to it across 26 hours and ran no turn from any of them. Nothing here changes that, and
+        // `robot-council/cli#62` is where it is owned.
+        return $this->session->allows(self::COORDINATOR)
+            && \in_array($type, self::COORDINATOR_HEARS, true);
     }
 
     /**

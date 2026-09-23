@@ -59,12 +59,22 @@ function feedEvent(string $type, ?int $actor = THEIRS, array $meta = [], string 
  * Run one tick of a follower over a feed page, and hand back what it left in the sink.
  *
  * @param  list<array<string, mixed>>  $events  The page the service answers with.
+ * @param  list<string>  $abilities  What the session's token carries, as the service reports it.
  * @return list<array<array-key, mixed>> What the follower decided concerns this session.
  */
-function followed(array $events): array
+function followed(array $events, array $abilities = []): array
 {
     Http::fake([
-        '*/api/sessions' => Http::response(['session_id' => MINE, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'feed_cursor' => 1], 201),
+        // **`abilities` is what the deployment actually returns**, and this fake omitted it until
+        // cli#116. Harmless while nothing read the field; not harmless once a gate depends on it,
+        // which is the drift a fake is most able to hide.
+        '*/api/sessions' => Http::response([
+            'session_id' => MINE,
+            'token' => 'rcouncil_2|T',
+            'expires_in' => 3600,
+            'feed_cursor' => 1,
+            'abilities' => $abilities,
+        ], 201),
         '*/api/events*' => Http::response(['events' => $events, 'cursor' => 99], 200),
     ]);
 
@@ -201,4 +211,89 @@ it('keeps reading after a failure, and backs off rather than retrying every pass
         ->and($said[0])->toContain('Could not read the fleet feed');
 
     Http::assertSentCount(2);
+});
+
+it("leaves the fleet's own activity alone for an ordinary session", function (): void {
+    // The control for every coordinator test below, and the guarantee that this change is inert
+    // for the sessions that did not ask for it. Identical input, one ability apart.
+    expect(followed([
+        feedEvent('session.gone'),
+        feedEvent('task.created'),
+        feedEvent('lock.acquired'),
+    ]))->toBeEmpty();
+});
+
+it("hands the fleet's activity to a session holding coordinator:direct", function (): void {
+    // A coordinating session holds no task and no lease, so every other branch of `concerns()` is
+    // unreachable for it. Decided on #115.
+    $kept = followed([
+        feedEvent('session.gone'),
+        feedEvent('task.created'),
+        feedEvent('lock.acquired'),
+    ], ['coordinator:direct']);
+
+    expect($kept)->toHaveCount(3)
+        ->and(array_column($kept, 'type'))->toBe(['session.gone', 'task.created', 'lock.acquired']);
+});
+
+it('does not hand a coordinator its own events back', function (): void {
+    // The own-actor exclusion is the first thing `concerns()` checks and the coordinator branch is
+    // the last, so a branch that answered before it would be invisible to every other test here.
+    expect(followed([
+        feedEvent('task.created', actor: MINE),
+        feedEvent('session.gone', actor: MINE),
+    ], ['coordinator:direct']))->toBeEmpty();
+});
+
+it("does not hand a coordinator another developer's narration", function (): void {
+    // **Narration is the one type the service restricts**, and widening it here would put another
+    // developer's words into an agent with shell access on a client-side check alone.
+    expect(followed([
+        feedEvent('narration', body: 'thinking out loud'),
+    ], ['coordinator:direct']))->toBeEmpty();
+});
+
+it('still hands a coordinator a directive, which needed no ability to receive', function (): void {
+    // Receiving a directive never depended on holding anything, and must not start.
+    expect(followed([feedEvent('directive')], ['coordinator:direct']))->toHaveCount(1);
+});
+
+it('reads the ability from the service rather than assuming it', function (): void {
+    // An ability the service did not name is not held. An older deployment that omits the field
+    // therefore narrows what reaches an agent rather than widening it.
+    expect(followed([feedEvent('task.created')], ['tasks:create', 'tasks:claim']))->toBeEmpty();
+});
+
+it('matches an ability exactly, so a loose comparison cannot grant one nobody named', function (): void {
+    // **`in_array`'s strict flag is load-bearing.** PHP compares two numeric strings by value when
+    // it is dropped, so `'0'` would match `'0.0'` and a session would hold an ability the service
+    // never named. Abilities gate what reaches an agent, so the match has to be the string.
+    Http::fake([
+        '*/api/sessions' => Http::response([
+            'session_id' => MINE, 'token' => 'rcouncil_2|T', 'expires_in' => 3600,
+            'feed_cursor' => 1, 'abilities' => ['0'],
+        ], 201),
+    ]);
+
+    $session = new Session(app(Factory::class), FOLLOW_SERVICE, new Credential(FOLLOW_INSTALLATION));
+    $session->start();
+
+    expect($session->allows('0'))->toBeTrue()
+        // Loosely equal to `'0'`, and not an ability anybody granted.
+        ->and($session->allows('0.0'))->toBeFalse();
+});
+
+it('holds nothing when the service names no abilities, rather than holding everything', function (): void {
+    // An older deployment that omits the field narrows what reaches an agent rather than widening
+    // it, which is the safe direction for a value that decides what interrupts somebody.
+    Http::fake([
+        '*/api/sessions' => Http::response([
+            'session_id' => MINE, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'feed_cursor' => 1,
+        ], 201),
+    ]);
+
+    $session = new Session(app(Factory::class), FOLLOW_SERVICE, new Credential(FOLLOW_INSTALLATION));
+    $session->start();
+
+    expect($session->allows('coordinator:direct'))->toBeFalse();
 });

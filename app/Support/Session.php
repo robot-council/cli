@@ -61,6 +61,22 @@ final class Session
     private ?int $expiresAt = null;
 
     /**
+     * What this session's token is allowed to do.
+     *
+     * **Re-read on every renewal rather than captured once**, because an admin may narrow a
+     * token between them -- `SessionStartController` says so where it sends this: "What the
+     * token actually carries, not what the installation looked like when the request arrived."
+     * A revocation therefore takes effect at the next renewal rather than at the next process.
+     *
+     * Empty when the service named none, which is not the same as the service being asked and
+     * answering none: an older deployment that omits the field leaves this empty, and every
+     * caller reads that as not held, which is the safe direction.
+     *
+     * @var list<string>
+     */
+    private array $abilities = [];
+
+    /**
      * Start the session.
      *
      * @param  string|null  $projectId  The repository or workspace, when the caller names one.
@@ -96,6 +112,7 @@ final class Session
         $this->feedCursor = \is_int($body['feed_cursor'] ?? null) ? $body['feed_cursor'] : null;
 
         $this->expiresAt = \is_int($body['expires_in'] ?? null) ? time() + $body['expires_in'] : null;
+        $this->abilities = $this->abilitiesIn($body);
     }
 
     /**
@@ -175,6 +192,10 @@ final class Session
         $this->expiresAt = \is_int($body['expires_in'] ?? null)
             ? time() + $body['expires_in']
             : null;
+
+        // **Renewal is where a narrowed token takes effect.** The service returns what the NEW
+        // token carries, which an admin may have reduced since the last one was issued.
+        $this->abilities = $this->abilitiesIn($body);
     }
 
     /**
@@ -229,5 +250,53 @@ final class Session
     public function id(): ?int
     {
         return $this->id;
+    }
+
+    /**
+     * Whether this session's token carries one ability.
+     *
+     * **A session that has not started holds nothing**, rather than holding everything. The
+     * difference matters for a caller deciding what to show somebody: unknown reads as absent,
+     * which is the direction that cannot widen anything by accident.
+     *
+     * @param  string  $ability  The ability, as the service names it.
+     * @return bool Whether the token carries it.
+     */
+    public function allows(string $ability): bool
+    {
+        return \in_array($ability, $this->abilities, true);
+    }
+
+    /**
+     * The abilities named in a session or renewal response.
+     *
+     * **A service that does not send the field leaves this empty**, and every caller reads empty as
+     * "not held". An older deployment therefore narrows what a client does rather than widening it,
+     * which is the safe direction for a field that gates what reaches an agent.
+     *
+     * @param  array<mixed>  $body  The decoded response.
+     * @return list<string> The abilities, or none.
+     */
+    private function abilitiesIn(array $body): array
+    {
+        $abilities = $body['abilities'] ?? null;
+
+        if (! \is_array($abilities)) {
+            return [];
+        }
+
+        // `array_values` keeps the declared `list<string>` rather than whatever keys a service
+        // sent, and the filter drops anything that is not a string instead of casting it: a
+        // number cast to a string would be an ability nobody granted.
+        // `array_values` and `array_filter` are both load-bearing for the DECLARED type rather
+        // than for any caller: unwrapping either returns `array<mixed>` or a keyed array where the
+        // signature promises `list<string>`, and `composer analyse` refuses both -- measured, one
+        // error per unwrap. Killing them with a test would duplicate a check another gate already
+        // makes better, which is what the survivor criterion asks to be annotated instead.
+        //
+        // The marker carries no prose on its own line: v5.0.2 captures the rest of that line and
+        // compares it against mutator names, so a trailing explanation suppresses nothing.
+        // @pest-mutate-ignore: UnwrapArrayValues, UnwrapArrayFilter
+        return array_values(array_filter($abilities, \is_string(...)));
     }
 }
