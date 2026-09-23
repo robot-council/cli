@@ -25,6 +25,7 @@ declare(strict_types=1);
  * @command  vendor/bin/pest --compact tests/Feature/WindowsFfiCredentialStoreTest.php
  */
 
+use App\Support\Credentials\Advapi32;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
 use App\Support\Credentials\CredentialStoreFailed;
@@ -664,3 +665,43 @@ it('binds advapi32 and kernel32 by a name Windows resolves from KnownDLLs', func
         ->and($advapi)->not->toContain('C:\\Windows\\System32\\advapi32.dll')
         ->and($kernel)->not->toContain('C:\\Windows\\System32\\kernel32.dll');
 });
+
+it('keeps a struct writable after the binding that allocated it has gone', function (): void {
+    // **The regression test for `robot-council/cli#118`, and it asserts the invariant rather than
+    // the implementation.** A binding per instance gave every store its own copy of the types its
+    // header declares, so a `CData` allocated through one and still reachable when that binding was
+    // collected outlived the type it belongs to. The next access reported the wreckage: a read-only
+    // field, a `CData` that could not be converted to an int, a credential size that was not a
+    // number.
+    //
+    // It reproduced only as a flake -- seven symptoms across seven tests, about one suite run in
+    // eight -- until the order was pinned: a failing `--random-order-seed` fails every time, which
+    // is what made it bisectable to four tests.
+    // The same reader the rest of this file uses for a private constant: it narrows the type,
+    // where a cast would only assert one.
+    $header = ffiConstantOf('HEADER');
+
+    $first = Advapi32::bind($header);
+    $credential = $first->new('ROBOT_CREDENTIALW');
+
+    // The binding goes, the struct stays, and more bindings are made over the top -- which is what
+    // a suite does between one test allocating and another writing.
+    unset($first);
+    gc_collect_cycles();
+
+    for ($i = 0; $i < 5; $i++) {
+        Advapi32::bind($header);
+    }
+
+    gc_collect_cycles();
+
+    // **Reverting the fix turns this red, with `Attempt to assign field 'Type' of non C
+    // struct/union`** -- not the `read-only field` message the suite reports. The difference is
+    // worth keeping rather than smoothing over: this test frees the binding deliberately and
+    // collects, so the type is plainly gone and PHP says the value is no longer a struct at all.
+    // In a suite the collection is incidental and the wreckage is reported one stage earlier. Same
+    // hazard, different vantage, and both vanish with one binding per process.
+    $credential->Type = 1;
+
+    expect($credential->Type)->toBe(1);
+})->skip(! \extension_loaded('FFI') || PHP_OS_FAMILY !== 'Windows', 'Needs the FFI extension on Windows.');

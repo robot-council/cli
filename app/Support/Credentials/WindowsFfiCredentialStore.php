@@ -395,10 +395,16 @@ final class WindowsFfiCredentialStore implements CredentialStore
             // returns PHP `null` -- not a `CData` wrapping NULL -- for a pointer field whose value
             // is NULL; measured on 2026-09-22, with a control showing a populated field does come
             // back as `CData`. So this fires exactly when `advapi32` reports a blob size it did not
-            // supply a buffer for. It was then observed **once**, on a machine running two full
-            // test suites at the same time, where `CredReadW` returned success with a non-zero size
-            // and a null blob. Three thousand consecutive reads on a quiet machine produced no such
-            // read, and the covering test passes five times out of five.
+            // supply a buffer for.
+            //
+            // **It has fired, and the cause is known: it was `robot-council/cli#118`.** A binding
+            // per store instance meant a struct could outlive the type it belonged to, and this
+            // guard is one of the places the wreckage surfaced. The recorded explanation used to
+            // be concurrency, which was wrong -- it reproduced on a quiet machine, deterministically
+            // for a given test order, and the binding is now made once per process.
+            //
+            // The guard stays. It is cheap, and `advapi32` reporting a size it did not supply is
+            // exactly the shape that must not be read as a credential.
             //
             // Raising is the right answer for it either way: `robot-council/cli#39` settled that a
             // mechanism which failed must not be reported as "no credential", because the remedy an
@@ -497,13 +503,35 @@ final class WindowsFfiCredentialStore implements CredentialStore
         // to yield a usable pointer through a reference path that is easy to read as a mistake.
         // Casting the array to a pointer is C's own array decay, says what is meant, and was
         // measured round-tripping a credential with a control on the absent case.
-        $credential = $advapi->new('ROBOT_CREDENTIALW');
-        $credential->Type = self::GENERIC;
-        $credential->TargetName = $advapi->cast('unsigned short*', $targetBuffer);
-        $credential->CredentialBlobSize = $length;
-        $credential->CredentialBlob = $advapi->cast('unsigned char*', $blob);
-        $credential->Persist = self::PERSIST_LOCAL_MACHINE;
-        $credential->UserName = $advapi->cast('unsigned short*', $userBuffer);
+        // **Field writes do not go through `Advapi32::translate()`, and that is the gap this
+        // closes.** That method wraps *calls*; a property assignment on a `CData` reaches PHP's FFI
+        // directly, so anything it raises is a raw `Error`. `ApiCommand` and `McpCommand` catch
+        // `RuntimeException`, so such an error travels past both to Collision, which renders a
+        // stack trace -- and a trace is where this codebase has leaked a credential before
+        // (`robot-council/cli#35`). `robot-council/cli#118` was exactly that shape reaching a user:
+        // `Attempt to assign read-only field 'Type'`, uncaught.
+        //
+        // #118's cause is fixed, so this should now be unreachable. It is kept because "should be
+        // unreachable" is what was believed about the blob guard above, which then fired.
+        try {
+            $credential = $advapi->new('ROBOT_CREDENTIALW');
+            $credential->Type = self::GENERIC;
+            $credential->TargetName = $advapi->cast('unsigned short*', $targetBuffer);
+            $credential->CredentialBlobSize = $length;
+            $credential->CredentialBlob = $advapi->cast('unsigned char*', $blob);
+            $credential->Persist = self::PERSIST_LOCAL_MACHINE;
+            $credential->UserName = $advapi->cast('unsigned short*', $userBuffer);
+        } catch (CredentialStoreFailed $failed) {
+            // `new()` and `cast()` already translate; let theirs through unchanged rather than
+            // wrapping a message inside another.
+            throw $failed;
+        } catch (Throwable $throwable) {
+            throw new CredentialStoreFailed(
+                'Windows Credential Manager could not be reached through `advapi32.dll`.',
+                $throwable->getCode(),
+                $throwable,
+            );
+        }
 
         try {
             $kernel = $this->kernel();
