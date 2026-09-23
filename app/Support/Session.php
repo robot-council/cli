@@ -93,19 +93,34 @@ final class Session
     /**
      * Start the session.
      *
-     * @param  string|null  $projectId  The repository or workspace, when the caller names one.
+     * **The three travel together, and the service does not fill one in from another.** It splits
+     * a `project_id` into a repository and a work location only when the client names *neither*,
+     * so sending a repository and omitting a location leaves the location null rather than split
+     * out of the label. Whatever is known is therefore sent, and what is not known is omitted.
+     *
+     * `project_id` keeps being sent while the service still stores it. Retiring it is the epic's
+     * own final slice, not this one.
+     *
+     * @param  string|null  $projectId  The old single label, when the caller names one.
+     * @param  string|null  $repository  The GitHub repository, as `owner/name`.
+     * @param  string|null  $workLocation  Which working copy of it this is.
      *
      * @throws RuntimeException When the service refuses.
      */
-    public function start(?string $projectId = null): void
+    public function start(?string $projectId = null, ?string $repository = null, ?string $workLocation = null): void
     {
         $response = $this->http
             ->acceptJson()
             ->asJson()
             ->withToken($this->installation->reveal())
+            // **Filtered on null rather than on falsiness.** A bare `array_filter` also drops `'0'`,
+            // and `0` is a legal work location -- a worktree may be called that -- so a directory
+            // named `0` would have silently reported no location at all.
             ->post($this->service.'/robot-council/api/sessions', array_filter([
                 'project_id' => $projectId,
-            ]));
+                'repository' => $repository,
+                'work_location' => $workLocation,
+            ], static fn (?string $value): bool => $value !== null));
 
         if ($response->status() === 401) {
             throw new RuntimeException('This machine is not enrolled, or its credential was revoked. Run `robot-council enroll`.');

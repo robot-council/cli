@@ -91,6 +91,54 @@ final class Checkout
     private const string LOCATION = '/^[a-z0-9_.][a-z0-9._-]*$/D';
 
     /**
+     * Settle both fields, preferring what somebody wrote over what this can read.
+     *
+     * **One definition, because two would drift and the drift would be silent** -- the same reason
+     * `Support\MachineIdentity::resolveHarness()` exists. Every command that starts a session asks
+     * here, so a bridge and the `pending` beside it cannot disagree about where the work is.
+     *
+     * **Each field is settled independently.** Naming a repository does not suppress a derived work
+     * location, and the service does not fill either in from `project_id` once the client has named
+     * the other, so a pair that is half explicit must still be whole when it is sent.
+     *
+     * A value somebody wrote is judged by exactly the rules a derived one is. Writing one out is
+     * not a reason to send something the service will refuse.
+     *
+     * @param  string|null  $repository  What `--repository` carried, when it carried anything.
+     * @param  string|null  $workLocation  What `--work-location` carried.
+     * @param  string|null  $directory  Where to derive from; the current working directory by default.
+     * @return array{string|null, string|null} The repository and the work location, in that order.
+     */
+    public static function resolve(?string $repository, ?string $workLocation, ?string $directory = null): array
+    {
+        // Narrowed inline rather than through a helper, because a closure hides the narrowing from
+        // the analyzer -- the reason `EnrollCommand::stringValue()` gives for narrowing where the
+        // value is used.
+        return [
+            \is_string($repository) && trim($repository) !== ''
+                ? self::repositoryNamed($repository)
+                : self::repository($directory),
+            \is_string($workLocation) && trim($workLocation) !== ''
+                ? self::locationNamed($workLocation)
+                : self::workLocation($directory),
+        ];
+    }
+
+    /**
+     * Judge a work location somebody wrote out.
+     *
+     * Normalized rather than rejected, exactly as a derived one is: an operator who writes
+     * `Feature-A` means `feature-a`, and the service would refuse the first.
+     *
+     * @param  string  $value  The location as written.
+     * @return string|null The location, or null when nothing usable is left.
+     */
+    public static function locationNamed(string $value): ?string
+    {
+        return self::reduce($value, self::MAX_LOCATION);
+    }
+
+    /**
      * Which GitHub repository this checkout belongs to, or null when nothing can be said.
      *
      * @param  string|null  $directory  Where to ask from; the current working directory by default.
@@ -213,7 +261,21 @@ final class Checkout
             $path = substr($path, 0, -4);
         }
 
-        $segments = explode('/', $path);
+        return self::repositoryNamed($path);
+    }
+
+    /**
+     * Judge an `owner/name` somebody wrote out, rather than one read from a remote.
+     *
+     * The same rules either way, in one place, because a flag that is accepted here and refused by
+     * the service -- or the reverse -- is the drift this class exists to remove.
+     *
+     * @param  string  $value  The repository as written.
+     * @return string|null `owner/name`, or null when it is not one.
+     */
+    public static function repositoryNamed(string $value): ?string
+    {
+        $segments = explode('/', trim($value));
 
         // Exactly two, because `owner/name` is the whole shape. A longer path is some other GitHub
         // URL -- a tree, a pull request -- and a shorter one names no repository.

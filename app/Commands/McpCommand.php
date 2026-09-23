@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Commands;
 
 use App\Support\Bridge;
+use App\Support\Checkout;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
 use App\Support\Credentials\InstallationChoice;
@@ -36,6 +37,8 @@ use Throwable;
 #[Signature('mcp
     {--service= : The service base URL, defaulting to ROBOT_COUNCIL_SERVICE}
     {--project= : The repository or workspace this session belongs to}
+    {--repository= : The GitHub repository this session works in, as owner/name; read from the checkout when omitted}
+    {--work-location= : Which working copy of that repository this is; read from the checkout when omitted}
     {--harness= : Which enrolled harness this process is, when detection cannot tell}')]
 final class McpCommand extends Command
 {
@@ -69,8 +72,19 @@ final class McpCommand extends Command
 
         $session = new Session($http, $service, $installation);
 
+        // Read from the checkout this process is already running in, so 37 hand-maintained config
+        // entries stop needing to be maintained -- and stop drifting, which matters more. An
+        // explicit flag wins per field, and neither may keep the session from starting.
+        [$repository, $workLocation] = Checkout::resolve(
+            $this->stringOption('repository'),
+            $this->stringOption('work-location'),
+        );
+
+        $this->sayWhatWasRefused('repository', $this->stringOption('repository'), $repository);
+        $this->sayWhatWasRefused('work-location', $this->stringOption('work-location'), $workLocation);
+
         try {
-            $session->start($this->stringOption('project'));
+            $session->start($this->stringOption('project'), $repository, $workLocation);
         } catch (Throwable $throwable) {
             $this->diagnostic($throwable instanceof RuntimeException
                 ? $throwable->getMessage()
@@ -173,9 +187,32 @@ final class McpCommand extends Command
     }
 
     /**
+     * Say when a flag was given and could not be used.
+     *
+     * @param  string  $flag  The flag's name, without its dashes.
+     * @param  string|null  $given  What the operator wrote, when they wrote anything.
+     * @param  string|null  $resolved  What survived the fleet's rules.
+     */
+    private function sayWhatWasRefused(string $flag, ?string $given, ?string $resolved): void
+    {
+        if ($given === null || $resolved !== null) {
+            return;
+        }
+
+        // **Silence would be the worst outcome here.** Somebody wrote this value out, and dropping
+        // it without a word gives them a session that is missing it and no reason to look -- which
+        // is the label that stays wrong for months because nothing ever contradicts it.
+        $this->diagnostic(sprintf(
+            '--%s=%s is not a shape the fleet accepts, so it was left unset.',
+            $flag,
+            $given
+        ));
+    }
+
+    /**
      * Say something to the operator, never to the protocol stream.
      *
-     * @param  string  $message  What went wrong.
+     * @param  string  $message  What to say.
      */
     private function diagnostic(string $message): void
     {
