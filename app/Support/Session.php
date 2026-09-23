@@ -8,6 +8,7 @@ use App\Support\Credentials\Credential;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\PendingRequest;
 use RuntimeException;
+use Throwable;
 
 /**
  * One agent session against the coordination service, from start to end.
@@ -22,6 +23,19 @@ use RuntimeException;
  */
 final class Session
 {
+    /**
+     * How long the startup diagnostic waits, in seconds.
+     *
+     * **Short because nothing depends on the answer.** `fleetCanDirect()` decides whether to print
+     * one line before the bridge starts serving the protocol, and every failure is answered `null`
+     * -- so a slow service costs the harness a delayed startup for a sentence it may not even get.
+     * The client's own defaults are `connect_timeout` 10 and `timeout` 30 (measured in
+     * `illuminate/http` v13.32.0, `Client/PendingRequest.php` lines 269 and 272), which is a
+     * 30-second stall before the first MCP message on a service that accepts a connection and then
+     * hangs. This is the only call here that is purely advisory, so it is the only one bounded.
+     */
+    public const int DESCRIBE_TIMEOUT_SECONDS = 5;
+
     /**
      * @param  Factory  $http  The HTTP client.
      * @param  string  $service  The service's base URL, with no trailing slash.
@@ -147,7 +161,7 @@ final class Session
                 ->acceptJson()
                 ->withToken($this->installation->reveal())
                 ->delete($this->service.'/robot-council/api/sessions/'.$this->id);
-        } catch (\Throwable) {
+        } catch (Throwable) {
             // Deliberately swallowed. See above.
         }
 
@@ -217,7 +231,7 @@ final class Session
                 ->asJson()
                 ->withToken($this->token->reveal())
                 ->post($this->service.'/robot-council/api/agent/heartbeat');
-        } catch (\Throwable) {
+        } catch (Throwable) {
             // A missed heartbeat is recoverable -- the next one lands, and the sweep's threshold is
             // minutes rather than seconds. Failing the whole bridge over one would be worse.
         }
@@ -265,6 +279,62 @@ final class Session
     public function allows(string $ability): bool
     {
         return \in_array($ability, $this->abilities, true);
+    }
+
+    /**
+     * Whether anything on this fleet can post a directive, or null when the service did not say.
+     *
+     * **This is a FLEET question, and the session-level one is what makes it worth asking.** A
+     * bridge sitting on its sink is waiting for somebody else's directive: posting one needs
+     * `coordinator:direct`, enrollment can never request it, and a receive-only session holding
+     * none of it is the normal case. So a client that warned on its own abilities would warn on
+     * almost every session, which is how a warning stops being read (cli#113).
+     *
+     * **Asked through `GET agent/session` rather than read off the start response**, because that
+     * is where `robot-council/core#159` put the answer. Starting a session and describing one are
+     * different questions, and the describing endpoint is the one that reaches across the fleet.
+     * One request, once, at startup.
+     *
+     * **Null rather than false when the answer cannot be had.** An older service that does not send
+     * the field, a refused request, or a body that does not parse are all "unknown", and reporting
+     * unknown as "nothing will ever arrive" would be a false alarm about the one thing this exists
+     * to report truthfully. Only an explicit `false` is a finding.
+     *
+     * @return bool|null True when some installation can direct, false when none can, null when
+     *                   the service did not answer the question.
+     */
+    public function fleetCanDirect(): ?bool
+    {
+        // **Observationally equivalent to having no guard at all, and kept anyway.** Without it,
+        // `request()` throws `The session has not been started.`, the catch below turns that into
+        // the same `null`, and no request is sent either way. So the two mutators that reach that
+        // state -- `InstanceOfToTrue`, which skips the branch, and `RemoveEarlyReturn`, which falls
+        // through it -- cannot be killed by any input. Every OTHER mutant on these two lines is
+        // killed by this file's tests: `IfNegated`, `InstanceOfToFalse` and `RemoveNot` all make a
+        // started session answer `null`, and three tests assert it does not. The guard stays
+        // because reaching for an exception to express "not started" is worse to read than asking.
+        // @pest-mutate-ignore: InstanceOfToTrue, RemoveEarlyReturn
+        if (! $this->token instanceof Credential) {
+            return null;
+        }
+
+        try {
+            $response = $this->request()->timeout(self::DESCRIBE_TIMEOUT_SECONDS)->get($this->service.'/robot-council/api/agent/session');
+        } catch (Throwable) {
+            return null;
+        }
+
+        if (! $response->successful()) {
+            return null;
+        }
+
+        $body = $response->json();
+
+        if (! \is_array($body) || ! \is_bool($body['fleet_can_direct'] ?? null)) {
+            return null;
+        }
+
+        return $body['fleet_can_direct'];
     }
 
     /**
