@@ -253,6 +253,14 @@ final class Bridge
     private bool $sessionEnded = false;
 
     /**
+     * Why the fleet ended this session, in the words the sink record carries, once it has.
+     *
+     * Kept so every call read after the ending is answered with the same sentence the next turn
+     * will read, rather than with nothing (#226).
+     */
+    private ?string $endedSentence = null;
+
+    /**
      * Whether a signal has asked the loop to stop.
      */
     private bool $stopping = false;
@@ -360,17 +368,18 @@ final class Bridge
         // unreachable there. The constructor does allow the pair separately, and a test that builds
         // one that way gets no record rather than a failure.
         $pending = $this->follower?->pending();
+        $id = $this->session?->id();
+
+        $this->endedSentence = sprintf(
+            '%s. Whatever it was holding is being released, and the bridge that ran it has '
+            .'stopped. The enrollment on this machine is not the problem and needs no repair: '
+            .'a new session needs a new bridge.',
+            $id === null ? 'The fleet ended this session' : 'The fleet ended session '.$id
+        );
 
         if ($pending instanceof PendingEvents) {
-            $id = $this->session?->id();
-
             try {
-                $pending->leaveNotice(self::SESSION_ENDED, sprintf(
-                    '%s. Whatever it was holding is being released, and the bridge that ran it has '
-                    .'stopped. The enrollment on this machine is not the problem and needs no repair: '
-                    .'a new session needs a new bridge.',
-                    $id === null ? 'The fleet ended this session' : 'The fleet ended session '.$id
-                ));
+                $pending->leaveNotice(self::SESSION_ENDED, $this->endedSentence);
             } catch (Throwable $failure) {
                 $diagnostic($failure->getMessage());
             }
@@ -498,7 +507,9 @@ final class Bridge
             // **Nothing reaches a fleet that has ended this session either.** `run()` splits every
             // line already in the buffer before it looks at `stopping` again, so without this each
             // one costs a refused call and a refused renewal against a session whose tokens are
-            // already deleted. The harness receives no reply either way, which is #226.
+            // already deleted. Answered here instead, with the reason (#226).
+            $this->refuseAfterTheEnding($message, $out);
+
             return;
         }
 
@@ -512,11 +523,48 @@ final class Bridge
             // claims and locks are already released. Reported once and the loop ends, rather than
             // every subsequent call repeating it.
             $this->endBecauseTheSessionIsGone($gone, $diagnostic);
+
+            // The call that found out has no result from the fleet either, and is answered alike.
+            $this->refuseAfterTheEnding($message, $out);
         } catch (Throwable $throwable) {
             // To stderr, never to stdout: a harness parsing stdout would read a diagnostic as a
             // malformed protocol message rather than as an error
             $diagnostic($throwable->getMessage());
         }
+    }
+
+    /**
+     * Answer a request read after the fleet ended the session, with why.
+     *
+     * **Without a reply, the harness learns only that the connection closed.** A client built on
+     * `@modelcontextprotocol/sdk` rejects every outstanding request with a generic `Connection
+     * closed` once the process exits (1.25.1, `shared/protocol.js` `_onclose()`), so the agent saw
+     * its calls fail without the reason the sink record gives the next turn (#221, #226).
+     *
+     * `-32002`, the code the pre-join refusal uses, since both mean there is no session to serve
+     * the call, but never that refusal's words: this bridge did join, and `join` will not help. A
+     * notification carries no id and is answered by nothing, as everywhere else. A batch is not
+     * answered either -- MCP removed batching in 2025-06-18, and no harness this bridge serves
+     * sends one.
+     *
+     * @param  string  $message  One JSON-RPC message, as the harness wrote it.
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function refuseAfterTheEnding(string $message, $out): void
+    {
+        $decoded = json_decode($message, true);
+
+        if (! \is_array($decoded) || array_is_list($decoded) || ! \array_key_exists('id', $decoded)) {
+            return;
+        }
+
+        $id = $decoded['id'];
+
+        if (! \is_int($id) && ! \is_string($id)) {
+            return;
+        }
+
+        $this->error($out, $id, -32002, $this->endedSentence ?? 'The fleet ended this session.');
     }
 
     /**
