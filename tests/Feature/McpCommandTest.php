@@ -128,9 +128,19 @@ it('leaves no reader child behind', function (): void {
 
     Artisan::call('mcp', ['--service' => MCP_SERVICE]);
 
-    // The child holds the harness's stdin, so one that outlived the bridge would keep a pipe open
-    // that the harness is waiting to close.
-    expect(readersRunning())->toBe(0);
+    // **Settled rather than snapshotted.** Process teardown is not instantaneous, and this counts
+    // every reader on the machine, so a child from the test that ran just before -- the order is
+    // random -- can still be exiting. Measured: one run in two failed on an instant read. A short
+    // bound still fails outright on a genuine leak, which does not go away by waiting.
+    $running = readersRunning();
+
+    for ($attempt = 0; $attempt < 30 && $running > 0; $attempt++) {
+        usleep(100_000);
+
+        $running = readersRunning();
+    }
+
+    expect($running)->toBe(0);
 })->skip(
     fn (): bool => ! in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true),
     'Counting another process is implemented here for Windows and Linux only.'
