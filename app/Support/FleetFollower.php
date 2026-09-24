@@ -227,6 +227,21 @@ final class FleetFollower
     }
 
     /**
+     * What the sink holds now, as a fingerprint, or null when nothing is waiting.
+     *
+     * **Read, never written.** `peek()` takes a shared lock and leaves the sink as it was, so the
+     * bridge can ask whether its last notice was acted on without racing a stop hook's drain
+     * (cli#230). A fingerprint rather than the events, because the question is only whether the
+     * sink changed since then, and the events are the stop hook's to deliver.
+     */
+    public function waiting(): ?string
+    {
+        $events = $this->pending->peek();
+
+        return $events === [] ? null : hash('sha256', (string) json_encode($events));
+    }
+
+    /**
      * Read the feed if it is due, and leave anything that concerns this session.
      *
      * **Never throws and never writes to stdout.** A bridge whose follower failed must go on

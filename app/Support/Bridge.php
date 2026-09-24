@@ -55,6 +55,35 @@ final class Bridge
     public const int RENEW_RETRY_SECONDS = 30;
 
     /**
+     * How long a channel notice is given to be acted on before it is sent again.
+     *
+     * **A notice can be spent without the sink being drained, and that was measured, not guessed**
+     * (cli#211, Claude Code 2.1.236). A notice arriving while a turn runs is folded into that turn
+     * rather than delivered on the next, so one that lands in a stop-hook continuation reaches a
+     * turn end the hook's loop guard does not drain -- and the session goes idle with the events
+     * still waiting. PROBE-D waited four minutes there, until an operator prompt happened along.
+     *
+     * **The first wait; each one after doubles** (see `reannounceDelay()`). The bridge cannot see
+     * a turn begin or end -- a continuation that only runs Bash sends it nothing -- so a repeat can
+     * land inside the very turn that stranded the sink, and be folded in exactly as the notice
+     * was. Evenly spaced repeats would all be spent inside one long turn; doubling ones reach past
+     * it. The cost is that a turn longer than this is told more than once that events are waiting,
+     * which its own end would have delivered anyway.
+     */
+    public const int REANNOUNCE_SECONDS = 60;
+
+    /**
+     * How many times one unchanged sink is announced again before the bridge stops trying.
+     *
+     * **The bound is what makes this safe to ship** (cli#196). A session with channels on and no
+     * stop hook never drains, so without a limit it would be woken every interval for as long as
+     * the bridge runs, each wake a turn that finds nothing to do. With one, it is woken at most this
+     * many extra times per batch -- and with the doubling, the last repeat comes 31 minutes after
+     * the notice, so a continuation turn shorter than that still has one land after it ends.
+     */
+    public const int REANNOUNCE_LIMIT = 5;
+
+    /**
      * How much to read from stdin at a time.
      *
      * Larger than the 8,192-byte socket buffer measured on macOS, so an ordinary message usually
@@ -153,8 +182,9 @@ final class Bridge
      * @param  bool  $channel  Whether to act as a Claude Code channel (cli#62).
      * @param  (Closure(array{role: string|null, repository: string|null, work_location: string|null}): Joined)|null  $join
      *                                                                                                                       What the `join` tool does. It throws a `RuntimeException` carrying what to tell the agent when joining fails.
+     * @param  int  $reannounceSeconds  How long a notice is given to be acted on before it is first sent again.
      *
-     * Both intervals are parameters rather than only constants because otherwise nothing can show
+     * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
      * `stream_select`, so a test cannot advance the clock from outside it and would have to sit
      * through a real minute -- or, for the retry, half a real one. Passing 0 makes the next pass
@@ -176,6 +206,7 @@ final class Bridge
         private readonly int $renewRetrySeconds = self::RENEW_RETRY_SECONDS,
         private readonly bool $channel = false,
         private readonly ?Closure $join = null,
+        private readonly int $reannounceSeconds = self::REANNOUNCE_SECONDS,
     ) {}
 
     /**
@@ -242,6 +273,29 @@ final class Bridge
      * `notifications/initialized`, so a batch written then would otherwise never be announced.
      */
     private int $unannounced = 0;
+
+    /**
+     * The sink as the last notice left it, or null when nothing announced is still waiting.
+     *
+     * A fingerprint from `FleetFollower::waiting()`, compared on each due pass: the same value means
+     * nothing drained the sink since the notice, which is the case a re-announcement exists for.
+     */
+    private ?string $announcedSink = null;
+
+    /**
+     * How many events the notice being repeated covered, so a repeat says the same thing.
+     */
+    private int $announcedNew = 0;
+
+    /**
+     * How many times the current sink has been announced again.
+     */
+    private int $repeats = 0;
+
+    /**
+     * When the current sink may next be announced again, as a Unix timestamp.
+     */
+    private int $nextReannounce = 0;
 
     /**
      * What the fleet's own MCP server tells an agent, read once at the join.
@@ -1063,22 +1117,89 @@ final class Bridge
 
         $this->unannounced += $this->follower?->delivered() ?? 0;
 
-        if ($this->unannounced === 0 || ! $this->initialized) {
+        if (! $this->initialized) {
             return;
         }
 
+        if ($this->unannounced === 0) {
+            $this->reannounce($out);
+
+            return;
+        }
+
+        $this->notify($out, ['new' => (string) $this->unannounced]);
+
+        // A new batch starts a new count: what is waiting now is what this notice announced
+        $this->announcedSink = $this->follower?->waiting();
+        $this->announcedNew = $this->unannounced;
+        $this->repeats = 0;
+        $this->nextReannounce = time() + self::reannounceDelay($this->reannounceSeconds, 0);
+
+        $this->unannounced = 0;
+    }
+
+    /**
+     * Announce again a sink that nothing drained since its notice, within the bound (cli#230).
+     *
+     * **Only while the sink is exactly as the notice left it.** Empty means a stop hook delivered
+     * it, and anything else means it moved on some other way -- a new batch is announced in its own
+     * right, so there is nothing left here to repeat. Either way the repeating stops.
+     *
+     * **The same content as the notice it repeats**, because it is the same true statement, plus a
+     * `repeat` count in the meta so a harness can tell the two apart.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function reannounce($out): void
+    {
+        if ($this->announcedSink === null || time() < $this->nextReannounce) {
+            return;
+        }
+
+        if ($this->repeats >= self::REANNOUNCE_LIMIT || $this->follower?->waiting() !== $this->announcedSink) {
+            $this->announcedSink = null;
+
+            return;
+        }
+
+        $this->repeats++;
+
+        $this->notify($out, ['new' => (string) $this->announcedNew, 'repeat' => (string) $this->repeats]);
+
+        $this->nextReannounce = time() + self::reannounceDelay($this->reannounceSeconds, $this->repeats);
+    }
+
+    /**
+     * How long to wait before the next repeat, once this many have been sent.
+     *
+     * Doubling, for the reason `REANNOUNCE_SECONDS` gives. Its own function because the loop reads
+     * `time()` and a test cannot advance it, so this is the only place the schedule can be shown.
+     *
+     * @param  int  $base  The first wait, in seconds.
+     * @param  int  $repeats  How many repeats have already been sent.
+     * @return int The wait, in seconds.
+     */
+    public static function reannounceDelay(int $base, int $repeats): int
+    {
+        return $base << $repeats;
+    }
+
+    /**
+     * Write one channel notice.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     * @param  array<string, string>  $meta  Keys must be identifiers and values strings, per the channels reference.
+     */
+    private function notify($out, array $meta): void
+    {
         $this->write($out, $this->encode([
             'jsonrpc' => '2.0',
             'method' => 'notifications/claude/channel',
             'params' => [
                 'content' => 'New fleet events are waiting for this session.',
-
-                // Keys must be identifiers and values strings, per the channels reference
-                'meta' => ['new' => (string) $this->unannounced],
+                'meta' => $meta,
             ],
         ]));
-
-        $this->unannounced = 0;
     }
 
     /**
