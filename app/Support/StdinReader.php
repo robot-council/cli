@@ -202,6 +202,14 @@ final class StdinReader
             }
         }
 
+        // **Only when it is actually gone.** `proc_close()` waits for the process to exit, with no
+        // bound: if the kill above did not take, this blocks forever -- measured twice here, once
+        // for 600 seconds. A handle left unclosed costs nothing, because this process is stopping
+        // anyway, while a bridge that cannot finish stopping holds the harness open behind it.
+        if (proc_get_status($this->process)['running']) {
+            return;
+        }
+
         proc_close($this->process);
     }
 
