@@ -8,6 +8,8 @@ The `main` ruleset requires every change to arrive through a pull request, requi
 
 So bringing the branch current, trial-merging, running the gate, and recording the result are done by the ruleset and the checks panel, not by hand. **Do not merge around them**, and do not treat a `ci-passed` from an older head commit as covering the current one.
 
+**A job reported as `cancelled` rather than `failure` is not a failing test, and is worth ten seconds of reading before it is blamed on the diff.** Two causes produce it, and they mean opposite things. A newer push to the same branch supersedes the run, because the workflow sets `cancel-in-progress: true` — that one is cancelled early, often within a minute. The other is the job's own `timeout-minutes`, which kills a job that is still working; the log then ends on a `PASS` with no failure anywhere in it. This has happened twice in `robot-council/core`, and `robot-council/core#278` raised the affected job's budget for exactly that reason. Read the step durations before re-running: the two look identical in the checks panel.
+
 **Confirm the enforcement is real before relying on it.** `gh api 'repos/{owner}/{repo}/rulesets' --jq '.[] | "\(.name) \(.enforcement)"'` must show the ruleset as `active`. While it is not, nothing above is enforced, and confirming a successful `ci-passed` on the current head of a branch that is current with `main` is your job again.
 
 ## Why this is a standing order
