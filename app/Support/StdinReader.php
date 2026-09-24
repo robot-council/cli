@@ -68,14 +68,14 @@ final class StdinReader
      *
      * @param  resource  $in  The stdin to hand the child, normally `STDIN`.
      * @param  resource  $errors  Where the child's own output goes, normally `STDERR`.
-     * @param  string|null  $command  What to run instead of this application, which exists so that
-     *                                a test can stand something else in the child's place. Nothing
-     *                                in the application passes it.
+     * @param  list<string>|string|null  $command  What to run instead of this application, which
+     *                                             exists so that a test can stand something else in the child's
+     *                                             place. Nothing in the application passes it.
      *
      * @throws RuntimeException When the listener cannot be opened, the child cannot be started, or
      *                          it does not connect and name its token.
      */
-    public function __construct($in = null, $errors = null, ?string $command = null)
+    public function __construct($in = null, $errors = null, array|string|null $command = null)
     {
         $in ??= \STDIN;
         $errors ??= \STDERR;
@@ -102,11 +102,13 @@ final class StdinReader
             $pipes,
             null,
             [self::PORT => (string) $this->portOf($listener), self::TOKEN => $token] + $this->environment(),
-            // **Bypass the shell, because otherwise Windows wraps this in `cmd.exe`** and
-            // `proc_terminate()` then kills the wrapper while the real process keeps running --
-            // holding the harness's stdin, and making `proc_close()` block forever waiting for it.
-            // Measured twice here, for 600 and 400 seconds. Without the wrapper, `proc_terminate()`
-            // ends the child and `proc_close()` returns at once. Ignored off Windows.
+            // **No shell on either platform, and it took both to learn why.** A string command is
+            // wrapped in `cmd.exe` on Windows and in `/bin/sh -c` on POSIX, and `proc_terminate()`
+            // then kills the wrapper while the real process keeps running -- holding the harness's
+            // stdin. On Windows that also made `proc_close()` block forever waiting for it, measured
+            // twice at 600 and 400 seconds; on the ubuntu cell it left four readers behind in one
+            // run. Passing the command as an **array** makes PHP start the process directly, so
+            // there is no wrapper to kill instead. `bypass_shell` says the same thing for Windows.
             ['bypass_shell' => true]
         );
 
@@ -192,8 +194,10 @@ final class StdinReader
 
     /**
      * The command that re-invokes this application as the reader.
+     *
+     * @return list<string> The binary, the script, and the hidden command's name.
      */
-    private function command(): string
+    private function command(): array
     {
         // Inside a single-file build this is the executable itself; otherwise it is the script the
         // process was started from, which is Composer's `vendor/bin` proxy for an installed copy.
@@ -212,7 +216,8 @@ final class StdinReader
             }
         }
 
-        return sprintf('%s %s %s', escapeshellarg(\PHP_BINARY), escapeshellarg($script), McpReaderCommand::COMMAND);
+        // An array rather than a string, so no shell parses it and nothing needs escaping here.
+        return [\PHP_BINARY, $script, McpReaderCommand::COMMAND];
     }
 
     /**
