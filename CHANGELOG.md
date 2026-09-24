@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.6 — Installing Beside Other Global Tools (2026-09-24)
+
+The README now recommends installing into a directory of its own, and records why a global install fails beside `statamic/cli` before 3.6.4.
+
+### Maintenance and tooling
+- Recommend installing `robot-council/cli` into a directory of its own, and record why a global install fails beside older `statamic/cli` [#250](https://github.com/robot-council/cli/pull/250)
+
 ## v0.4.5 — Only Its Own Commands (2026-09-24)
 
 An installed `robot-council` now offers only its own six commands, rather than Laravel Zero's development commands beside them.
