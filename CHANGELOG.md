@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.7 — Failing on a Mistyped Command (2026-09-24)
+
+`robot-council` now fails, naming the command, when asked for one that does not exist, rather than printing the summary and exiting 0.
+
+### What's fixed
+- Fail on a command that does not exist, rather than printing the summary and exiting 0 [#251](https://github.com/robot-council/cli/pull/251)
+
 ## v0.4.6 — Installing Beside Other Global Tools (2026-09-24)
 
 The README now recommends installing into a directory of its own, and records why a global install fails beside `statamic/cli` before 3.6.4.
