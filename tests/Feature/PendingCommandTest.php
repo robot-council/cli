@@ -297,8 +297,11 @@ function holdSinkLock(PendingEvents $sink): mixed
 {
     $holder = fopen($sink->path(), 'c+');
 
-    expect($holder)->not->toBeFalse()
-        ->and(flock($holder, LOCK_EX | LOCK_NB))->toBeTrue();
+    if ($holder === false) {
+        throw new RuntimeException('Could not open the sink to hold its lock.');
+    }
+
+    expect(flock($holder, LOCK_EX | LOCK_NB))->toBeTrue();
 
     return $holder;
 }
