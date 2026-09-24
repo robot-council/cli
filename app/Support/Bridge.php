@@ -325,6 +325,14 @@ final class Bridge
             $this->roleChanged = true;
         }
 
+        // **The feed's 401 asks the same question the heartbeat's does**, and the renewal below is
+        // what answers it. Without this a bridge whose session had been ended learned nothing from
+        // the feed except a widening backoff, and an idle one with an hour of token life left had
+        // only the heartbeat to fall back on (#169).
+        if ($this->follower?->sessionWasRefused() === true) {
+            $this->renewalDue = true;
+        }
+
         if (($this->roleChanged || $this->renewalDue || $this->session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
             try {
                 $this->session->renew();

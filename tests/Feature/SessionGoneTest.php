@@ -154,6 +154,16 @@ function goneRenewals(): int
 }
 
 /**
+ * How many feed reads were sent.
+ */
+function goneFeedReads(): int
+{
+    return Http::recorded(
+        fn (Request $request): bool => str_contains($request->url(), '/api/events')
+    )->count();
+}
+
+/**
  * How many MCP messages were forwarded.
  */
 function goneForwarded(): int
@@ -327,4 +337,211 @@ it('leaves an ordinary run ordinary, with a follower attached', function (): voi
 
     expect(goneForwarded())->toBe(1)
         ->and(goneRenewals())->toBe(0);
+});
+
+it('says why the session ended, and does not blame the feed on the way', function (): void {
+    // **Measured before the fix, with a follower attached**: the operator got two lines, and the
+    // uninformative one came first --
+    //
+    //   [1] Could not read the fleet feed: the service answered 401.
+    //   [2] The fleet has marked this session gone, so its claims and locks have been released...
+    //
+    // A 401 on the feed is not a feed problem. It says the session token is not honored, which the
+    // feed cannot explain and the renewal can (#169).
+    goneService(renewStatus: 409, sessionTokenStatus: 401);
+
+    $said = [];
+    $session = goneSession();
+
+    new Bridge($session, GONE_SERVICE, 0, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+        ->run(goneIdleStream(), tmpfile(), function (string $message) use (&$said): void {
+            $said[] = $message;
+        });
+
+    expect($said)->toHaveCount(1)
+        ->and($said[0])->toContain('marked this session gone')
+        ->and($said[0])->not->toContain('Could not read the fleet feed');
+});
+
+it('still reports a feed failure that is not a refusal', function (): void {
+    // The control for the line above. Suppressing every read failure, rather than the 401, would
+    // leave a bridge silent about a service that is genuinely broken.
+    goneService(renewStatus: 200, sessionTokenStatus: 500);
+
+    $said = [];
+    $session = goneSession();
+
+    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+        ->run(goneIdleStream(), tmpfile(), function (string $message) use (&$said): void {
+            $said[] = $message;
+        });
+
+    expect(implode('
+', $said))->toContain('Could not read the fleet feed')
+        ->and(implode('
+', $said))->toContain('500');
+});
+
+it('turns a refused feed read into a renewal, so an idle bridge learns from it', function (): void {
+    // The feed polls every `POLL_SECONDS` where the heartbeat is a minute apart, so on a real
+    // bridge this is the earlier of the two signals. With the heartbeat interval left at its
+    // default, only the feed can produce the renewal here.
+    goneService(renewStatus: 409, sessionTokenStatus: 401);
+
+    $said = [];
+    $session = goneSession();
+
+    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+        ->run(goneIdleStream(), tmpfile(), function (string $message) use (&$said): void {
+            $said[] = $message;
+        });
+
+    expect(goneRenewals())->toBe(1)
+        ->and(implode('
+', $said))->toContain('marked this session gone');
+});
+
+it('does not end a bridge whose feed was refused but whose renewal succeeded', function (): void {
+    // A token revoked and reissued is refused once and renews fine. The refusal asks a question;
+    // it does not answer one.
+    goneService(renewStatus: 200, sessionTokenStatus: 401);
+
+    $said = [];
+    $session = goneSession();
+    $bridge = new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0));
+
+    $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
+
+    expect(goneRenewals())->toBe(1);
+
+    $bridge->run(goneStream(), tmpfile(), function (string $message) use (&$said): void {
+        $said[] = $message;
+    });
+
+    expect(goneForwarded())->toBeGreaterThan(0)
+        ->and(implode('
+', $said))->not->toContain('marked this session gone');
+});
+
+it('stops asking for a renewal once the feed is accepted again', function (): void {
+    // **The flag describes the last attempt, not the worst one.** Left sticky it would set
+    // `renewalDue` on every later pass, and a bridge that recovered from one refused read would
+    // renew every pass for the rest of its life -- bounded only by the retry floor, which this test
+    // collapses to zero so the difference is visible at all.
+    $feed = Http::sequence()
+        ->push(['events' => [], 'cursor' => 1], 401)
+        ->push(['events' => [], 'cursor' => 2], 200);
+
+    $feed->whenEmpty(Http::response(['events' => [], 'cursor' => 3], 200));
+
+    Http::fake([
+        '*/api/sessions/'.GONE_SESSION.'/renew' => Http::response(
+            ['token' => 'rcouncil_2|NEW', 'expires_in' => 3600, 'abilities' => []], 200
+        ),
+        '*/api/sessions' => Http::response([
+            'session_id' => GONE_SESSION, 'token' => 'rcouncil_2|FIRST',
+            'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => [],
+        ], 201),
+        '*/api/events*' => $feed,
+        '*/api/agent/heartbeat' => Http::response(['ok' => true], 200),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200),
+    ]);
+
+    $session = goneSession();
+
+    // **A zero backoff, or the later reads never happen.** The failure path schedules the next poll
+    // from `$backoff`, not from `$pollSeconds`, so with the default the runs below return at the
+    // guard and the sequence's 200 is never consumed -- the test would then pass unchanged if every
+    // read were refused, which is the opposite of what it claims.
+    $bridge = new Bridge(
+        $session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS,
+        new FleetFollower($session, GONE_SERVICE, goneSink(), 0, 0), 0
+    );
+
+    $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
+
+    expect(goneRenewals())->toBe(1);
+
+    $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
+    $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
+
+    // The reads actually happened, so "accepted again" is a state this test reached rather than a
+    // fixture it merely declared.
+    expect(goneFeedReads())->toBeGreaterThan(1)
+        // Still one renewal: the later reads were accepted, so nothing asked again.
+        ->and(goneRenewals())->toBe(1);
+});
+
+it('says so when the feed keeps refusing and the renewal keeps succeeding', function (): void {
+    // **The hole suppression would otherwise open.** Every 401 branch of `EnsureAgentSession` is
+    // either repaired by the renewal or reported by it -- except a feed that goes on refusing while
+    // the renewal goes on working, which a proxy in front of the service can produce. Silence there
+    // is a bridge that never reads the fleet again and never mentions it. The first refusal is
+    // quiet, because the renewal usually does explain it; the rest are not.
+    goneService(renewStatus: 200, sessionTokenStatus: 401);
+
+    $said = [];
+    $session = goneSession();
+    // Zero backoff, so the second refusal is reachable without sitting through `BACKOFF_SECONDS`.
+    $follower = new FleetFollower($session, GONE_SERVICE, goneSink(), 0, 0);
+    $record = function (string $message) use (&$said): void {
+        $said[] = $message;
+    };
+
+    $follower->tick($record);
+
+    expect($said)->toBeEmpty();
+
+    $follower->tick($record);
+    $follower->tick($record);
+
+    expect(implode('
+', $said))->toContain('refused this session')
+        ->and(implode('
+', $said))->toContain('2 times in a row')
+        // **It claims nothing it cannot see.** `FleetFollower` neither performs nor observes a
+        // renewal, and `robot-council/core` puts its MCP endpoint behind the same guard as the
+        // feed -- so a message promising that tool calls are fine would be wrong in the ordinary
+        // case, which is the defect this ticket exists to remove.
+        ->and(implode('
+', $said))->not->toContain('renewing has not fixed it')
+        ->and(implode('
+', $said))->not->toContain('Tool calls are unaffected');
+});
+
+it('starts the refusal count over once a read succeeds', function (): void {
+    // Refused, refused, accepted, refused. The count must restart, or a bridge that recovered and
+    // then hit one more refusal would announce it as though the run had never stopped -- and the
+    // reset line was covered by nothing.
+    $feed = Http::sequence()
+        ->push(['events' => [], 'cursor' => 1], 401)
+        ->push(['events' => [], 'cursor' => 1], 401)
+        ->push(['events' => [], 'cursor' => 2], 200)
+        ->push(['events' => [], 'cursor' => 2], 401);
+
+    $feed->whenEmpty(Http::response(['events' => [], 'cursor' => 3], 200));
+
+    Http::fake([
+        '*/api/sessions' => Http::response([
+            'session_id' => GONE_SESSION, 'token' => 'rcouncil_2|FIRST',
+            'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => [],
+        ], 201),
+        '*/api/events*' => $feed,
+    ]);
+
+    $said = [];
+    $record = function (string $message) use (&$said): void {
+        $said[] = $message;
+    };
+
+    $follower = new FleetFollower(goneSession(), GONE_SERVICE, goneSink(), 0, 0);
+
+    $follower->tick($record);   // refused, quiet
+    $follower->tick($record);   // refused again, says "2 times"
+    $follower->tick($record);   // accepted, resets
+    $follower->tick($record);   // refused once more, quiet again
+
+    expect(goneFeedReads())->toBe(4)
+        ->and($said)->toHaveCount(1)
+        ->and($said[0])->toContain('2 times in a row');
 });

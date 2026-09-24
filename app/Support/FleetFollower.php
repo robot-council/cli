@@ -113,7 +113,30 @@ final class FleetFollower
     /**
      * How long the next failure waits, in seconds.
      */
-    private int $backoff = self::BACKOFF_SECONDS;
+    private int $backoff;
+
+    /**
+     * Whether the last feed read was refused outright.
+     *
+     * **Describes the most recent TICK rather than the most recent read**, so a tick that sat out
+     * the backoff answers false rather than repeating the last refusal. A 401 says the session
+     * token is not honored; what that MEANS is the renewal's to answer, exactly as it is for a
+     * refused heartbeat.
+     */
+    private bool $refused = false;
+
+    /**
+     * How many reads in a row have been refused.
+     *
+     * **The guard on suppressing a 401 at all.** Every branch of `EnsureAgentSession` that answers
+     * 401 is either repaired by the renewal or reported by it -- a session the fleet ended gets a
+     * `409`, and an unusable installation refuses the renewal too, which `Session::renew()` reports.
+     * The one shape neither covers is a feed that keeps refusing while the renewal keeps
+     * succeeding, which a proxy in front of the service can produce. Silence there would be a
+     * bridge that never reads the feed again and never says so, so the first refusal is quiet and
+     * the rest are not.
+     */
+    private int $refusals = 0;
 
     /**
      * The tasks this session is holding, as far as the feed has said.
@@ -137,9 +160,31 @@ final class FleetFollower
         private readonly Session $session,
         private readonly string $service,
         private readonly PendingEvents $pending,
-        private readonly int $pollSeconds = self::POLL_SECONDS
+        private readonly int $pollSeconds = self::POLL_SECONDS,
+
+        // A parameter for the same reason `$pollSeconds` is one: the schedule is read from `time()`
+        // inside a loop a test cannot advance, so nothing could show what a SECOND consecutive
+        // refusal does without sitting through `BACKOFF_SECONDS`. Nothing in the application passes
+        // anything but the default, and the doubling above is deliberately unfloored so that a zero
+        // passed here stays zero -- a floor would make the second failure wait, which is the exact
+        // thing the parameter exists to avoid.
+        private readonly int $backoffSeconds = self::BACKOFF_SECONDS
     ) {
+        $this->backoff = $backoffSeconds;
+
         $this->cursor = $session->feedCursor();
+    }
+
+    /**
+     * Whether the last feed read was refused, which is a question rather than an answer.
+     *
+     * The caller turns it into a renewal, and the renewal distinguishes the reasons: a new token
+     * means the old one was merely revoked or expired, and a `409` means the fleet has ended this
+     * session. Symmetrical with `Session::heartbeat()` answering false (#165, #169).
+     */
+    public function sessionWasRefused(): bool
+    {
+        return $this->refused;
     }
 
     /**
@@ -161,6 +206,14 @@ final class FleetFollower
      */
     public function tick(callable $diagnostic): bool
     {
+        // **Cleared per tick, not per read, and the difference is a renewal storm.** A refused read
+        // backs the follower off for `BACKOFF_SECONDS`, so the ticks that follow return below
+        // without reaching the service -- and a flag cleared only by a read would stay true for the
+        // whole backoff, asking the caller for a renewal on every pass. Measured while building
+        // #169: three renewals where one was owed, and the mutation that should have caught it
+        // could not, because the flag was already sticky for the window under test.
+        $this->refused = false;
+
         if ($this->cursor === null || time() < $this->nextPoll) {
             return false;
         }
@@ -172,12 +225,39 @@ final class FleetFollower
 
             $this->backoff = min($this->backoff * 2, self::MAX_BACKOFF_SECONDS);
 
-            $diagnostic('Could not read the fleet feed: '.$throwable->getMessage());
+            // **A 401 is not a feed problem, so it is recorded rather than described.** It says this
+            // session's token is no longer honored, which the feed cannot explain and the renewal
+            // can: a token merely revoked and reissued renews fine, and a session the fleet has
+            // ended answers `409`. Measured before this, a swept session was told its feed was
+            // unreadable one line before being told why -- the symptom ahead of the cause (#169).
+            $this->refused = $throwable->getCode() === 401;
+            $this->refusals = $this->refused ? $this->refusals + 1 : 0;
+
+            if (! $this->refused) {
+                $diagnostic('Could not read the fleet feed: '.$throwable->getMessage());
+            } elseif ($this->refusals > 1) {
+                // **Only what this class saw.** An earlier wording said "renewing has not fixed
+                // it" and "Tool calls are unaffected", and both were claims it had no standing to
+                // make. `FleetFollower` neither performs nor observes a renewal -- the caller may
+                // not have attempted one, since `Bridge` gates it behind `nextRenewAttempt` -- and
+                // tool calls are **not** unaffected: `robot-council/core` registers its MCP
+                // endpoint behind the same `EnsureAgentSession` guard as `GET events`, taking the
+                // same session token, so any 401 about that token refuses tool calls too. Telling
+                // an operator their tool calls were fine while every one of them failed is the
+                // defect this whole ticket exists to remove, reintroduced by its own fix.
+                //
+                // The renewal's own failure line, which `Bridge` already prints, supplies the rest.
+                $diagnostic(sprintf(
+                    'The fleet feed has refused this session %d times in a row.',
+                    $this->refusals
+                ));
+            }
 
             return false;
         }
 
-        $this->backoff = self::BACKOFF_SECONDS;
+        $this->backoff = $this->backoffSeconds;
+        $this->refusals = 0;
         $this->nextPoll = time() + $this->pollSeconds;
 
         // The cursor the service returns, not the last event's id: a page can be short or empty
@@ -321,7 +401,11 @@ final class FleetFollower
             ->get($this->service.'/robot-council/api/events', ['after' => $this->cursor]);
 
         if (! $response->successful()) {
-            throw new \RuntimeException('the service answered '.$response->status().'.');
+            // **The status travels as the exception's code**, so the caller can tell a refusal from
+            // a service having a bad minute without parsing a message. Setting a property here
+            // instead looks simpler and is not: the assignment is invisible to the analyzer across
+            // the call boundary, which reports the caller's guard as always true.
+            throw new \RuntimeException('the service answered '.$response->status().'.', $response->status());
         }
 
         $body = $response->json();
