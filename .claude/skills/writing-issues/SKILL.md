@@ -1,7 +1,7 @@
 ---
 name: writing-issues
 description: >-
-  GitHub issue conventions for `robot-council/core`: imperative verb-first titles (or
+  GitHub issue conventions for this repository: imperative verb-first titles (or
   symptom-first for bugs) with aggressive inline-code markup and no trailing period; a
   1–3-sentence lede that often opens with a provenance line (`Follow-up to #N.`,
   `Spun off from #N.`, `Part of #N.`); ordered section inventory (`## Why` / `## Background`,
@@ -20,8 +20,13 @@ description: >-
 
 # Writing Issues
 
-This skill captures the house style for GitHub issue titles and bodies in
-`robot-council/core`. An issue is a brief for whoever picks it up — often an autonomous
+This skill captures the house style for GitHub issue titles and bodies. **It is one shared
+document, carried identically by `robot-council/core` and `robot-council/cli`, so it names no
+repository of its own** -- the recipes below take `{owner}` and `{repo}` from the checkout, and the
+duplicate check reads the repository once into `$here`. Where a repository is named in this file it
+is because a measurement was taken there, which is a fact rather than an example.
+
+An issue is a brief for whoever picks it up — often an autonomous
 agent. Write it so the work is unambiguous before anyone touches code: state the *why*, pin
 down the *current* behavior, describe the *desired* outcome, and bound the scope explicitly.
 The defining feature of a good issue here is a crisp, testable **Acceptance criteria**
