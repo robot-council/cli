@@ -256,8 +256,11 @@ it('ends when a tool call is refused and the renewal says the session has gone',
         ->and($all)->toContain('claims and locks have been released')
         // The message it replaces named a status code rather than a cause.
         ->and($all)->not->toContain('HTTP 409')
-        // And not the one that would send an operator to inspect their enrollment.
-        ->and($all)->not->toContain('installation may have been revoked');
+        // And not the twice-refused message, which belongs to the OTHER state -- the one where the
+        // renewal succeeds. Until #185 this named the retired wording, which stopped discriminating
+        // the moment that wording left the source: a string nothing can emit is absent forever, so
+        // the assertion would have passed even with the whole branch deleted.
+        ->and($all)->not->toContain('refused it on the next call');
 
     // Stopped: a second pass on the same bridge forwards nothing, because `stop()` set `$stopping`
     // and `while (! $this->stopping)` refuses the next pass.

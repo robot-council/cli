@@ -305,3 +305,45 @@ it('forgets one key without disturbing another', function (): void {
     expect($this->store->get($dropped))->toBeNull()
         ->and($this->store->get($kept)?->reveal())->toBe('KEPT');
 })->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
+
+it('stores a credential when a terminal is attached, which the prompt form could not', function (): void {
+    // **The case #207 found.** `enroll` run from a terminal: the old write prompted, and `security`
+    // read that prompt from the controlling terminal rather than from the pipe, so it hung until the
+    // timeout. `script` gives the child a controlling terminal while its own stdin stays a pipe
+    // from this test, which is what a person running `enroll` in Terminal has.
+    $code = sprintf(
+        'require %s; $s = new App\Support\Credentials\KeychainStore; '
+        .'$s->put($argv[1], new App\Support\Credentials\Credential("rcouncil_1|TERMINAL-207")); '
+        .'echo $s->get($argv[1])?->reveal() === "rcouncil_1|TERMINAL-207" ? "STORED" : "NOT-STORED";',
+        var_export(base_path('vendor/autoload.php'), true)
+    );
+
+    $child = new Process(['script', '-q', '/dev/null', PHP_BINARY, '-r', $code, $this->service], timeout: 40);
+    $child->setInput('');
+    $child->run();
+
+    $output = str_replace("\r", '', $child->getOutput().$child->getErrorOutput());
+
+    // **The control on the terminal itself.** A child with no terminal would store the credential
+    // under either method, and read as a pass for the wrong reason.
+    $tty = new Process(['script', '-q', '/dev/null', '/bin/sh', '-c', 'test -t 0 && echo HAS-TERMINAL'], timeout: 10);
+    $tty->setInput('');
+    $tty->run();
+
+    expect(str_replace("\r", '', $tty->getOutput()))->toContain('HAS-TERMINAL')
+        ->and($output)->toContain('STORED')
+        ->and($output)->not->toContain('NOT-STORED')
+        ->and($output)->not->toContain('password data for new item');
+})->skip(fn (): bool => requiresKeychain() || ! is_executable('/usr/bin/script'), 'Needs the Keychain and script(1).');
+
+it('refuses a key that could end the quoting it travels in, and writes nothing', function (): void {
+    // The key is built from a fleet URL and a harness name, and nothing legitimate carries a quote,
+    // a backslash or a control character; one that did could rewrite the command `security -i` runs
+    $key = $this->service.'" -s "elsewhere';
+
+    $this->written[] = $key;
+
+    expect(fn () => $this->store->put($key, new Credential('rcouncil_1|QUOTED')))
+        ->toThrow(CredentialStoreFailed::class)
+        ->and($this->store->get($key))->toBeNull();
+})->skip(requiresKeychain(...), 'The Keychain is not reachable on this machine.');
