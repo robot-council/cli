@@ -620,6 +620,37 @@ class NoDataGuard(unittest.TestCase):
         self.assertEqual(self._drive(body, returncode=1, nums=(7, 8)), "")
         self.assertEqual(g.pr_title(8, "owner/name"), "T")
 
+    @staticmethod
+    def _all_null(errors):
+        return json.dumps({"data": {"repository": {"p7": None, "p8": None}}, "errors": errors})
+
+    @staticmethod
+    def _not_found(n):
+        return {"type": "NOT_FOUND", "path": ["repository", f"p{n}"],
+                "message": f"Could not resolve to a PullRequest with the number of {n}."}
+
+    def test_every_alias_null_for_another_reason_warns_naming_the_range(self):
+        """#198: a dict of nulls is not empty, so the no-data guard above cannot see this."""
+        shapes = {
+            "a non-NOT_FOUND error": [{"type": "FORBIDDEN", "message": "Resource not accessible by integration"}],
+            "one NOT_FOUND and one other": [self._not_found(7), {"type": "INTERNAL", "message": "Something went wrong"}],
+            "no errors at all": [],
+            "an error that is not an object": ["boom"],
+        }
+        for label, errors in shapes.items():
+            with self.subTest(label):
+                out = self._drive(self._all_null(errors), returncode=1, nums=(7, 8))
+
+                self.assertIn("no pull request in #7-#8 resolved", out)
+                self.assertIn("carry no links", out)
+            g._pr_cache.clear()
+
+    def test_every_alias_null_because_each_cites_an_issue_stays_silent(self):
+        """A range that genuinely cites only issues: every alias null, every error `NOT_FOUND`."""
+        out = self._drive(self._all_null([self._not_found(7), self._not_found(8)]), returncode=1, nums=(7, 8))
+
+        self.assertEqual(out, "")
+
     def test_truncation_is_reported_rather_than_guessed(self):
         """Since #178 a dropped closing issue can decide the BUCKET, not just lose a label."""
         out = self._drive(self._ok(25, [{"issueType": {"name": "Feature"}, "labels": {"nodes": []}}]))

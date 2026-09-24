@@ -451,6 +451,24 @@ def prime_pr_cache(nums, repo):
             print(f"warning: the pull-request query returned no data for #{batch[0]}-#{batch[-1]} "
                   f"({why}). Those bullets will fall back to commit subjects and carry no links.",
                   file=sys.stderr)
+        # **Every alias null is a different case from one alias null** (#198). One null beside
+        # populated aliases is a subject citing an issue, and is partial data. All of them null is
+        # either a range that cites only issues -- each null beside its own `NOT_FOUND` -- or a
+        # failure that took every alias with it, and a dict of nulls is not empty, so the guard
+        # above cannot see it. Only `NOT_FOUND` for every error, and at least one error, is
+        # evidence of the first; anything else, including no errors at all, warns.
+        elif all(not data.get(f"p{n}") for n in batch):
+            errs = payload.get("errors")
+            errs = errs if isinstance(errs, list) else []
+            other = next((e for e in errs if not (isinstance(e, dict) and e.get("type") == "NOT_FOUND")), None)
+            if not errs or other is not None:
+                why = (f"{other.get('type') or 'error'}: {str(other.get('message') or '')[:160]}"
+                       if isinstance(other, dict) else
+                       ("an error that is not an object" if other is not None
+                        else f"no errors reported, gh exit {r.returncode}"))
+                print(f"warning: no pull request in #{batch[0]}-#{batch[-1]} resolved ({why}). "
+                      f"Those bullets will fall back to commit subjects and carry no links.",
+                      file=sys.stderr)
         for n in batch:
             node = data.get(f"p{n}")
             if not node:
