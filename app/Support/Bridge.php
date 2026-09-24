@@ -453,10 +453,10 @@ final class Bridge
 
             $this->reply($this->everyTool($session, $message, $response), $out, $diagnostic);
         } catch (SessionHasGone $gone) {
-            // **The busy bridge's path to the same news.** A tool call is refused, the renewal above
-            // answers `409`, and there is nothing to retry: this session's claims and locks are
-            // already released. Reported once and the loop ends, rather than every subsequent call
-            // repeating it.
+            // **The busy bridge's path to the same news.** A tool call is refused, the renewal
+            // `exchange()` makes answers `409`, and there is nothing to retry: this session's
+            // claims and locks are already released. Reported once and the loop ends, rather than
+            // every subsequent call repeating it.
             $this->endBecauseTheSessionIsGone($gone, $diagnostic);
         } catch (Throwable $throwable) {
             // To stderr, never to stdout: a harness parsing stdout would read a diagnostic as a
