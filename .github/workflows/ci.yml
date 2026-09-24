@@ -112,6 +112,51 @@ jobs:
       - name: Run Rector (dry run)
         run: vendor/bin/rector --dry-run --no-progress-bar
 
+  # Every other job installs dev dependencies, so a production dependency that arrives only
+  # through a dev one is invisible to all of them. `illuminate/http` did exactly that, through
+  # larastan, and every release up to v0.4.1 failed its first HTTP request (#237). This job
+  # installs from the lock the way a user does, without dev dependencies.
+  production-install:
+    name: production install
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      - name: Install composer dependencies without dev dependencies
+        uses: ramsey/composer-install@v4
+        with:
+          composer-options: --no-dev
+
+      # Both checks below pass trivially if a dev package slipped in, which is how #237 hid.
+      - name: Confirm no dev dependency was installed
+        run: |
+          for package in larastan/larastan pestphp/pest phpstan/phpstan; do
+            if [ -d "vendor/$package" ]; then echo "vendor/$package is present"; exit 1; fi
+          done
+
+      - name: Check every import under app/ resolves
+        run: php .github/scripts/check-production-imports.php
+
+      # The import scan cannot see a class the container resolves by name, so make a request for
+      # real. `Could not reach the service.` alone is not enough: it is the fallback text for any
+      # Throwable, a missing class included, so require the connection failure `-v` names.
+      - name: Reach the network from enroll
+        run: |
+          set +e
+          out=$(./robot-council enroll -v --service=https://example.invalid --harness=claude --machine-label=ci 2>&1)
+          rc=$?
+          echo "$out"
+          echo "exit=$rc"
+          [ "$rc" -ne 0 ] && grep -q 'Illuminate\\Http\\Client\\ConnectionException' <<< "$out"
+
   generator:
     name: generator (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
@@ -140,7 +185,7 @@ jobs:
   ci-passed:
     name: ci-passed
     if: always()
-    needs: [tests, phpstan, pint, rector, generator]
+    needs: [tests, phpstan, pint, rector, production-install, generator]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -150,7 +195,8 @@ jobs:
           PHPSTAN: ${{ needs.phpstan.result }}
           PINT: ${{ needs.pint.result }}
           RECTOR: ${{ needs.rector.result }}
+          PRODUCTION_INSTALL: ${{ needs.production-install.result }}
           GENERATOR: ${{ needs.generator.result }}
         run: |
-          echo "tests=$TESTS phpstan=$PHPSTAN pint=$PINT rector=$RECTOR generator=$GENERATOR"
-          [ "$TESTS" = success ] && [ "$PHPSTAN" = success ] && [ "$PINT" = success ] && [ "$RECTOR" = success ] && [ "$GENERATOR" = success ]
+          echo "tests=$TESTS phpstan=$PHPSTAN pint=$PINT rector=$RECTOR production-install=$PRODUCTION_INSTALL generator=$GENERATOR"
+          [ "$TESTS" = success ] && [ "$PHPSTAN" = success ] && [ "$PINT" = success ] && [ "$RECTOR" = success ] && [ "$PRODUCTION_INSTALL" = success ] && [ "$GENERATOR" = success ]
