@@ -272,9 +272,15 @@ final class Bridge
         // Read before the renewal rather than after it: a renewal that throws is caught below and
         // backed off, and putting the feed after it would make a service that refuses renewals also
         // stop the feed being read.
-        $this->follower?->tick($diagnostic);
+        //
+        // **And it can bring the renewal forward.** A role decided by an administrator re-mints
+        // what the token may do, but this process goes on answering `allows()` from the abilities
+        // it was handed at start -- so a promoted session keeps discarding the events it was
+        // promoted to hear, for up to the renewal window, while the service would let it act. The
+        // follower says when that has happened and the renewal below stops waiting (#129).
+        $roleChanged = (bool) $this->follower?->tick($diagnostic);
 
-        if ($this->session->expiringWithin(self::RENEW_WITHIN_SECONDS) && time() >= $this->nextRenewAttempt) {
+        if (($roleChanged || $this->session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
             try {
                 $this->session->renew();
             } catch (Throwable $failure) {
