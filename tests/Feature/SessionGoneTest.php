@@ -180,20 +180,26 @@ it('reports its own session being marked gone, and says what caused it', functio
         ->and($all)->not->toContain('credential');
 });
 
-it('stops the loop, so nothing further is forwarded', function (): void {
-    // Three messages, and the feed says `gone` on the first pass. A loop that did not stop would
-    // forward all three; one that stops forwards the message it was already handling and no more.
+it('stops the loop, so a later pass forwards nothing', function (): void {
+    // **Stopping is not observable within one `run()`, which is why this runs it twice.** A
+    // seekable stream hands `fread` every message at once, so they are all forwarded before
+    // `periodic()` is reached -- an assertion on that count is true whether or not the loop stops.
+    // What `stop()` actually buys is that `while (! $this->stopping)` refuses the next pass, and
+    // the second `run()` below is where that shows.
     goneService([[goneEvent(1, 'session.gone', GONE_SESSION)]]);
 
     $session = goneSession();
+    $bridge = new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, goneFollower($session));
 
-    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, goneFollower($session))
-        ->run(goneStream(3), tmpfile(), fn (string $m): null => null);
+    $bridge->run(goneStream(), tmpfile(), fn (string $m): null => null);
 
-    // All three arrive in one `fread`, so they are forwarded before `periodic()` runs at all. What
-    // the stop buys is that the loop does not come back for another pass -- asserted below by the
-    // renewal count, which is the thing that would otherwise keep happening.
-    expect(goneForwarded())->toBe(3);
+    expect(goneForwarded())->toBe(1);
+
+    // The same bridge, a fresh message, and a feed that would say nothing new. A bridge that had
+    // not stopped forwards it.
+    $bridge->run(goneStream(), tmpfile(), fn (string $m): null => null);
+
+    expect(goneForwarded())->toBe(1);
 });
 
 it('does not renew a session the fleet has discarded', function (): void {
