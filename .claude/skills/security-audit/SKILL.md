@@ -1,13 +1,12 @@
 ---
 name: security-audit
 description: >-
-  Run a multi-agent security audit of the first-party code in the robot-council Laravel package
-  (`src/`, `config/`, `database/`, `resources/views/`, `routes/`). Fans out one finder agent per
+  Run a multi-agent security audit of this repository's first-party code, discovered from the
+  checkout rather than assumed. Fans out one finder agent per
   security domain (XSS, SSTI, path traversal, SSRF, XXE/DoS, authz, injection, secrets,
   deserialization, validation/mass-assignment), adversarially verifies every candidate against the
-  package's trust model (end users reach it only through what the service provider registers, Blade
-  `{{ }}` escapes while `{!! !!}` does not, consuming-app developers and Artisan operators are
-  trusted), then writes a severity-ranked report to the gitignored `build/` directory. After you
+  repository's trust model, then writes a severity-ranked report to the gitignored `build/`
+  directory. After you
   review it, it discloses approved vulnerabilities privately as draft GitHub security advisories
   (never as public issues) and files approved non-sensitive hardening items as issues following the
   `writing-issues` conventions. Activate when the user asks to "run a security audit", "audit the
@@ -18,7 +17,7 @@ description: >-
 
 # Security audit (multi-agent, report-first)
 
-A repo-tailored security audit for `robot-council/core`. It runs a bundled multi-agent
+A repo-tailored security audit for whichever of the two repositories you are in. It runs a bundled multi-agent
 **workflow** that finds → adversarially verifies → triages, hands you a report to review, and only
 then discloses or files anything. The verification step is the point: most generic Laravel
 "findings" are false positives — Blade `{{ }}` already escapes, the query builder already binds
@@ -41,12 +40,37 @@ instead — loud, but still a sanitizer that did not sanitize. So when auditing 
 *"what makes this throw, with which class, and what does the caller emit then"* alongside *"what
 gets past it"*.
 
+## Scope -- discovered from the checkout, never assumed
+
+**The two repositories this file is carried by do not share a layout.** The package keeps its
+first-party code in `src/`, with `database/`, `resources/views/` and `routes/` beside it; the
+application keeps its in `app/` and has none of those.
+
+This skill used to name the package's list outright. Measured in the application on 2026-09-24, of
+the five directories it named **only `config/` existed**, holding 2 PHP files -- while **40 PHP
+files under `app/`, every line of first-party code, were outside the declared scope.** An audit run
+there would have swept almost nothing and reported clean, which is the worst failure available to a
+security tool: it produces the same output as a genuinely clean audit and is believed.
+
+So resolve the scope before fanning out, and read the result:
+
+```bash
+# First-party source, whichever layout this checkout uses. `config/` is included wherever it exists,
+# because a published default a consumer inherits is part of the attack surface.
+for d in src app config database resources/views routes; do [ -d "$d" ] && printf '%s ' "$d"; done
+echo
+```
+
+**An empty list is a setup failure, not a clean audit.** So is a list that omits the directory
+holding the code you came to audit -- check it against `git ls-files '*.php' | head` before the
+agents start, which costs one command and is the difference between a finding and a false clean.
+
 ## Invocation
 
 | Command | Scope |
 | --- | --- |
 | `/security-audit` | Full first-party sweep (default). |
-| `/security-audit src/Commands config` | Restrict to the given paths (and code they call into). |
+| `/security-audit app/Commands config` | Restrict to the given paths (and code they call into). |
 | `/security-audit --since main` | Audit only what changed vs a ref (broader than `/security-review`). |
 | `/security-audit --quick` | Skip the workflow; do a single-agent pass (cheaper, shallower). |
 
@@ -55,9 +79,9 @@ gets past it"*.
 ### 1. Resolve scope → build `args` for the workflow
 
 - **Default / no args** → `{ mode: 'full' }`.
-- **Path args** (`src/Commands …`) → `{ mode: 'paths', files: [<those paths>] }`.
+- **Path args** (`app/Commands …`, or `src/Commands …` in the package) → `{ mode: 'paths', files: [<those paths>] }`.
 - **`--since <ref>`** → run `git diff --name-only <ref>...HEAD`, keep only first-party paths
-  (`src/`, `config/`, `database/`, `resources/views/`, `routes/`), and pass
+  (resolved from the checkout, per *Scope* above), and pass
   `{ mode: 'diff', files: [<changed first-party files>], baseRef: '<ref>' }`. If the diff is
   empty, say so and stop. (`git` takes the same command and prints forward-slash paths on both
   Windows and macOS — keep the slashes as-is; pass them through unchanged.)
@@ -159,7 +183,7 @@ administrator or security manager of the repository, and a classic token needs t
      "cwe_ids": ["CWE-79"],
      "vulnerabilities": [
        {
-         "package": { "ecosystem": "composer", "name": "robot-council/core" },
+         "package": { "ecosystem": "composer", "name": "<this repository's package, from composer.json>" },
          "vulnerable_version_range": "<= 1.2.0",
          "patched_versions": null
        }
@@ -192,7 +216,7 @@ administrator or security manager of the repository, and a classic token needs t
 A hardening item is one whose issue text tells a reader nothing they could exploit against any
 released version — for example, defense in depth where no current input reaches the sink. For each
 approved one, follow the [`writing-issues`](../writing-issues/SKILL.md) skill conventions exactly
-(invoke it), filing into `robot-council/core`:
+(invoke it), filing into the repository you are in:
 
 - **Title** — imperative, fix-oriented, with inline-code markup, no trailing period
   (e.g. ``Pass `Process` commands as arrays instead of shell strings``).
@@ -224,7 +248,7 @@ approved one, follow the [`writing-issues`](../writing-issues/SKILL.md) skill co
   operator-only issue into an anonymous critical.
 - **Cost.** The full workflow spawns dozens of agents. For a quick look at one file, prefer
   `--quick` or a scoped path. The diff mode (`--since`) is the cheapest comprehensive option.
-- **Scope.** First-party only: `src/`, `config/`, `database/`, `resources/views/`, `routes/`.
+- **Scope.** First-party only, and **resolved from the checkout** rather than named here -- see *Scope* above. The two repositories do not share a layout, and the list this line used to carry missed every first-party file in one of them.
   `vendor/`, `workbench/`, `build/`, and `.claude/` are out of scope. For dependency CVEs use
   `composer audit` instead (`--no-dev` limits it to what ships to consumers), and mention that if
   the user asks about third-party risk. `composer.lock` is not committed, so the audit covers only
