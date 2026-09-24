@@ -358,5 +358,10 @@ it('reports a store that could not hold the credential, without printing it', fu
 
     expect($code)->toBe(1)
         ->and($output)->not->toContain(CREDENTIAL)
-        ->and($output)->toContain('could not be stored');
+        ->and($output)->toContain('could not be stored')
+
+        // **And what happened before it (cli#207).** The fleet approved this machine already, so
+        // "could not be stored" alone leaves an operator unsure whether to approve again
+        ->and($output)->toContain('This machine was approved')
+        ->and($output)->toContain('Run `robot-council enroll` again');
 });

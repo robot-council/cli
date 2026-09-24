@@ -377,10 +377,31 @@ final class Bridge
     /**
      * Send one message to the fleet and return its answer, renewing once on a refusal.
      *
-     * One renewal and one retry on a 401, never a loop: a second consecutive refusal means the
-     * installation itself is revoked, and retrying forever would hide that.
+     * One renewal and one retry on a 401, never a loop: a second consecutive refusal is a state no
+     * retry resolves, and looping would hide it.
      *
-     * @throws RuntimeException When the service refused the session twice.
+     * **What reaching the throw PROVES is the opposite of what it used to claim.**
+     * `Session::renew()` returns normally only on a 2xx -- `409` throws `SessionHasGone`, which
+     * `forward()` catches separately, and every other status throws before the retry runs. And core
+     * puts `sessions/{id}/renew` inside the `EnsureInstallation` group, which refuses unless
+     * `revoked_at === null && expires_at->isFuture()`. So a renewal that got this far is a proof
+     * the installation is neither revoked nor expired. Until #185 this line named the enrollment as
+     * the likely cause, sending a developer to inspect it at the one moment the service had just
+     * demonstrated it was fine. The phrase is deliberately not repeated here, so a search for it
+     * finds the thing rather than the note about it.
+     *
+     * What is left is a service minting a token it then refuses: replication lag between the
+     * endpoint that issues and the one that validates, an intermediary rewriting the
+     * `Authorization` header, or a session-level refusal the renewal cannot see. Re-enrolling
+     * repairs none of them, so the message states what was observed and stops.
+     *
+     * **The bridge reports and carries on rather than stopping, which #185 decided.** The
+     * `SessionHasGone` path stops because `gone` is final and nothing lifts it. This state is not
+     * final: replication lag is the first candidate on that list and clears on its own, so stopping
+     * would kill a bridge that was about to work again. Continuing costs a repeated diagnostic;
+     * stopping costs the agent its fleet, and only one of those is recoverable without a person.
+     *
+     * @throws RuntimeException When the service issued a token and then refused it.
      */
     private function exchange(Session $session, string $message): string
     {
@@ -392,7 +413,7 @@ final class Bridge
             $response = $this->post($session, $message);
 
             if ($response === 401) {
-                throw new RuntimeException('The service refused this session twice. The installation may have been revoked.');
+                throw new RuntimeException('The service issued a new token for this session and refused it on the next call, so this message did not reach the fleet.');
             }
         }
 

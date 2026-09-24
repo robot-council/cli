@@ -11,23 +11,23 @@ use Symfony\Component\Process\Process;
  *
  * **The token is written on stdin, never as an argument.** `security`'s own usage text says so:
  * "Use of the -p or -w options is insecure." A value passed as `-w <token>` sits in the process's
- * argv, which any local process can read with `ps` for as long as the call runs. Passing `-w` last
- * and empty makes it prompt instead, and the prompt reads stdin.
+ * argv, which any local process can read with `ps` for as long as the call runs.
  *
- * Measured on macOS 26.6.2 on 2026-09-18, and both details cost a round of debugging:
+ * **Through `security -i`, which reads its commands from stdin (cli#207).** The whole
+ * `add-generic-password` line travels down the pipe, with the token as `-X <hex>`, so argv holds
+ * nothing but `security -i` and the token needs no quoting whatever it contains.
  *
- * - The prompt asks to **retype**, so the value goes in twice. One line answers
- *   `passwords don't match`.
- * - It **exits 0 even when the passwords did not match**, so the exit code proves nothing here.
- *   `put()` therefore reads the value back and compares, which is the only check that discriminates.
+ * The earlier way, `-w` last and empty so that `security` prompted for the value, read that prompt
+ * from the **controlling terminal** whenever there was one: run from a terminal, `enroll` printed
+ * `password data for new item:`, ignored what it had piped, and timed out. It worked only without
+ * a terminal, which is how every enrollment on record had run. Measured 2026-09-24 on macOS 26.6.2
+ * with the pipe inside a pseudo-terminal: the prompt form hung until killed; this form stored all
+ * twelve of the round-trip tokens byte for byte, with a terminal and without one.
  *
- * Both were re-measured on macOS 26.6.2 on 2026-09-22 for `robot-council/cli#46` and both still
- * hold, along with a third that had not been written down:
- *
- * - A mismatched write **still creates the item**, with an empty password. So a failed `put()`
- *   leaves an empty entry behind rather than nothing. `get()` answers null for it -- an item with
- *   no password is not a credential -- and the next write replaces it, because `-U` updates. That
- *   is why the read-back tests for a credential rather than for the item's existence.
+ * **The read-back is still the decision.** `security` exits 0 on outcomes that stored nothing
+ * usable (measured for #46 on the prompt form), so `put()` reads the value back and compares,
+ * which is the only check that discriminates. An item left with an empty password answers null
+ * from `get()`, and the next write replaces it, because `-U` updates.
  */
 final class KeychainStore implements CredentialStore
 {
@@ -39,8 +39,8 @@ final class KeychainStore implements CredentialStore
     /**
      * How long any one `security` call may take.
      *
-     * Bounded because the write path deliberately uses an interactive prompt, and a prompt that
-     * stops reading stdin would otherwise hang a developer's terminal with no indication why.
+     * Bounded because a `security` that stops reading stdin -- as the prompt form did under a
+     * terminal (cli#207) -- would otherwise hang a developer's terminal with no indication why.
      */
     // A tuning value, not a behaviour. `14` and `16` are indistinguishable from any test that does
     // not spend the difference waiting, and a test that did would assert the bound rather than
@@ -119,22 +119,30 @@ final class KeychainStore implements CredentialStore
     {
         $token = $credential->reveal();
 
+        // **Refused before anything is written.** A bearer token has no newline in it, and #41
+        // asked for a defined outcome for these shapes rather than an accident. The prompt form
+        // refused them by construction; hex could carry them, so the refusal is stated here instead.
+        if ($token === '' || str_contains($token, "\n") || str_contains($token, "\r")) {
+            throw new CredentialStoreFailed('The credential could not be stored in the macOS Keychain.');
+        }
+
+        // **The key is this package's own, built from a fleet URL and a harness name**, and it
+        // travels inside a double-quoted argument that `security -i` parses. A character that could
+        // end or escape the quoting is refused rather than escaped, since nothing legitimate has one.
+        if (preg_match('/["\\\\\x00-\x1f]/', $service) === 1) {
+            throw new CredentialStoreFailed('The credential could not be stored in the macOS Keychain.');
+        }
+
         // `-U` updates rather than refusing when an item already exists, so re-enrolling against
         // the same service replaces the credential instead of erroring
-        $write = new Process(
-            ['/usr/bin/security', 'add-generic-password', '-a', $service, '-s', self::SERVICE, '-U', '-w'],
-            timeout: self::TIMEOUT_SECONDS,
-        );
+        $write = new Process(['/usr/bin/security', '-i'], timeout: self::TIMEOUT_SECONDS);
 
-        // Twice, for the retype prompt.
-        //
-        // The trailing newline is not load-bearing and no input can make it so: `security` takes
-        // EOF as the end of the second entry, so `$token."\n".$token` stores the same value.
-        // Measured on macOS 26.6.2 for cli#46, driving the tool directly -- `MUTANT-TOKEN\nMUTANT-TOKEN`
-        // with no trailing newline read back as `"MUTANT-TOKEN"`. Kept because a terminated line is
-        // what the prompt documents, and removing it would rest on EOF behaviour nothing states.
-        // @pest-mutate-ignore: ConcatRemoveRight
-        $write->setInput($token."\n".$token."\n");
+        $write->setInput(\sprintf(
+            "add-generic-password -a \"%s\" -s \"%s\" -U -X %s\n",
+            $service,
+            self::SERVICE,
+            bin2hex($token)
+        ));
         $write->run();
 
         // Not `$write->isSuccessful()`: it exits 0 on a mismatch. The read-back is the decision.
