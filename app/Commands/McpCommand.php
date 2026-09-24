@@ -5,15 +5,9 @@ declare(strict_types=1);
 namespace App\Commands;
 
 use App\Support\Bridge;
-use App\Support\Checkout;
 use App\Support\Credentials\Credentials;
-use App\Support\Credentials\InstallationChoice;
-use App\Support\FleetDelivery;
-use App\Support\FleetFollower;
-use App\Support\Joined;
+use App\Support\FleetJoin;
 use App\Support\MachineIdentity;
-use App\Support\PendingEvents;
-use App\Support\Session;
 use App\Support\StdinReader;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
@@ -46,11 +40,6 @@ use Throwable;
 final class McpCommand extends Command
 {
     /**
-     * The sink the joined session's follower writes, once somebody has joined.
-     */
-    private ?PendingEvents $pending = null;
-
-    /**
      * Run the bridge until stdin closes or a signal arrives.
      *
      * **No session until somebody joins (cli#127).** The bridge comes up, answers the handshake,
@@ -77,6 +66,18 @@ final class McpCommand extends Command
         // the harness this process actually is rather than by a second opinion.
         $harness = MachineIdentity::resolveHarness($this->stringOption('harness')) ?? 'unknown-harness';
 
+        $join = new FleetJoin(
+            $http,
+            $credentials,
+            $service,
+            $harness,
+            $this->stringOption('harness'),
+            $this->stringOption('project'),
+            $this->stringOption('repository'),
+            $this->stringOption('work-location'),
+            $this->diagnostic(...),
+        );
+
         $bridge = new Bridge(
             null,
             $service,
@@ -85,8 +86,13 @@ final class McpCommand extends Command
             // **Claude Code only**, the one harness that reads `claude/channel`. A session started
             // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
             channel: $harness === 'claude',
-            join: fn (array $arguments): Joined => $this->join($http, $credentials, $service, $harness, $arguments),
+            join: $join(...),
         );
+
+        if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
+            // A role is asked for at the join, and without `--auto-join` this process does not join
+            $this->diagnostic('--role applies only with --auto-join; pass the role to the `join` tool instead.');
+        }
 
         $this->listenForSignals($bridge);
 
@@ -137,134 +143,10 @@ final class McpCommand extends Command
 
             // And the sink goes with it. Unread events name tasks and locks THIS session held, so
             // leaving them for the next one would hand it somebody else's work to react to.
-            $this->pending?->forget();
+            $join->pending()?->forget();
         }
 
         return self::SUCCESS;
-    }
-
-    /**
-     * Join the fleet: choose the credential, start the session, ask for a role, and open the sink.
-     *
-     * **A session that started is ended if anything after it fails**, so a join that reports
-     * failure never leaves a session behind it on the fleet.
-     *
-     * @param  Factory  $http  The HTTP client.
-     * @param  Credentials  $credentials  Where the installation credential lives.
-     * @param  string  $service  The service's base URL.
-     * @param  string  $harness  Which harness this process is.
-     * @param  array{role: string|null, repository: string|null, work_location: string|null}  $arguments  What `join` was given.
-     * @return Joined The started session and its follower.
-     *
-     * @throws RuntimeException With a sentence for the agent, when joining failed.
-     */
-    private function join(Factory $http, Credentials $credentials, string $service, string $harness, array $arguments): Joined
-    {
-        // One credential per harness per fleet, so this process has to say which harness it is.
-        // It refuses rather than guessing, including when only one is stored -- #21 weighed that
-        // and chose one rule with nothing inferred. `InstallationChoice` throws a sentence naming
-        // what is missing, which is what `join` hands the agent.
-        $installation = new InstallationChoice($credentials)->for($service, $this->stringOption('harness'));
-
-        $session = new Session($http, $service, $installation);
-
-        // What `join` was told wins; then the flags; then the checkout this process runs in, so 37
-        // hand-maintained config entries stop needing to be maintained. Per field, and neither may
-        // keep the session from starting.
-        $givenRepository = $arguments['repository'] ?? $this->stringOption('repository');
-        $givenLocation = $arguments['work_location'] ?? $this->stringOption('work-location');
-
-        [$repository, $workLocation] = Checkout::resolve($givenRepository, $givenLocation);
-
-        $notes = array_values(array_filter([
-            $this->refusal('repository', $givenRepository, $repository),
-            $this->refusal('work location', $givenLocation, $workLocation),
-        ]));
-
-        foreach ($notes as $note) {
-            $this->diagnostic($note);
-        }
-
-        try {
-            $session->start($this->stringOption('project'), $repository, $workLocation);
-        } catch (RuntimeException $runtimeException) {
-            throw $runtimeException;
-        } catch (Throwable) {
-            throw new RuntimeException('The fleet could not be reached.');
-        }
-
-        try {
-            $role = $arguments['role'];
-
-            if ($role !== null && $role !== 'build') {
-                $notes[] = $this->requestRole($session, $role);
-            }
-
-            // The sink the follower writes and `robot-council pending` drains, keyed by the same
-            // three things that identify this bridge, so a stop hook beside it finds the same file.
-            $this->pending = new PendingEvents($service, $harness, $this->stringOption('project'));
-
-            $follower = new FleetFollower($session, $service, $this->pending);
-
-            // **Said at join, and only when the answer is a definite no.** A fleet can be wired
-            // correctly and still deliver nothing, because posting a directive needs the
-            // `coordinator` role and no session starts with it (cli#113). Moved here from launch
-            // with everything else a session needs; still on stderr, never on stdout.
-            $delivery = FleetDelivery::warning($session->fleetCanDirect());
-
-            if ($delivery !== null) {
-                $this->diagnostic($delivery);
-            }
-        } catch (Throwable $throwable) {
-            $session->end();
-            $this->pending = null;
-
-            throw new RuntimeException($throwable instanceof RuntimeException ? $throwable->getMessage() : 'Joining failed after the session started, so it was ended.', $throwable->getCode(), $throwable);
-        }
-
-        $summary = \sprintf(
-            "Joined the fleet as session %s%s. The fleet's tools are available now.",
-            $session->id() ?? 'unknown',
-            $repository === null ? '' : \sprintf(', working in %s%s', $repository, $workLocation === null ? '' : ' at '.$workLocation)
-        );
-
-        return new Joined($session, $follower, implode(' ', [$summary, ...$notes]));
-    }
-
-    /**
-     * Ask for a role, and say in a sentence what came of it.
-     *
-     * **Two calls, not atomic, and the gap is reported rather than hidden.** A session that started
-     * and then failed to ask for its role is live on `build`, which holds less than was asked for and
-     * never more; `join` still says so instead of reporting a plain success.
-     */
-    private function requestRole(Session $session, string $role): string
-    {
-        try {
-            $answer = $session->requestRole($role);
-        } catch (RuntimeException $runtimeException) {
-            return \sprintf('It joined as build: asking for %s failed. %s', $role, $runtimeException->getMessage());
-        }
-
-        return $answer['pending']
-            ? \sprintf("It asked for the %s role; an administrator decides, and until then it holds %s's abilities.", $role, $answer['role'] ?? 'build')
-            : \sprintf('It holds the %s role already.', $answer['role'] ?? $role);
-    }
-
-    /**
-     * A sentence saying a value was given and could not be used, or null when there is nothing to say.
-     *
-     * **Silence would be the worst outcome here.** Somebody wrote this value out, and dropping it
-     * without a word gives them a session that is missing it and no reason to look -- which is the
-     * label that stays wrong for months because nothing ever contradicts it.
-     */
-    private function refusal(string $field, ?string $given, ?string $resolved): ?string
-    {
-        if ($given === null || $resolved !== null) {
-            return null;
-        }
-
-        return \sprintf('The %s %s is not a shape the fleet accepts, so it was left unset.', $field, $given);
     }
 
     /**

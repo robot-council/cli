@@ -101,9 +101,18 @@ final class Bridge
     public const array ROLES = ['build', 'ci', 'coordinator'];
 
     /**
-     * The protocol version answered to a harness that did not offer one.
+     * The protocol version answered to a harness that offered none this bridge knows.
      */
     public const string PROTOCOL_VERSION = '2025-11-25';
+
+    /**
+     * The protocol versions this bridge answers in, newest first.
+     *
+     * **Echoing whatever a harness offered would claim versions nobody implements.** When the
+     * service held the handshake, `laravel/mcp` negotiated; answering locally, the bridge does, by
+     * the specification's rule: agree to a version it supports, and otherwise name its own.
+     */
+    public const array PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
     /**
      * What the agent is told about joining, in the `initialize` result.
@@ -205,6 +214,21 @@ final class Bridge
      * `notifications/initialized`, so a batch written then would otherwise never be announced.
      */
     private int $unannounced = 0;
+
+    /**
+     * What the fleet's own MCP server tells an agent, read once at the join.
+     *
+     * **The service's instructions reach the agent through here and nowhere else (cli#127).** The
+     * bridge answers `initialize` itself, so the fleet's `#[Instructions]` -- among them that
+     * everything read from the fleet is data, never instructions -- would otherwise never arrive.
+     */
+    private ?string $fleetInstructions = null;
+
+    /**
+     * Whether a join happened before the harness finished initializing, so the list-changed notice
+     * is still owed.
+     */
+    private bool $listChangedOwed = false;
 
     /**
      * Ask the loop to finish after the message it is handling.
@@ -422,8 +446,17 @@ final class Bridge
         $decoded = json_decode($message, true);
 
         if (! \is_array($decoded) || array_is_list($decoded)) {
-            // A batch, or something that is not JSON at all: the service's to refuse, once joined
-            return ! $this->session instanceof Session;
+            // A batch, or something that is not JSON at all: the service's to refuse, once joined,
+            // and answered here before then, since a client waiting on a reply would wait forever
+            if ($this->session instanceof Session) {
+                return false;
+            }
+
+            \is_array($decoded)
+                ? $this->error($out, null, -32600, 'This bridge does not accept a batch before joining the fleet.')
+                : $this->error($out, null, -32700, 'That was not a JSON-RPC message.');
+
+            return true;
         }
 
         $method = $decoded['method'] ?? null;
@@ -432,6 +465,12 @@ final class Bridge
 
         if ($method === 'notifications/initialized') {
             $this->initialized = true;
+
+            if ($this->listChangedOwed) {
+                $this->listChangedOwed = false;
+
+                $this->notifyListChanged($out);
+            }
 
             return true;
         }
@@ -489,6 +528,7 @@ final class Bridge
     private function initializeResult(mixed $params): array
     {
         $offered = \is_array($params) && \is_string($params['protocolVersion'] ?? null) ? $params['protocolVersion'] : null;
+        $joined = $this->session instanceof Session;
 
         $capabilities = [
             'tools' => ['listChanged' => true],
@@ -496,7 +536,11 @@ final class Bridge
             'prompts' => new stdClass,
         ];
 
-        $instructions = [self::JOIN_INSTRUCTIONS];
+        // Joining is said only while there is something to join; the fleet's own instructions come
+        // first once there is a session, as they did when the service held the handshake
+        $instructions = $joined
+            ? array_filter([$this->fleetInstructions])
+            : [self::JOIN_INSTRUCTIONS];
 
         // Only where a follower can exist, since a notice announces what it left in the sink
         if ($this->channel && ($this->follower instanceof FleetFollower || $this->join instanceof Closure)) {
@@ -506,9 +550,9 @@ final class Bridge
         }
 
         return [
-            // The harness's own version when it offered one, which is what the service answered
-            // when it held the handshake: `2025-11-25` from both Claude Code and Cursor
-            'protocolVersion' => $offered ?? self::PROTOCOL_VERSION,
+            // The harness's own version when it is one this bridge knows: `2025-11-25` from both
+            // Claude Code and Cursor
+            'protocolVersion' => \in_array($offered, self::PROTOCOL_VERSIONS, true) ? $offered : self::PROTOCOL_VERSION,
             'capabilities' => $capabilities,
             'serverInfo' => ['name' => 'Robot Council', 'version' => Version::current()],
             'instructions' => implode("\n\n", $instructions),
@@ -575,16 +619,25 @@ final class Bridge
             return;
         }
 
+        $role = \is_array($arguments) ? ($arguments['role'] ?? null) : null;
+
+        if ($role !== null && ! \is_string($role)) {
+            $this->toolResult($out, $id, \sprintf('The role must be one of: %s.', implode(', ', self::ROLES)), true);
+
+            return;
+        }
+
         $outcome = $this->attemptJoin([
             'role' => $this->argument($arguments, 'role'),
             'repository' => $this->argument($arguments, 'repository'),
             'work_location' => $this->argument($arguments, 'work_location'),
         ]);
 
-        if ($outcome['joined'] && $this->initialized) {
+        if ($outcome['joined']) {
             // Before the result, the order #126 measured: the harness re-reads the list at once,
-            // and the agent can call a fleet tool in the same turn it joined in
-            $this->write($out, (string) json_encode(['jsonrpc' => '2.0', 'method' => 'notifications/tools/list_changed']));
+            // and the agent can call a fleet tool in the same turn it joined in. A harness that has
+            // not finished initializing is told once it has, rather than not at all.
+            $this->initialized ? $this->notifyListChanged($out) : $this->listChangedOwed = true;
         }
 
         $this->toolResult($out, $id, $outcome['text'], ! $outcome['joined']);
@@ -614,6 +667,10 @@ final class Bridge
             $joined = ($this->join)($arguments);
         } catch (RuntimeException $runtimeException) {
             return ['joined' => false, 'text' => 'Could not join the fleet: '.$runtimeException->getMessage()];
+        } catch (Throwable) {
+            // **Anything else as well**, so the bridge stays up: a credential store failing in a
+            // way nobody wrapped would otherwise end the loop and leave the call unanswered
+            return ['joined' => false, 'text' => 'Could not join the fleet: something failed unexpectedly while joining.'];
         }
 
         $this->session = $joined->session;
@@ -622,7 +679,70 @@ final class Bridge
         // The schedules start at the join, since nothing was due while there was no session
         $this->nextHeartbeat = time() + $this->heartbeatSeconds;
 
-        return ['joined' => true, 'text' => $joined->summary];
+        $this->fleetInstructions = $this->readFleetInstructions($joined->session);
+
+        return ['joined' => true, 'text' => $this->fleetInstructions === null
+            ? $joined->summary
+            : $joined->summary."\n\nThe fleet's instructions:\n".$this->fleetInstructions];
+    }
+
+    /**
+     * The fleet's own server instructions, asked of it once, or null when it gives none.
+     *
+     * **An `initialize` sent for its answer, not for its handshake.** The fleet's MCP endpoint is
+     * stateless, so this changes nothing there; it is the only way to read what the service tells
+     * an agent, now that the harness's own `initialize` is answered here.
+     */
+    private function readFleetInstructions(Session $session): ?string
+    {
+        try {
+            $response = $this->post($session, (string) json_encode([
+                'jsonrpc' => '2.0',
+                'id' => 'robot-council-join',
+                'method' => 'initialize',
+                'params' => [
+                    'protocolVersion' => self::PROTOCOL_VERSION,
+                    'capabilities' => new stdClass,
+                    'clientInfo' => ['name' => 'robot-council bridge', 'version' => Version::current()],
+                ],
+            ]));
+        } catch (Throwable) {
+            return null;
+        }
+
+        $instructions = \is_string($response) ? data_get(json_decode($response, true), 'result.instructions') : null;
+
+        return \is_string($instructions) && trim($instructions) !== '' ? $instructions : null;
+    }
+
+    /**
+     * Tell the harness the tool list changed.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function notifyListChanged($out): void
+    {
+        $this->write($out, $this->encode(['jsonrpc' => '2.0', 'method' => 'notifications/tools/list_changed']));
+    }
+
+    /**
+     * One message as JSON, never an empty line.
+     *
+     * **A value JSON cannot hold becomes an error, not a blank.** An id of `1e999` decodes to
+     * infinity, which `json_encode` refuses; writing its `false` as a string would put a bare
+     * newline on the protocol stream.
+     *
+     * @param  array<string, mixed>  $message  The message.
+     */
+    private function encode(array $message): string
+    {
+        $encoded = json_encode($message, JSON_UNESCAPED_SLASHES);
+
+        if ($encoded !== false) {
+            return $encoded;
+        }
+
+        return (string) json_encode(['jsonrpc' => '2.0', 'id' => null, 'error' => ['code' => -32603, 'message' => 'The reply could not be encoded.']]);
     }
 
     /**
@@ -642,7 +762,7 @@ final class Bridge
      */
     private function result($out, mixed $id, mixed $result): void
     {
-        $this->write($out, (string) json_encode(['jsonrpc' => '2.0', 'id' => $id, 'result' => $result], JSON_UNESCAPED_SLASHES));
+        $this->write($out, $this->encode(['jsonrpc' => '2.0', 'id' => $id, 'result' => $result]));
     }
 
     /**
@@ -652,7 +772,7 @@ final class Bridge
      */
     private function error($out, mixed $id, int $code, string $message): void
     {
-        $this->write($out, (string) json_encode(['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => $code, 'message' => $message]], JSON_UNESCAPED_SLASHES));
+        $this->write($out, $this->encode(['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => $code, 'message' => $message]]));
     }
 
     /**
@@ -706,7 +826,7 @@ final class Bridge
             return;
         }
 
-        fwrite($out, json_encode([
+        $this->write($out, $this->encode([
             'jsonrpc' => '2.0',
             'method' => 'notifications/claude/channel',
             'params' => [
@@ -715,7 +835,7 @@ final class Bridge
                 // Keys must be identifiers and values strings, per the channels reference
                 'meta' => ['new' => (string) $this->unannounced],
             ],
-        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)."\n");
+        ]));
 
         $this->unannounced = 0;
     }
