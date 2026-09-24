@@ -140,7 +140,7 @@ administrator or security manager of the repository, and a classic token needs t
 1. **Check for an existing advisory first.** For an administrator, the list includes drafts:
 
    ```bash
-   gh api "repos/robot-council/core/security-advisories?per_page=100" --jq '.[] | "\(.state)  \(.ghsa_id)  \(.summary)"'
+   gh api 'repos/{owner}/{repo}/security-advisories?per_page=100' --jq '.[] | "\(.state)  \(.ghsa_id)  \(.summary)"'
    ```
 
    Also run the "Check for an existing issue first" searches from
@@ -179,7 +179,7 @@ administrator or security manager of the repository, and a classic token needs t
 3. **Create the draft** and give the user its URL:
 
    ```bash
-   gh api -X POST repos/robot-council/core/security-advisories --input build/security-advisory-<short-slug>.json --jq '.html_url'
+   gh api -X POST 'repos/{owner}/{repo}/security-advisories' --input 'build/security-advisory-<short-slug>.json' --jq '.html_url'
    ```
 
    If the call fails (a permission or scope error, or a validation error), do **not** fall back to
