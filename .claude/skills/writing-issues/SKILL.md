@@ -61,8 +61,8 @@ it). The REST form keeps working when the GraphQL quota behind `gh issue` is spe
 [`github-api-budget`](../../rules/github-api-budget.md)):
 
 ```bash
-gh api -X POST repos/robot-council/core/issues -f title='…' -F body=@body.md -f 'labels[]=<existing-label>'
-gh api -X PATCH repos/robot-council/core/issues/<n> -F body=@body.md
+gh api -X POST 'repos/{owner}/{repo}/issues' -f title='…' -F body=@body.md -f 'labels[]=<existing-label>'
+gh api -X PATCH 'repos/{owner}/{repo}/issues/<n>' -F body=@body.md
 ```
 
 `gh issue create --body-file body.md` and `gh issue edit <n> --body-file body.md` are the
@@ -228,7 +228,7 @@ Apply the labels that match the issue's nature; multiple are normal. **The label
 by hand, so re-list it before labeling rather than trusting the summary below:**
 
 ```bash
-gh api 'repos/robot-council/core/labels?per_page=100' --jq '.[] | "\(.name)\t\(.description)"'
+gh api 'repos/{owner}/{repo}/labels?per_page=100' --jq '.[] | "\(.name)\t\(.description)"'
 ```
 
 Apply only labels that exist, choosing by each label's description. If an issue needs a label
@@ -265,12 +265,12 @@ decision fork, a follow-up cleanup, or an epic. The templates declare the matchi
 issues filed through the web UI. When filing through REST, pass the type's name:
 
 ```bash
-gh api -X POST repos/robot-council/core/issues -f title='…' -F body=@body.md -f type=Feature
+gh api -X POST 'repos/{owner}/{repo}/issues' -f title='…' -F body=@body.md -f type=Feature
 ```
 
 **Read the type back after setting it.** GitHub's REST description says a type set without push
 access is silently dropped, so the call succeeds either way:
-`gh api repos/robot-council/core/issues/<n> --jq '.type.name'`.
+`gh api 'repos/{owner}/{repo}/issues/<n>' --jq '.type.name'`.
 
 ### Execution mode — `afk` / `hitl` (exactly one — except on an `epic`)
 
@@ -307,8 +307,8 @@ That constraint is what makes an epic useful. A container with its own checklist
 **Wiring, and it is not the same thing as a dependency.** A sub-issue says *this is part of that*; a `blocked_by` edge says *this cannot start until that finishes*. Most epics need both, and they are set independently:
 
 ```bash
-id=$(gh api repos/robot-council/core/issues/<child> --jq '.id')     # numeric .id, NOT the issue number
-gh api -X POST repos/robot-council/core/issues/<parent>/sub_issues -F sub_issue_id=$id
+id=$(gh api 'repos/{owner}/{repo}/issues/<child>' --jq '.id')     # numeric .id, NOT the issue number
+gh api -X POST 'repos/{owner}/{repo}/issues/<parent>/sub_issues' -F sub_issue_id=$id
 ```
 
 **Sub-issues work across repositories.** The endpoint keys on the global database id, so a slice living in another repository attaches to an epic here exactly like a local one; listing it only in prose loses it. Read the set back with `GET …/sub_issues`, and see [`github-api-budget`](../../rules/github-api-budget.md) for why these are REST calls.

@@ -8,7 +8,7 @@ The `main` ruleset requires every change to arrive through a pull request, requi
 
 So bringing the branch current, trial-merging, running the gate, and recording the result are done by the ruleset and the checks panel, not by hand. **Do not merge around them**, and do not treat a `ci-passed` from an older head commit as covering the current one.
 
-**Confirm the enforcement is real before relying on it.** `gh api repos/robot-council/core/rulesets --jq '.[] | "\(.name) \(.enforcement)"'` must show the ruleset as `active`. While it is not, nothing above is enforced, and confirming a successful `ci-passed` on the current head of a branch that is current with `main` is your job again.
+**Confirm the enforcement is real before relying on it.** `gh api 'repos/{owner}/{repo}/rulesets' --jq '.[] | "\(.name) \(.enforcement)"'` must show the ruleset as `active`. While it is not, nothing above is enforced, and confirming a successful `ci-passed` on the current head of a branch that is current with `main` is your job again.
 
 ## Why this is a standing order
 
