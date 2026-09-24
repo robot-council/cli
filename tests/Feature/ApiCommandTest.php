@@ -106,7 +106,11 @@ it('prints the response body and nothing else', function (): void {
     // Exactly the body and its newline. A harness may pipe this straight into an agent, so a stray
     // line would be parsed as part of the payload -- and `trim()` over a merged buffer would have
     // hidden one that arrived on either side of it (#205).
-    expect($output->stdout())->toBe('{"tasks":[{"id":1}],"cursor":3}'."\n")
+    //
+    // **`PHP_EOL`, not `"\n"`.** `StreamOutput::doWrite()` appends `PHP_EOL`, which is `\r\n` on
+    // Windows, so a hard-coded `"\n"` passes on macOS and Linux and fails both `windows-latest`
+    // cells. Measured: three of these assertions did exactly that on the first run of #220.
+    expect($output->stdout())->toBe('{"tasks":[{"id":1}],"cursor":3}'.PHP_EOL)
         ->and($output->stderr())->toBeEmpty();
 });
 
@@ -181,8 +185,8 @@ it('exits non-zero on a non-2xx, with the status off stdout', function (): void 
 
     // Byte for byte: the body and its newline, and nothing after it.
     expect($code)->toBe(1)
-        ->and($output->stdout())->toBe('{"errors":{"title":["required"]}}'."\n")
-        ->and($output->stderr())->toBe('robot-council: The service answered HTTP 422.'."\n");
+        ->and($output->stdout())->toBe('{"errors":{"title":["required"]}}'.PHP_EOL)
+        ->and($output->stderr())->toBe('robot-council: The service answered HTTP 422.'.PHP_EOL);
 });
 
 it('never puts either credential in its output', function (): void {
@@ -378,6 +382,6 @@ it('writes the response body and only the response body on a successful call', f
     $code = Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE], $output);
 
     expect($code)->toBe(0)
-        ->and($output->stdout())->toBe('{"tasks":[]}'."\n")
+        ->and($output->stdout())->toBe('{"tasks":[]}'.PHP_EOL)
         ->and($output->stderr())->toBeEmpty();
 });
