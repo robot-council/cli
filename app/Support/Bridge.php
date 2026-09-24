@@ -92,6 +92,16 @@ final class Bridge
     public const string JOIN_TOOL = 'join';
 
     /**
+     * The type of the record left when the fleet ends this bridge's session.
+     *
+     * **The prefix is the whole point.** `PendingCommand` renders an entry with no `type` as
+     * `event`, so an entry that named itself carelessly would be indistinguishable from something
+     * the feed delivered -- which is the confusion #175 exists to end, arriving through a different
+     * door. Nothing under `bridge.` can come from the fleet.
+     */
+    public const string SESSION_ENDED = PendingEvents::LOCAL_PREFIX.'session-ended';
+
+    /**
      * The roles `join` may ask for, as `robot-council/core`'s `Access\\Role` names them.
      *
      * A copy rather than a lookup, because `core` is not a dependency of this package. The service
@@ -194,6 +204,14 @@ final class Bridge
     private bool $renewalDue = false;
 
     /**
+     * Whether the loop stopped because the fleet ended this session.
+     *
+     * Distinct from `$stopping`, which says only that the loop should finish and is set by an
+     * ordinary `SIGTERM` as well. What the command does on the way out differs between the two.
+     */
+    private bool $sessionEnded = false;
+
+    /**
      * Whether a signal has asked the loop to stop.
      */
     private bool $stopping = false;
@@ -236,6 +254,65 @@ final class Bridge
     public function stop(): void
     {
         $this->stopping = true;
+    }
+
+    /**
+     * End the loop because the fleet ended the session, saying so exactly once.
+     *
+     * **The news exists on one reachable path, and this is the only place it can be kept.** A
+     * session cannot read its own `session.gone`: core writes the event, flips the status and
+     * deletes the session tokens inside one transaction, and `EnsureAgentSession` refuses a gone
+     * session outright -- so `GET events` is a 401 from the instant the event exists (#175). What
+     * does answer is the renewal, which takes the installation credential, and its `409` is what
+     * both callers have just caught. Without the record, an agent turn simply ends and the next one
+     * begins against a fleet it is no longer on, with nothing anywhere saying why (#188).
+     *
+     * **Once, and the guard is load-bearing rather than defensive.** `stop()` is read by the outer
+     * loop, and two things run past it: `run()` splits every line already in the buffer before
+     * looking at it again, and it calls `periodic()` afterwards unconditionally. Measured before
+     * this guard existed -- a stream of ONE message left two records and said the paragraph twice,
+     * once from the refused call and once from the feed poll that followed it. The comment at the
+     * forwarding site has claimed this is reported once since #165; it was not.
+     *
+     * **Written under a `bridge.` type so the vocabulary itself says it did not come from the
+     * feed**, per `PendingEvents::LOCAL_PREFIX`.
+     *
+     * **A sink that cannot be written is said and swallowed.** This runs while the bridge is
+     * already ending for a reason that is not going away, and throwing here would replace a clean
+     * stop with an unhandled failure -- trading the message for a worse one.
+     *
+     * @param  SessionHasGone  $gone  What the renewal established.
+     * @param  callable(string): void  $diagnostic  Where to say it, and where a failure to record goes.
+     */
+    private function endBecauseTheSessionIsGone(SessionHasGone $gone, callable $diagnostic): void
+    {
+        if ($this->sessionEnded) {
+            $this->stop();
+
+            return;
+        }
+
+        $this->sessionEnded = true;
+
+        $diagnostic($gone->getMessage());
+
+        // Null only for a bridge nobody joined, which cannot reach here: the join is what produces
+        // a session to be ended and a follower to hold the sink, and it produces them together.
+        $pending = $this->follower?->pending();
+
+        if ($pending instanceof PendingEvents) {
+            try {
+                $pending->add([[
+                    'type' => self::SESSION_ENDED,
+                    'body' => 'The fleet ended this session, so the tasks and locks it held were released and the bridge stopped. The enrollment on this machine is not the problem and needs no repair. Join the fleet again to pick work back up.',
+                    'created_at' => gmdate('c'),
+                ]]);
+            } catch (Throwable $failure) {
+                $diagnostic($failure->getMessage());
+            }
+        }
+
+        $this->stop();
     }
 
     /**
@@ -376,9 +453,7 @@ final class Bridge
             // answers `409`, and there is nothing to retry: this session's claims and locks are
             // already released. Reported once and the loop ends, rather than every subsequent call
             // repeating it.
-            $diagnostic($gone->getMessage());
-
-            $this->stop();
+            $this->endBecauseTheSessionIsGone($gone, $diagnostic);
         } catch (Throwable $throwable) {
             // To stderr, never to stdout: a harness parsing stdout would read a diagnostic as a
             // malformed protocol message rather than as an error
@@ -938,9 +1013,7 @@ final class Bridge
                 // the honest end (#157), and it replaces the message an operator got instead --
                 // `The session could not be renewed (HTTP 409).`, which names a status code rather
                 // than a cause.
-                $diagnostic($gone->getMessage());
-
-                $this->stop();
+                $this->endBecauseTheSessionIsGone($gone, $diagnostic);
 
                 return;
             } catch (Throwable $failure) {

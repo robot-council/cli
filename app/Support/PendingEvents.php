@@ -31,6 +31,18 @@ final class PendingEvents
     public const string DIRECTORY = 'robot-council';
 
     /**
+     * What every entry this side wrote is named with.
+     *
+     * **A sink holds two kinds of thing, and only one of them came from the fleet.** Everything the
+     * follower leaves is a fleet event; a bridge may also leave an account of its own, and a reader
+     * has to be able to tell them apart -- `PendingCommand` renders an untyped entry as `event`, so
+     * anything not marked would read as something the feed delivered. Core defines 25 event types
+     * and none uses this prefix (read from `Models\FleetEventType`), so the whole namespace is free
+     * and the distinction is structural rather than a reserved word.
+     */
+    public const string LOCAL_PREFIX = 'bridge.';
+
+    /**
      * How many events one sink keeps.
      *
      * A bound rather than a policy: an agent that is idle for a weekend while the fleet is busy
@@ -187,18 +199,64 @@ final class PendingEvents
     }
 
     /**
-     * Remove the sink entirely.
+     * Drop what the fleet said, and keep what this side wrote.
      *
      * Called when a session ends, so a harness that restarts does not inherit the previous
      * session's unread events -- they name tasks and locks that session held, which the new one
      * does not.
+     *
+     * **A `bridge.` entry survives it, and that is the difference from removing the file.** The one
+     * such entry today says the fleet ended the previous session, which is not that session's work
+     * to inherit but the next agent's explanation for why it is starting over -- the single thing
+     * in the sink written FOR the reader that comes after. Scoping the clearing here rather than
+     * ordering the caller's shutdown means nothing breaks if that order later changes, which a
+     * comment asking for an order does not give.
      */
-    public function forget(): void
+    public function clearFleetEvents(): void
     {
         $path = $this->path();
 
-        if (is_file($path)) {
-            @unlink($path);
+        if (! is_file($path)) {
+            return;
+        }
+
+        $handle = fopen($path, 'c+');
+
+        if ($handle === false) {
+            return;
+        }
+
+        try {
+            if (! flock($handle, LOCK_EX)) {
+                return;
+            }
+
+            $contents = stream_get_contents($handle);
+
+            $kept = array_values(array_filter(
+                $this->decode($contents === false ? '' : $contents),
+                static fn (array $event): bool => \is_string($event['type'] ?? null)
+                    && str_starts_with($event['type'], self::LOCAL_PREFIX)
+            ));
+
+            // Encoded BEFORE the file is emptied, so a failure here leaves the sink as it was
+            // rather than destroying it. This runs during a shutdown that must not throw.
+            try {
+                $encoded = $kept === [] ? '' : json_encode($kept, JSON_THROW_ON_ERROR);
+            } catch (JsonException) {
+                $encoded = '';
+            }
+
+            rewind($handle);
+
+            if (ftruncate($handle, 0) && $encoded !== '') {
+                fwrite($handle, $encoded);
+            }
+
+            fflush($handle);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
         }
     }
 

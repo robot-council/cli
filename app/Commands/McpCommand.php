@@ -143,7 +143,7 @@ final class McpCommand extends Command
 
             // And the sink goes with it. Unread events name tasks and locks THIS session held, so
             // leaving them for the next one would hand it somebody else's work to react to.
-            $join->pending()?->forget();
+            $join->pending()?->clearFleetEvents();
         }
 
         return self::SUCCESS;

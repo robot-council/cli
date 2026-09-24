@@ -53,7 +53,7 @@ beforeEach(function (): void {
 });
 
 afterEach(function (): void {
-    roleSink()->forget();
+    roleSink()->clearFleetEvents();
 
     array_map(unlink(...), glob($this->stateDirectory.'/robot-council/pending/*') ?: []);
     @rmdir($this->stateDirectory.'/robot-council/pending');
