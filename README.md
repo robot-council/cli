@@ -19,13 +19,47 @@ Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) a
 
 ## Installing
 
+Install it into a directory of its own:
+
 ```bash
-composer global require robot-council/cli
+mkdir -p ~/.local/robot-council
+composer require robot-council/cli --working-dir="$HOME/.local/robot-council"
 ```
 
-Put Composer's global `vendor/bin` on your `PATH` — `composer global config bin-dir --absolute` prints it — and `robot-council` is available everywhere, which is what the harness setups below assume.
+Put `~/.local/robot-council/vendor/bin` on your `PATH`, or symlink `~/.local/robot-council/vendor/bin/robot-council` into a directory already on it, and `robot-council` is available everywhere, which is what the harness setups below assume. To upgrade, run `composer update robot-council/cli --working-dir="$HOME/.local/robot-council"`.
 
-**Verified 2026-09-22** on macOS 26.6.2 with PHP 8.4, into a throwaway `COMPOSER_HOME`: that line resolves `^0.2.0`, exits 0, writes `vendor/bin/robot-council`, and `robot-council list` shows `about`, `api`, `enroll`, `mcp`, `new`, and `pending`.
+**Use `v0.4.2` or later.** Every release before it failed the first command that made an HTTP request -- `enroll`, `mcp`, and `api` all stopped at `Target class [Illuminate\Http\Client\Factory] does not exist.` -- because a package it needs arrived only through a development dependency ([#237](https://github.com/robot-council/cli/issues/237)).
+
+### Why not `composer global require`
+
+A global install shares one dependency graph with every other globally installed tool, and this command line needs Laravel 13: `laravel-zero/framework` v13 requires `illuminate/support` and `illuminate/collections` `^13.24`. Any global tool that caps Laravel below 13 makes the two impossible to install together, and a directory of its own cannot have that problem.
+
+**`statamic/cli` before 3.6.4 is one of them.** 3.6.1 through 3.6.3 require `illuminate/support ^10.0|^11.0|^12.0`; 3.6.4 accepts Laravel 13. Composer never names `statamic/cli` when it refuses. Its first message names whichever package it tried first -- `guzzlehttp/guzzle`, `illuminate/collections` and `illuminate/http` in the runs recorded here, each `fixed to <version> (lock file version) by a partial update` -- and `--with-all-dependencies` changes that only to `… but these were not loaded, likely because it conflicts with another require.` While `statamic/cli` is below 3.6.4, no flag gets past it: `-W` widens the update to the dependencies of the package being required, and `statamic/cli` is not one of them.
+
+To install globally anyway, update `statamic/cli` first, then require this package with `-W`, because the other packages the two share stay at their locked versions otherwise:
+
+```bash
+composer global update statamic/cli
+composer global require -W robot-council/cli
+```
+
+That works until the next global tool with a Laravel ceiling brings the same failure back, which is why the directory above is the recommendation.
+
+**Verified 2026-09-24** on macOS 26.6.2 with PHP 8.4, each in a scratch `COMPOSER_HOME`. The first set is a copy of a real developer's global `composer.json` and `composer.lock` -- `statamic/cli ^3.6` locked at 3.6.1, and `laravel/cloud-cli ^0.6.1` -- installed from its lock:
+
+| step, in order | result |
+| --- | --- |
+| `composer global require robot-council/cli` | fails, exit 2 |
+| the same with `-W --dry-run` | fails, exit 2, `conflicts with another require` |
+| `composer global update statamic/cli` | moves it from 3.6.1 to 3.6.4 |
+| `composer global require robot-council/cli` | fails, exit 2, other packages `fixed … by a partial update` |
+| `composer global require -W robot-council/cli` | installs `v0.4.2`, exit 0 |
+
+A fresh global set resolved today -- `statamic/cli` 3.6.4 and `laravel/cloud-cli` 0.6.1 -- installs with a plain `composer global require`, exit 0.
+
+The install in a directory of its own was verified beside a global set holding `statamic/cli` 3.6.1, where a global install fails with exit 2: the commands above resolved `^0.4.2` and exited 0, `robot-council --version` printed `robot-council v0.4.2`, and `robot-council enroll -v` against an unreachable host failed at the network with `cURL error 6` rather than in the container. That last step is the one that shows the HTTP client resolved, which `list` alone does not.
+
+**The earlier record was narrower than it read.** Of `composer global require robot-council/cli`, this section said: *"**Verified 2026-09-22** on macOS 26.6.2 with PHP 8.4, into a throwaway `COMPOSER_HOME`: that line resolves `^0.2.0`, exits 0, writes `vendor/bin/robot-council`, and `robot-council list` shows `about`, `api`, `enroll`, `mcp`, `new`, and `pending`."* That was true. But an empty `COMPOSER_HOME` is the one place a conflict with another global tool cannot arise, and `list` never resolves the HTTP client, so the same run passed on a release that could not make a request. It showed the command installs where nothing else is installed, not that it works on a developer's machine ([#236](https://github.com/robot-council/cli/issues/236)).
 
 ## Creating a fleet service
 
