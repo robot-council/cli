@@ -101,6 +101,14 @@ final class Bridge
     public const array ROLES = ['build', 'ci', 'coordinator'];
 
     /**
+     * The most pages of `tools/list` the bridge follows before it gives up and relays the first.
+     *
+     * The fleet serves 18 tools at 15 a page, so two pages today; the bound only matters to a
+     * service that keeps answering with a new cursor.
+     */
+    public const int MAX_TOOL_PAGES = 10;
+
+    /**
      * The protocol version answered to a harness that offered none this bridge knows.
      */
     public const string PROTOCOL_VERSION = '2025-11-25';
@@ -348,45 +356,9 @@ final class Bridge
         }
 
         try {
-            $response = $this->post($session, $message);
+            $response = $this->exchange($session, $message);
 
-            // One renewal and one retry on a 401, never a loop: a second consecutive refusal is a
-            // state no retry resolves, and looping would hide it.
-            //
-            // **What reaching the throw below PROVES is the opposite of what it used to claim.**
-            // `Session::renew()` returns normally only on a 2xx -- `409` throws `SessionHasGone`,
-            // caught separately below, and every other status throws before the retry runs. And
-            // core puts `sessions/{id}/renew` inside the `EnsureInstallation` group, which refuses
-            // unless `revoked_at === null && expires_at->isFuture()`. So a renewal that got this
-            // far is a proof the installation is neither revoked nor expired. Until #185 this line
-            // named the enrollment as the likely cause, sending a developer to inspect it at the
-            // one moment the service had just demonstrated it was fine. The phrase is deliberately
-            // not repeated here, so a search for it finds the thing rather than the note about it.
-            //
-            // What is left is a service minting a token it then refuses: replication lag between
-            // the endpoint that issues and the one that validates, an intermediary rewriting the
-            // `Authorization` header, or a session-level refusal the renewal cannot see.
-            // Re-enrolling repairs none of them, so the message states what was observed and stops.
-            //
-            // **The bridge reports and carries on rather than stopping, which #185 decided.** The
-            // `SessionHasGone` path below stops because `gone` is final and nothing lifts it. This
-            // state is not final: replication lag is the first candidate on that list and clears on
-            // its own, so stopping would kill a bridge that was about to work again. Continuing
-            // costs a repeated diagnostic; stopping costs the agent its fleet, and only one of
-            // those is recoverable without a person.
-            if ($response === 401) {
-                $session->renew();
-
-                $response = $this->post($session, $message);
-
-                if ($response === 401) {
-                    throw new RuntimeException('The service issued a new token for this session and refused it on the next call, so this message did not reach the fleet.');
-                }
-            }
-
-            if (\is_string($response)) {
-                $this->reply($response, $out, $diagnostic);
-            }
+            $this->reply($this->everyTool($session, $message, $response), $out, $diagnostic);
         } catch (SessionHasGone $gone) {
             // **The busy bridge's path to the same news.** A tool call is refused, the renewal above
             // answers `409`, and there is nothing to retry: this session's claims and locks are
@@ -400,6 +372,164 @@ final class Bridge
             // malformed protocol message rather than as an error
             $diagnostic($throwable->getMessage());
         }
+    }
+
+    /**
+     * Send one message to the fleet and return its answer, renewing once on a refusal.
+     *
+     * One renewal and one retry on a 401, never a loop: a second consecutive refusal is a state no
+     * retry resolves, and looping would hide it.
+     *
+     * **What reaching the throw PROVES is the opposite of what it used to claim.**
+     * `Session::renew()` returns normally only on a 2xx -- `409` throws `SessionHasGone`, which
+     * `forward()` catches separately, and every other status throws before the retry runs. And core
+     * puts `sessions/{id}/renew` inside the `EnsureInstallation` group, which refuses unless
+     * `revoked_at === null && expires_at->isFuture()`. So a renewal that got this far is a proof
+     * the installation is neither revoked nor expired. Until #185 this line named the enrollment as
+     * the likely cause, sending a developer to inspect it at the one moment the service had just
+     * demonstrated it was fine. The phrase is deliberately not repeated here, so a search for it
+     * finds the thing rather than the note about it.
+     *
+     * What is left is a service minting a token it then refuses: replication lag between the
+     * endpoint that issues and the one that validates, an intermediary rewriting the
+     * `Authorization` header, or a session-level refusal the renewal cannot see. Re-enrolling
+     * repairs none of them, so the message states what was observed and stops.
+     *
+     * **The bridge reports and carries on rather than stopping, which #185 decided.** The
+     * `SessionHasGone` path stops because `gone` is final and nothing lifts it. This state is not
+     * final: replication lag is the first candidate on that list and clears on its own, so stopping
+     * would kill a bridge that was about to work again. Continuing costs a repeated diagnostic;
+     * stopping costs the agent its fleet, and only one of those is recoverable without a person.
+     *
+     * @throws RuntimeException When the service issued a token and then refused it.
+     */
+    private function exchange(Session $session, string $message): string
+    {
+        $response = $this->post($session, $message);
+
+        if ($response === 401) {
+            $session->renew();
+
+            $response = $this->post($session, $message);
+
+            if ($response === 401) {
+                throw new RuntimeException('The service issued a new token for this session and refused it on the next call, so this message did not reach the fleet.');
+            }
+        }
+
+        return (string) $response;
+    }
+
+    /**
+     * The whole tool list in one reply, when the harness asked for the first page and the fleet
+     * answered with more to come.
+     *
+     * **Because Cursor never asks for a second page (cli#209).** The fleet pages `tools/list` at
+     * 15 and returns a `nextCursor`; Cursor 3.17.19 did not follow it, so its agents never saw
+     * `events_narrate`, `directive_post` or `presence_heartbeat` -- a coordinator in Cursor could
+     * not post a directive. The bridge follows the cursor itself and answers once, with no cursor
+     * left, which a harness that does page reads as a list that happens to be complete.
+     *
+     * **A request that names a cursor is relayed as asked**, so a harness paging for itself still
+     * gets the page it asked for.
+     *
+     * **Decoded as objects, never as arrays.** Each tool's `inputSchema` holds empty objects such as
+     * `"properties":{}`, and an associative decode turns those into `[]` -- a different value, in the
+     * schema a harness validates calls against.
+     *
+     * **Anything unexpected returns the first page untouched**: a page that does not parse, a cursor
+     * that repeats, or more pages than `MAX_TOOL_PAGES`. A short list the harness can still use is
+     * better than no answer.
+     *
+     * @param  string  $message  The harness's request.
+     * @param  string  $first  The fleet's answer to it.
+     * @return string The reply to write.
+     */
+    private function everyTool(Session $session, string $message, string $first): string
+    {
+        $request = json_decode($message);
+
+        if (! $request instanceof stdClass || ($request->method ?? null) !== 'tools/list') {
+            return $first;
+        }
+
+        $params = $request->params ?? null;
+
+        if ($params instanceof stdClass && isset($params->cursor)) {
+            return $first;
+        }
+
+        $answer = json_decode(trim($first));
+        $page = $this->toolPage($answer);
+
+        if (! $answer instanceof stdClass || $page === null || $page['next'] === null) {
+            return $first;
+        }
+
+        $tools = $page['tools'];
+        $cursor = $page['next'];
+        $seen = [$cursor => true];
+
+        for ($asked = 1; $cursor !== null; $asked++) {
+            if ($asked >= self::MAX_TOOL_PAGES) {
+                return $first;
+            }
+
+            $nextParams = $params instanceof stdClass ? clone $params : new stdClass;
+            $nextParams->cursor = $cursor;
+
+            $next = clone $request;
+            $next->params = $nextParams;
+
+            $following = $this->toolPage(json_decode(trim($this->exchange($session, (string) json_encode($next, JSON_UNESCAPED_SLASHES)))));
+
+            if ($following === null) {
+                return $first;
+            }
+
+            $tools = [...$tools, ...$following['tools']];
+            $cursor = $following['next'];
+
+            if ($cursor !== null && isset($seen[$cursor])) {
+                return $first;
+            }
+
+            if ($cursor !== null) {
+                $seen[$cursor] = true;
+            }
+        }
+
+        $result = $answer->result;
+
+        if (! $result instanceof stdClass) {
+            return $first;
+        }
+
+        $result->tools = $tools;
+        unset($result->nextCursor);
+
+        $encoded = json_encode($answer, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+
+        return $encoded === false ? $first : $encoded;
+    }
+
+    /**
+     * One decoded `tools/list` answer's tools and next cursor, or null when it is not one.
+     *
+     * @param  mixed  $decoded  The answer, decoded as objects.
+     * @return array{tools: list<mixed>, next: string|null}|null
+     */
+    private function toolPage(mixed $decoded): ?array
+    {
+        $result = $decoded instanceof stdClass ? ($decoded->result ?? null) : null;
+
+        if (! $result instanceof stdClass || ! \is_array($result->tools ?? null)) {
+            return null;
+        }
+
+        $next = $result->nextCursor ?? null;
+
+        return ['tools' => array_values($result->tools), 'next' => \is_string($next) ? $next : null];
     }
 
     /**
