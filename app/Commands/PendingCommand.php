@@ -6,10 +6,10 @@ namespace App\Commands;
 
 use App\Support\MachineIdentity;
 use App\Support\PendingEvents;
+use App\Support\Stderr;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use LaravelZero\Framework\Commands\Command;
-use Symfony\Component\Console\Output\ConsoleOutputInterface;
 
 /**
  * Prints the fleet events waiting for this harness, and clears them.
@@ -152,16 +152,6 @@ final class PendingCommand extends Command
      */
     private function diagnostic(string $message): void
     {
-        $output = $this->output->getOutput();
-
-        if ($output instanceof ConsoleOutputInterface) {
-            $output->getErrorOutput()->writeln('robot-council: '.$message);
-
-            return;
-        }
-
-        // The same last resort `mcp` uses: reached under a test harness whose output is a single
-        // buffer rather than a console with two streams, and it still avoids stdout.
-        file_put_contents('php://stderr', 'robot-council: '.$message."\n");
+        Stderr::say($this->output->getOutput(), $message);
     }
 }
