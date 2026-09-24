@@ -16,7 +16,7 @@ namespace App\Support;
  * **The answer is about right now, not about the fleet's configuration.** `robot-council/core#222`
  * moved `coordinator:direct` onto a session's role and `robot-council/core#223` moved the field to
  * match, so it says whether a coordinator is *running* rather than whether one could ever exist. It
- * therefore flips when the fleet's one coordinator restarts, and this is read once at startup --
+ * therefore flips when the fleet's one coordinator restarts, and this is read once, at the join (cli#127) --
  * which is why the sentence says so rather than implying a standing property.
  *
  * **It is a separate class so the sentence can be tested.** The bridge that emits it runs an MCP
@@ -62,6 +62,6 @@ final class FleetDelivery
 
         return 'No session on this fleet is running in the `coordinator` role, so no directive can be posted. '
             .'An administrator can put a running session in that role from the fleet administration page. '
-            .'Read once, at startup.';
+            .'Read once, when this session joined.';
     }
 }

@@ -158,8 +158,8 @@ it('says what to do only when the fleet definitely cannot deliver', function ():
         ->and($warning)->not->toContain('grant-ability')
         ->and($warning)->toContain('administration page')
         // Says the reading is a snapshot, because the answer flips when the one coordinator
-        // restarts and this line is emitted once.
-        ->and($warning)->toContain('at startup')
+        // restarts and this line is emitted once -- at the join since cli#127, not at launch.
+        ->and($warning)->toContain('when this session joined')
         // **And claims only what is gated.** An earlier version ended "a stop hook here will never
         // find anything waiting", which `FleetFollower` refutes: it delivers `lock.taken_over` to
         // the session a lease was taken from, and an ordinary takeover needs only `locks:acquire`.

@@ -5,15 +5,9 @@ declare(strict_types=1);
 namespace App\Commands;
 
 use App\Support\Bridge;
-use App\Support\Checkout;
-use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
-use App\Support\Credentials\InstallationChoice;
-use App\Support\FleetDelivery;
-use App\Support\FleetFollower;
+use App\Support\FleetJoin;
 use App\Support\MachineIdentity;
-use App\Support\PendingEvents;
-use App\Support\Session;
 use App\Support\StdinReader;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
@@ -40,11 +34,19 @@ use Throwable;
     {--project= : The repository or workspace this session belongs to}
     {--repository= : The GitHub repository this session works in, as owner/name; read from the checkout when omitted}
     {--work-location= : Which working copy of that repository this is; read from the checkout when omitted}
-    {--harness= : Which enrolled harness this process is, when detection cannot tell}')]
+    {--harness= : Which enrolled harness this process is, when detection cannot tell}
+    {--auto-join : Join the fleet at launch, for a checkout that should join every time it starts}
+    {--role= : With --auto-join, the role to ask for: build, ci or coordinator}')]
 final class McpCommand extends Command
 {
     /**
      * Run the bridge until stdin closes or a signal arrives.
+     *
+     * **No session until somebody joins (cli#127).** The bridge comes up, answers the handshake,
+     * and offers one tool; the credential, the session, the fleet-cannot-deliver diagnostic and the
+     * sink all wait for `join`, or for `--auto-join`. A machine with no credential therefore comes
+     * up too, and `join` says what is missing in a result the agent can relay -- where it used to
+     * die at launch with a line on stderr most harnesses bury.
      *
      * @param  Factory  $http  The HTTP client.
      * @param  Credentials  $credentials  Where the installation credential lives.
@@ -60,90 +62,39 @@ final class McpCommand extends Command
             return self::FAILURE;
         }
 
-        // One credential per harness per fleet, so this process has to say which harness it is.
-        // It refuses rather than guessing, including when only one is stored -- #21 weighed that
-        // and chose one rule with nothing inferred.
-        try {
-            $installation = new InstallationChoice($credentials)->for($service, $this->stringOption('harness'));
-        } catch (RuntimeException $runtimeException) {
-            $this->diagnostic($runtimeException->getMessage());
-
-            return self::FAILURE;
-        }
-
-        $session = new Session($http, $service, $installation);
-
-        // Read from the checkout this process is already running in, so 37 hand-maintained config
-        // entries stop needing to be maintained -- and stop drifting, which matters more. An
-        // explicit flag wins per field, and neither may keep the session from starting.
-        [$repository, $workLocation] = Checkout::resolve(
-            $this->stringOption('repository'),
-            $this->stringOption('work-location'),
-        );
-
-        $this->sayWhatWasRefused('repository', $this->stringOption('repository'), $repository);
-        $this->sayWhatWasRefused('work-location', $this->stringOption('work-location'), $workLocation);
-
-        try {
-            $session->start($this->stringOption('project'), $repository, $workLocation);
-        } catch (Throwable $throwable) {
-            $this->diagnostic($throwable instanceof RuntimeException
-                ? $throwable->getMessage()
-                : 'Could not start a session.');
-
-            return self::FAILURE;
-        }
-
-        // The sink the follower writes and `robot-council pending` drains, keyed by the same three
-        // things that identify this bridge, so a stop hook beside it finds the same file (cli#60).
-        // The same cascade `InstallationChoice` just used to pick the credential, so the sink is
-        // keyed by the harness this process actually is rather than by a second opinion.
+        // The same cascade `InstallationChoice` uses to pick the credential, so the sink is keyed by
+        // the harness this process actually is rather than by a second opinion.
         $harness = MachineIdentity::resolveHarness($this->stringOption('harness')) ?? 'unknown-harness';
 
-        $pending = new PendingEvents($service, $harness, $this->stringOption('project'));
+        $join = new FleetJoin(
+            $http,
+            $credentials,
+            $service,
+            $harness,
+            $this->stringOption('harness'),
+            $this->stringOption('project'),
+            $this->stringOption('repository'),
+            $this->stringOption('work-location'),
+            $this->diagnostic(...),
+        );
 
         $bridge = new Bridge(
-            $session,
+            null,
             $service,
             Bridge::HEARTBEAT_SECONDS,
-            new FleetFollower($session, $service, $pending),
 
             // **Claude Code only**, the one harness that reads `claude/channel`. A session started
             // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
             channel: $harness === 'claude',
+            join: $join(...),
         );
 
-        $this->listenForSignals($bridge);
-
-        // **Said once, at startup, and only when the answer is a definite no.** A fleet can be wired
-        // correctly and still deliver nothing: `FleetFollower::ALWAYS` is `['directive']`, and
-        // posting one needs the `coordinator` role, which an administrator gives a session and which
-        // no session starts with. So unless somebody is running as the coordinator, no directive can
-        // be posted -- and a hook that finds an empty sink cannot tell that from a fleet with
-        // nothing to say (cli#113).
-        //
-        // **A snapshot, not a standing property, since `robot-council/core#223`.** The field answers
-        // whether a coordinator is running *now* rather than whether one could ever exist, so it
-        // flips when the fleet's one coordinator restarts. Said once anyway, deliberately: the
-        // decision is recorded on that ticket, and a stale `false` is one line on stderr while the
-        // case `#113` exists for -- no coordinator running at startup -- still reports correctly.
-        //
-        // **Not a warning about THIS session's role.** A bridge that only ever receives runs as
-        // `build` and is correctly configured, which is the common case; warning on that would train
-        // people to ignore the line. `null` -- an older service, or a request that did not land --
-        // says nothing at all.
-        //
-        // **Placed after the signal handlers, and that position is deliberate.** It is a network
-        // call, bounded by the client's default 10s connect and 30s read timeouts, and `end()` is
-        // only reachable from the `finally` below. Made before `listenForSignals()`, a `SIGTERM`
-        // arriving during a stalled request would take the default action and leave a started
-        // session alive on the fleet until the presence sweep -- against this class's own rule
-        // that ending is not best-effort.
-        $delivery = FleetDelivery::warning($session->fleetCanDirect());
-
-        if ($delivery !== null) {
-            $this->diagnostic($delivery);
+        if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
+            // A role is asked for at the join, and without `--auto-join` this process does not join
+            $this->diagnostic('--role applies only with --auto-join; pass the role to the `join` tool instead.');
         }
+
+        $this->listenForSignals($bridge);
 
         // **The bridge reads a socket, not stdin.** A child does the blocking read, because
         // `stream_select()` does not honor its timeout on a Windows pipe and the loop would then
@@ -154,12 +105,20 @@ final class McpCommand extends Command
         } catch (RuntimeException $runtimeException) {
             $this->diagnostic($runtimeException->getMessage());
 
-            $session->end();
-
             return self::FAILURE;
         }
 
         try {
+            // After the signal handlers, so a `SIGTERM` arriving during the join's network calls
+            // is caught and the session it started is still ended below
+            if ($this->option('auto-join') === true) {
+                $bridge->joinNow([
+                    'role' => $this->stringOption('role'),
+                    'repository' => null,
+                    'work_location' => null,
+                ], $this->diagnostic(...));
+            }
+
             $bridge->run($reader->stream(), STDOUT, $this->diagnostic(...));
         } catch (Throwable $throwable) {
             // **Nothing may escape to the renderer.** `Illuminate\Console\Application` sets
@@ -178,12 +137,13 @@ final class McpCommand extends Command
             $reader->stop();
 
             // The session must not outlive the harness. Ending it releases its tasks and locks now
-            // rather than leaving them held until the presence sweep notices.
-            $session->end();
+            // rather than leaving them held until the presence sweep notices. A bridge that never
+            // joined has nothing to end, and leaves nothing on the fleet.
+            $bridge->session()?->end();
 
             // And the sink goes with it. Unread events name tasks and locks THIS session held, so
             // leaving them for the next one would hand it somebody else's work to react to.
-            $pending->forget();
+            $join->pending()?->forget();
         }
 
         return self::SUCCESS;
@@ -214,29 +174,6 @@ final class McpCommand extends Command
                 $bridge->stop();
             });
         }
-    }
-
-    /**
-     * Say when a flag was given and could not be used.
-     *
-     * @param  string  $flag  The flag's name, without its dashes.
-     * @param  string|null  $given  What the operator wrote, when they wrote anything.
-     * @param  string|null  $resolved  What survived the fleet's rules.
-     */
-    private function sayWhatWasRefused(string $flag, ?string $given, ?string $resolved): void
-    {
-        if ($given === null || $resolved !== null) {
-            return;
-        }
-
-        // **Silence would be the worst outcome here.** Somebody wrote this value out, and dropping
-        // it without a word gives them a session that is missing it and no reason to look -- which
-        // is the label that stays wrong for months because nothing ever contradicts it.
-        $this->diagnostic(sprintf(
-            '--%s=%s is not a shape the fleet accepts, so it was left unset.',
-            $flag,
-            $given
-        ));
     }
 
     /**

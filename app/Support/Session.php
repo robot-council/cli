@@ -379,6 +379,46 @@ final class Session
     }
 
     /**
+     * Ask for a role, which an administrator decides.
+     *
+     * **A request, never a grant.** `POST agent/role` records what this session asked to be and
+     * answers `202` while an administrator has yet to decide, or `200` when there was nothing to
+     * decide -- the session already holds that role. Nothing about the token changes here, so a
+     * session that asked to coordinate goes on holding `build`'s abilities until it is approved and
+     * renewed (cli#127).
+     *
+     * **A separate call from `start()`, because that is where `core` put it.** Session start takes
+     * no role, and a field it does not validate is dropped rather than refused -- so sending one there
+     * would start a `build` session and report nothing wrong.
+     *
+     * @param  string  $role  The role wanted, as the service names it.
+     * @return array{pending: bool, role: string|null} Whether an administrator now has to decide,
+     *                                                 and the role this session holds meanwhile.
+     *
+     * @throws RuntimeException When the session has not started, or the service refuses the request.
+     */
+    public function requestRole(string $role): array
+    {
+        $response = $this->request()
+            ->asJson()
+            ->post($this->service.'/robot-council/api/agent/role', ['role' => $role]);
+
+        if (! $response->successful()) {
+            $body = $response->json();
+            $reason = \is_array($body) && \is_string($body['message'] ?? null) ? ' '.$body['message'] : '';
+
+            throw new RuntimeException(\sprintf('The service refused the role request (HTTP %d).%s', $response->status(), $reason));
+        }
+
+        $body = $response->json();
+
+        return [
+            'pending' => \is_array($body) && ($body['pending'] ?? null) === true,
+            'role' => \is_array($body) && \is_string($body['role'] ?? null) ? $body['role'] : null,
+        ];
+    }
+
+    /**
      * The abilities named in a session or renewal response.
      *
      * **A service that does not send the field leaves this empty**, and every caller reads empty as
