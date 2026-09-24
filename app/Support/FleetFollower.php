@@ -165,12 +165,26 @@ final class FleetFollower
         // A parameter for the same reason `$pollSeconds` is one: the schedule is read from `time()`
         // inside a loop a test cannot advance, so nothing could show what a SECOND consecutive
         // refusal does without sitting through `BACKOFF_SECONDS`. Nothing in the application passes
-        // anything but the default.
+        // anything but the default, and the doubling above is deliberately unfloored so that a zero
+        // passed here stays zero -- a floor would make the second failure wait, which is the exact
+        // thing the parameter exists to avoid.
         private readonly int $backoffSeconds = self::BACKOFF_SECONDS
     ) {
         $this->backoff = $backoffSeconds;
 
         $this->cursor = $session->feedCursor();
+    }
+
+    /**
+     * Whether the last feed read was refused, which is a question rather than an answer.
+     *
+     * The caller turns it into a renewal, and the renewal distinguishes the reasons: a new token
+     * means the old one was merely revoked or expired, and a `409` means the fleet has ended this
+     * session. Symmetrical with `Session::heartbeat()` answering false (#165, #169).
+     */
+    public function sessionWasRefused(): bool
+    {
+        return $this->refused;
     }
 
     /**
@@ -190,18 +204,6 @@ final class FleetFollower
      * @param  callable(string):void  $diagnostic  Where anything that is not a protocol message goes.
      * @return bool Whether this session's role changed and its token should be renewed now.
      */
-    /**
-     * Whether the last feed read was refused, which is a question rather than an answer.
-     *
-     * The caller turns it into a renewal, and the renewal distinguishes the reasons: a new token
-     * means the old one was merely revoked or expired, and a `409` means the fleet has ended this
-     * session. Symmetrical with `Session::heartbeat()` answering false (#165, #169).
-     */
-    public function sessionWasRefused(): bool
-    {
-        return $this->refused;
-    }
-
     public function tick(callable $diagnostic): bool
     {
         // **Cleared per tick, not per read, and the difference is a renewal storm.** A refused read
@@ -221,7 +223,7 @@ final class FleetFollower
         } catch (Throwable $throwable) {
             $this->nextPoll = time() + $this->backoff;
 
-            $this->backoff = min(max($this->backoff, 1) * 2, self::MAX_BACKOFF_SECONDS);
+            $this->backoff = min($this->backoff * 2, self::MAX_BACKOFF_SECONDS);
 
             // **A 401 is not a feed problem, so it is recorded rather than described.** It says this
             // session's token is no longer honored, which the feed cannot explain and the renewal
@@ -234,11 +236,19 @@ final class FleetFollower
             if (! $this->refused) {
                 $diagnostic('Could not read the fleet feed: '.$throwable->getMessage());
             } elseif ($this->refusals > 1) {
-                // A renewal has been asked for and the feed is still refusing, so the renewal is
-                // not going to explain this one. Said once per read rather than suppressed, because
-                // the alternative is a bridge that stops reading the fleet and never mentions it.
+                // **Only what this class saw.** An earlier wording said "renewing has not fixed
+                // it" and "Tool calls are unaffected", and both were claims it had no standing to
+                // make. `FleetFollower` neither performs nor observes a renewal -- the caller may
+                // not have attempted one, since `Bridge` gates it behind `nextRenewAttempt` -- and
+                // tool calls are **not** unaffected: `robot-council/core` registers its MCP
+                // endpoint behind the same `EnsureAgentSession` guard as `GET events`, taking the
+                // same session token, so any 401 about that token refuses tool calls too. Telling
+                // an operator their tool calls were fine while every one of them failed is the
+                // defect this whole ticket exists to remove, reintroduced by its own fix.
+                //
+                // The renewal's own failure line, which `Bridge` already prints, supplies the rest.
                 $diagnostic(sprintf(
-                    'The fleet feed has refused this session %d times in a row, and renewing has not fixed it. Tool calls are unaffected.',
+                    'The fleet feed has refused this session %d times in a row.',
                     $this->refusals
                 ));
             }

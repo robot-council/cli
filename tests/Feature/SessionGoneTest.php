@@ -154,6 +154,16 @@ function goneRenewals(): int
 }
 
 /**
+ * How many feed reads were sent.
+ */
+function goneFeedReads(): int
+{
+    return Http::recorded(
+        fn (Request $request): bool => str_contains($request->url(), '/api/events')
+    )->count();
+}
+
+/**
  * How many MCP messages were forwarded.
  */
 function goneForwarded(): int
@@ -438,9 +448,14 @@ it('stops asking for a renewal once the feed is accepted again', function (): vo
     ]);
 
     $session = goneSession();
+
+    // **A zero backoff, or the later reads never happen.** The failure path schedules the next poll
+    // from `$backoff`, not from `$pollSeconds`, so with the default the runs below return at the
+    // guard and the sequence's 200 is never consumed -- the test would then pass unchanged if every
+    // read were refused, which is the opposite of what it claims.
     $bridge = new Bridge(
         $session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS,
-        new FleetFollower($session, GONE_SERVICE, goneSink(), 0), 0
+        new FleetFollower($session, GONE_SERVICE, goneSink(), 0, 0), 0
     );
 
     $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
@@ -450,8 +465,11 @@ it('stops asking for a renewal once the feed is accepted again', function (): vo
     $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
     $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
 
-    // Still one: the reads after the first were accepted, so nothing asked again.
-    expect(goneRenewals())->toBe(1);
+    // The reads actually happened, so "accepted again" is a state this test reached rather than a
+    // fixture it merely declared.
+    expect(goneFeedReads())->toBeGreaterThan(1)
+        // Still one renewal: the later reads were accepted, so nothing asked again.
+        ->and(goneRenewals())->toBe(1);
 });
 
 it('says so when the feed keeps refusing and the renewal keeps succeeding', function (): void {
@@ -480,5 +498,50 @@ it('says so when the feed keeps refusing and the renewal keeps succeeding', func
     expect(implode('
 ', $said))->toContain('refused this session')
         ->and(implode('
-', $said))->toContain('renewing has not fixed it');
+', $said))->toContain('2 times in a row')
+        // **It claims nothing it cannot see.** `FleetFollower` neither performs nor observes a
+        // renewal, and `robot-council/core` puts its MCP endpoint behind the same guard as the
+        // feed -- so a message promising that tool calls are fine would be wrong in the ordinary
+        // case, which is the defect this ticket exists to remove.
+        ->and(implode('
+', $said))->not->toContain('renewing has not fixed it')
+        ->and(implode('
+', $said))->not->toContain('Tool calls are unaffected');
+});
+
+it('starts the refusal count over once a read succeeds', function (): void {
+    // Refused, refused, accepted, refused. The count must restart, or a bridge that recovered and
+    // then hit one more refusal would announce it as though the run had never stopped -- and the
+    // reset line was covered by nothing.
+    $feed = Http::sequence()
+        ->push(['events' => [], 'cursor' => 1], 401)
+        ->push(['events' => [], 'cursor' => 1], 401)
+        ->push(['events' => [], 'cursor' => 2], 200)
+        ->push(['events' => [], 'cursor' => 2], 401);
+
+    $feed->whenEmpty(Http::response(['events' => [], 'cursor' => 3], 200));
+
+    Http::fake([
+        '*/api/sessions' => Http::response([
+            'session_id' => GONE_SESSION, 'token' => 'rcouncil_2|FIRST',
+            'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => [],
+        ], 201),
+        '*/api/events*' => $feed,
+    ]);
+
+    $said = [];
+    $record = function (string $message) use (&$said): void {
+        $said[] = $message;
+    };
+
+    $follower = new FleetFollower(goneSession(), GONE_SERVICE, goneSink(), 0, 0);
+
+    $follower->tick($record);   // refused, quiet
+    $follower->tick($record);   // refused again, says "2 times"
+    $follower->tick($record);   // accepted, resets
+    $follower->tick($record);   // refused once more, quiet again
+
+    expect(goneFeedReads())->toBe(4)
+        ->and($said)->toHaveCount(1)
+        ->and($said[0])->toContain('2 times in a row');
 });
