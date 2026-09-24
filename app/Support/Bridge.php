@@ -298,6 +298,23 @@ final class Bridge
             $this->roleChanged = true;
         }
 
+        // **`gone` is final, so there is nothing left for this loop to do correctly.** The service
+        // has refused this session's tokens, released its claims and dropped its locks, so every
+        // request from here fails and every tool call forwarded fails with it. The bridge does not
+        // get quieter about it either: each message takes the 401 path, which renews, retries, and
+        // then reports that the **installation** may be revoked -- naming the one thing that is
+        // fine. Stopping and saying what actually happened is the honest end (#157).
+        //
+        // Returning rather than falling through, because renewing a session the fleet has discarded
+        // is a round trip that can only be refused.
+        if ($this->follower?->sessionHasGone() === true) {
+            $diagnostic('The fleet has marked this session gone, so its claims and locks have been released and its token will be refused. Stopping. Nothing is wrong with the installation, and a new session needs a new bridge.');
+
+            $this->stop();
+
+            return;
+        }
+
         if (($this->roleChanged || $this->session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
             try {
                 $this->session->renew();
