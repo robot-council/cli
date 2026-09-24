@@ -4,6 +4,49 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.0 — Joining on Purpose (2026-09-24)
+
+The bridge no longer joins the fleet on launch: an agent joins when its operator asks it to, and opening an editor stops putting a session on the fleet.
+
+**Breaking change** — review each harness's MCP configuration. A bridge started without `--auto-join` comes up offering one tool, `join`, and puts nothing on the fleet until an agent calls it. And read `robot-council api`'s errors from stderr, where stdout now carries only the response body.
+
+### Breaking changes
+- Join the fleet only when asked, instead of on harness launch [#206](https://github.com/robot-council/cli/pull/206). `robot-council mcp` starts with no session and no credential read, answers the handshake itself, and offers only `join`; `--auto-join` restores the old behavior for a checkout that should join at launch. A machine with no credential now comes up and says what is missing, where it used to exit.
+- Send every `robot-council api` diagnostic to stderr, so stdout is only the response body [#220](https://github.com/robot-council/cli/pull/220). All six failure paths wrote to stdout, and on a non-2xx the status line landed immediately after the body. A caller that parsed stdout for the error text reads stderr now.
+
+### What's new
+- Tell an agent why its session stopped [#219](https://github.com/robot-council/cli/pull/219)
+- Wake an idle Claude Code session when fleet events arrive for it [#197](https://github.com/robot-council/cli/pull/197)
+- End the bridge when the fleet marks its session gone [#176](https://github.com/robot-council/cli/pull/176)
+
+### What's fixed
+- Stop claiming a session hears its own `session.gone` [#229](https://github.com/robot-council/cli/pull/229)
+- Say a role request was denied, the word the administration page uses [#225](https://github.com/robot-council/cli/pull/225)
+- Stop blaming the enrollment for a refusal the renewal before it disproved [#217](https://github.com/robot-council/cli/pull/217)
+- Store the credential when `enroll` runs from a terminal on macOS [#214](https://github.com/robot-council/cli/pull/214)
+- List every one of the fleet's tools in one reply, for a harness that reads only the first page [#213](https://github.com/robot-council/cli/pull/213)
+- Make the harness re-read the tool list whenever the bridge starts [#212](https://github.com/robot-council/cli/pull/212)
+- Keep an idle bridge running past a socket read timeout [#202](https://github.com/robot-council/cli/pull/202)
+- Say what a swept session actually hit [#186](https://github.com/robot-council/cli/pull/186)
+
+### Maintenance and tooling
+- Add the `fleet-facing` and `housekeeping` priority labels to the issue-writing skill [#216](https://github.com/robot-council/cli/pull/216)
+- Run the release generator's tests in CI [#210](https://github.com/robot-council/cli/pull/210)
+- Warn when the release generator's pull-request query returns no data or a truncated closing-issue list [#200](https://github.com/robot-council/cli/pull/200)
+- Audit the code this repository actually has [#195](https://github.com/robot-council/cli/pull/195)
+- Stop the issue skill describing the other repository [#193](https://github.com/robot-council/cli/pull/193)
+- Record that Cursor on macOS runs a `stop` hook `command` through `/bin/bash` [#191](https://github.com/robot-council/cli/pull/191)
+- Take the duplicate-check fixes the other copy has [#192](https://github.com/robot-council/cli/pull/192)
+- Keep merged head branches, so a pull request's file links keep working [#187](https://github.com/robot-council/cli/pull/187)
+- Work from two long-lived worktree slots instead of a worktree per ticket [#182](https://github.com/robot-council/cli/pull/182)
+- Port three findings that reached `robot-council/core`'s shared rules and not this repository [#183](https://github.com/robot-council/cli/pull/183)
+- State the `GH_REPO` bound without naming a repository [#179](https://github.com/robot-council/cli/pull/179)
+- Read the linked issue's type in the release cascade [#178](https://github.com/robot-council/cli/pull/178)
+- Use the placeholders `gh` actually substitutes in every REST recipe [#177](https://github.com/robot-council/cli/pull/177)
+- Take the repository from the checkout in the remaining `gh` recipes [#173](https://github.com/robot-council/cli/pull/173)
+- Take the repository from the checkout in the pull-request skill [#168](https://github.com/robot-council/cli/pull/168)
+- Stop the release cascade filing a test-heavy feature as maintenance [#163](https://github.com/robot-council/cli/pull/163)
+
 ## v0.3.0 — Roles Reach the Bridge (2026-09-24)
 
 Roles reach the bridge: a session renews when its role changes, hears when the sweep marks it stale or gone, and a coordinator now sees the whole fleet's roles.
