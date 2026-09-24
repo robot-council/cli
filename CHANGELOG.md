@@ -4,6 +4,17 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.1 — Repeating a Missed Fleet Notice (2026-09-24)
+
+A channel notice that lands while its session is mid-turn is no longer lost: the bridge announces the waiting fleet events again until they are read.
+
+### What's fixed
+- Announce a fleet event again when a channel notice left it undrained [#231](https://github.com/robot-council/cli/pull/231)
+
+### Maintenance and tooling
+- Say what a developer actually does to enroll and join [#235](https://github.com/robot-council/cli/pull/235)
+- Point the skipped-call note at the open ticket rather than the closed fork [#233](https://github.com/robot-council/cli/pull/233)
+
 ## v0.4.0 — Joining on Purpose (2026-09-24)
 
 The bridge no longer joins the fleet on launch: an agent joins when its operator asks it to, and opening an editor stops putting a session on the fleet.
