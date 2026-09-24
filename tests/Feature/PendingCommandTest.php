@@ -20,6 +20,7 @@ declare(strict_types=1);
 use App\Support\Bridge;
 use App\Support\PendingEvents;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Sleep;
 
 const PENDING_SERVICE = 'https://fleet.example.test';
 
@@ -285,6 +286,112 @@ it('clears a fleet event that merely mentions the prefix, rather than anything c
     $sink->clearFleetEvents();
 
     expect($sink->drain())->toBeEmpty();
+});
+
+/**
+ * A second handle on the sink holding its exclusive lock, the way a stuck reader would.
+ *
+ * @return resource The handle, which the caller unlocks and closes.
+ */
+function holdSinkLock(PendingEvents $sink): mixed
+{
+    $holder = fopen($sink->path(), 'c+');
+
+    expect($holder)->not->toBeFalse()
+        ->and(flock($holder, LOCK_EX | LOCK_NB))->toBeTrue();
+
+    return $holder;
+}
+
+it('clears without waiting when nothing else holds the sink', function (): void {
+    Sleep::fake();
+
+    $sink = pendingSink();
+
+    $sink->add([
+        waitingEvent(),
+        ['type' => Bridge::SESSION_ENDED, 'body' => 'the fleet ended it'],
+    ]);
+
+    $said = [];
+
+    $sink->clearFleetEvents(function (string $message) use (&$said): void {
+        $said[] = $message;
+    });
+
+    // The uncontended path, asserted apart from the contended ones: fleet events go, the bridge's
+    // own entry stays, and the retry loop never ran.
+    $waiting = $sink->drain();
+
+    expect($waiting)->toHaveCount(1)
+        ->and($waiting[0]['type'])->toBe(Bridge::SESSION_ENDED)
+        ->and($said)->toBeEmpty();
+
+    Sleep::assertNeverSlept();
+});
+
+it('gives up on a sink held past the wait, leaving it unchanged and saying so once', function (): void {
+    Sleep::fake();
+
+    $sink = pendingSink();
+
+    $sink->add([waitingEvent()]);
+
+    $before = file_get_contents($sink->path());
+    $holder = holdSinkLock($sink);
+    $said = [];
+
+    // **A blocking lock here held the bridge open behind a stuck reader after `SIGTERM`** (#228).
+    // Faked, so the whole wait is counted rather than spent.
+    $sink->clearFleetEvents(function (string $message) use (&$said): void {
+        $said[] = $message;
+    });
+
+    flock($holder, LOCK_UN);
+    fclose($holder);
+
+    expect(file_get_contents($sink->path()))->toBe($before)
+        ->and($said)->toHaveCount(1)
+        ->and($said[0])->toContain($sink->path())
+        ->toContain('2 seconds');
+
+    Sleep::assertSleptTimes(intdiv(PendingEvents::CLEAR_WAIT_MILLISECONDS, PendingEvents::CLEAR_RETRY_MILLISECONDS));
+    Sleep::assertSequence(array_fill(
+        0,
+        intdiv(PendingEvents::CLEAR_WAIT_MILLISECONDS, PendingEvents::CLEAR_RETRY_MILLISECONDS),
+        Sleep::for(PendingEvents::CLEAR_RETRY_MILLISECONDS)->milliseconds(),
+    ));
+});
+
+it('waits out a lock released inside the wait, and then clears', function (): void {
+    Sleep::fake();
+
+    $sink = pendingSink();
+
+    $sink->add([waitingEvent()]);
+
+    $holder = holdSinkLock($sink);
+    $slept = 0;
+
+    // The holder lets go on the third sleep, well inside the wait.
+    Sleep::whenFakingSleep(function () use (&$slept, $holder): void {
+        if (++$slept === 3) {
+            flock($holder, LOCK_UN);
+        }
+    });
+
+    $said = [];
+
+    $sink->clearFleetEvents(function (string $message) use (&$said): void {
+        $said[] = $message;
+    });
+
+    fclose($holder);
+
+    expect($sink->drain())->toBeEmpty()
+        ->and($said)->toBeEmpty();
+
+    Sleep::assertSleptTimes(3);
 });
 
 it('renders what the bridge wrote without attributing it to a session', function (): void {
