@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.5 — Only Its Own Commands (2026-09-24)
+
+An installed `robot-council` now offers only its own six commands, rather than Laravel Zero's development commands beside them.
+
+### What's fixed
+- Run an installed `robot-council` as `production`, so it offers only its own commands [#247](https://github.com/robot-council/cli/pull/247)
+
 ## v0.4.4 — Telling an Agent Why Its Calls Stopped (2026-09-24)
 
 When the fleet ends a session, every tool call the bridge could no longer serve now gets an error saying why, instead of failing as a closed connection.
