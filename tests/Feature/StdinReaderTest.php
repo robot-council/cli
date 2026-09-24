@@ -440,3 +440,56 @@ function commandLinesMentioning(string $needle): array
 
     return $lines;
 }
+
+it('reads on past a timed-out read, which a harness on Node produces after a quiet minute', function (): void {
+    // **A socket for stdin, which is what Node hands a child** -- `stream_type` reads `tcp_socket`
+    // there and `STDIO` from a shell pipe -- and PHP bounds a blocking socket read by
+    // `default_socket_timeout`. The real reader, with that timeout cut from 60 seconds to one so the
+    // test does not sit through a minute (#201).
+    $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+
+    expect($pair)->toBeArray();
+
+    if (! \is_array($pair)) {
+        return;
+    }
+
+    [$harness, $stdin] = $pair;
+
+    $reader = new StdinReader($stdin, null, [\PHP_BINARY, '-d', 'default_socket_timeout=1', base_path('robot-council'), 'mcp:reader']);
+
+    try {
+        // Quiet for longer than the timeout, counted from after the reader has connected, so at
+        // least one read times out before anything arrives
+        usleep(2_500_000);
+
+        fwrite($harness, '{"jsonrpc":"2.0","id":1}'."\n");
+
+        expect(framesFrom($reader->stream(), 1, 5.0))->toBe(['{"jsonrpc":"2.0","id":1}']);
+
+        // **And the real end still ends it**, or the fix would be a reader that never lets go.
+        // Shut down rather than closed: the child inherits this end of the pair too, so closing
+        // it here would leave the connection open, while a shutdown ends it for every holder.
+        stream_socket_shutdown($harness, STREAM_SHUT_WR);
+
+        $ended = false;
+        $until = microtime(true) + 5.0;
+
+        while (microtime(true) < $until && ! $ended) {
+            $read = [$reader->stream()];
+            $write = [];
+            $except = [];
+
+            if (@stream_select($read, $write, $except, 0, 200_000) === 0) {
+                continue;
+            }
+
+            $chunk = fread($reader->stream(), 65536);
+            $ended = $chunk === false || ($chunk === '' && feof($reader->stream()));
+        }
+
+        expect($ended)->toBeTrue();
+    } finally {
+        $reader->stop();
+    }
+})->skipOnWindows();

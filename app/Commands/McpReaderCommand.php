@@ -71,9 +71,21 @@ final class McpReaderCommand extends Command
 
         // **A blocking read, deliberately.** It is the whole reason this process exists: it may
         // sit here for as long as the harness is quiet, while the bridge keeps ticking.
-        while (($chunk = fread(\STDIN, self::READ_BYTES)) !== false) {
-            if ($chunk === '') {
+        while (true) {
+            $chunk = fread(\STDIN, self::READ_BYTES);
+
+            if ($chunk === false || $chunk === '') {
                 if (feof(\STDIN)) {
+                    break;
+                }
+
+                // **A read that timed out is not the end of input (#201).** A harness running on
+                // Node hands its child a socket rather than a pipe, and PHP bounds a blocking
+                // socket read by `default_socket_timeout` -- 60 seconds -- after which `fread`
+                // answers false with the stream still open. Treating that as the end made every
+                // idle Claude Code session drop its bridge, and its fleet session, after one quiet
+                // minute. Measured: `timed_out` true and `feof` false, with the harness still there.
+                if ($chunk === false && ! stream_get_meta_data(\STDIN)['timed_out']) {
                     break;
                 }
 
