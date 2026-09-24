@@ -316,6 +316,40 @@ it('does not hand a coordinator its own events back, except its own presence', f
     ], ['coordinator:direct']), 'type'))->toBe(['session.gone']);
 });
 
+it("hands a coordinator another session's role change and refusal", function (): void {
+    // #115 decided a coordinating session hears about the other sessions, and #116 built the list
+    // without these two. A role is more squarely "what the other sessions are" than a lock being
+    // acquired, which was on the list from the start.
+    //
+    // Both are asserted in one call, because `followed()` refuses a second in one test -- see the
+    // note on `followedCalls()`.
+    expect(array_column(followed([
+        feedEvent('session.role_changed', actor: THEIRS, meta: ['from' => 'build', 'to' => 'coordinator', 'how' => 'approved']),
+        feedEvent('session.role_requested', actor: THEIRS, meta: ['refused' => 'coordinator', 'stays' => 'build']),
+    ], ['coordinator:direct']), 'type'))->toBe(['session.role_changed', 'session.role_requested']);
+});
+
+it('hands a session with no ability neither of those', function (): void {
+    // The other side, against the SAME events. Without this the test above would pass just as
+    // happily against a follower that handed every role event to everybody, which would put one
+    // developer's promotions into another developer's agent.
+    expect(followed([
+        feedEvent('session.role_changed', actor: THEIRS, meta: ['from' => 'build', 'to' => 'coordinator']),
+        feedEvent('session.role_requested', actor: THEIRS, meta: ['refused' => 'coordinator']),
+    ]))->toBeEmpty();
+});
+
+it("does not queue a coordinator's own role change into the sink", function (): void {
+    // #129's behavior, which this must not change: a session's OWN role change is reported to the
+    // operator on stderr and renewed for, and the loop `break`s the page at it rather than letting
+    // it reach `concerns()`. Adding the type to `COORDINATOR_HEARS` could have routed it to the
+    // sink as well, which would tell an agent what an administrator just did to it twice, in two
+    // different voices.
+    expect(followed([
+        feedEvent('session.role_changed', actor: MINE, meta: ['from' => 'build', 'to' => 'coordinator']),
+    ], ['coordinator:direct']))->toBeEmpty();
+});
+
 it("does not hand a coordinator another developer's narration", function (): void {
     // **Narration is the one type the service restricts**, and widening it here would put another
     // developer's words into an agent with shell access on a client-side check alone.
