@@ -5,6 +5,8 @@ Offline tests for gen_release_notes.py: title cleanup and bucket routing. Neithe
 
   python3 -m unittest discover -s .claude/skills/writing-release-notes
 """
+import contextlib
+import io
 import json
 import os
 import sys
@@ -460,7 +462,7 @@ class PullRequestCache(unittest.TestCase):
 
         class Result:
             returncode = 0
-            stdout = json.dumps({"data": {"repository": {}}})
+            stdout = json.dumps({"data": {"repository": {"p11": None}}})
             stderr = ""
 
         def record(args, **kwargs):
@@ -492,13 +494,125 @@ class PullRequestCache(unittest.TestCase):
     def test_a_number_that_is_not_a_pull_request_answers_empty(self):
         """`prime_pr_cache` caches `(None, (), ())` for an alias that resolved to nothing, and the
         three-slot shape has to hold there too or the accessors raise.
+
+        The alias comes back `null` rather than missing, which is how GitHub answers a number that
+        is not a pull request. An empty `repository` would be a batch that returned nothing at all,
+        and `NoDataGuard` below says that warns.
         """
-        with mock.patch.object(g.subprocess, "run", self._answers({"data": {"repository": {}}})):
+        with mock.patch.object(g.subprocess, "run",
+                               self._answers({"data": {"repository": {"p99": None}}})):
             g.prime_pr_cache([99], "owner/name")
 
         self.assertEqual(g.pr_issue_types(99), ())
         self.assertEqual(g.pr_labels(99), ())
         self.assertIsNone(g.pr_title(99, "owner/name"))
+
+
+class NoDataGuard(unittest.TestCase):
+    """The two warnings `robot-council/core#274`'s review added, and #178 did not port.
+
+    Both are about a query that returned less than it looks like: a batch with no data at all,
+    and a closing-issue list longer than the page that read it.
+    """
+
+    def setUp(self):
+        g._pr_cache.clear()
+        self.addCleanup(g._pr_cache.clear)
+
+    @staticmethod
+    def _drive(stdout, returncode=0):
+        """Run one batch for #7 against a canned `gh` answer, and return what reached stderr."""
+        class Result:
+            pass
+
+        Result.stdout, Result.stderr, Result.returncode = stdout, "", returncode
+        err = io.StringIO()
+        with mock.patch.object(g.subprocess, "run", lambda *a, **k: Result()), \
+                contextlib.redirect_stderr(err):
+            g.prime_pr_cache([7], "owner/name")
+
+        return err.getvalue()
+
+    @staticmethod
+    def _ok(total, nodes):
+        return json.dumps({"data": {"repository": {"p7": {
+            "title": "T", "closingIssuesReferences": {"totalCount": total, "nodes": nodes}}}}})
+
+    def test_every_no_data_shape_warns_not_only_the_ones_with_an_errors_array(self):
+        """The last three are the shapes a guard gated on `errors` stays silent for.
+
+        Each leaves the whole batch uncached, so every bullet in it loses its link -- the outcome
+        the partial-data handling exists to prevent.
+        """
+        shapes = {
+            "a validation error": json.dumps({"data": None, "errors": [
+                {"type": "INVALID", "message": "Field 'issueType' doesn't exist on type 'Issue'"}]}),
+            "an empty errors array": json.dumps({"data": None, "errors": []}),
+            "repository null": json.dumps({"data": {"repository": None}}),
+            "empty stdout": "",
+            "an HTML error page": "<html>gateway timeout</html>",
+        }
+        for label, body in shapes.items():
+            with self.subTest(label):
+                out = self._drive(body, returncode=0 if body.startswith("{") else 1)
+
+                self.assertIn("returned no data for #7-#7", out)
+                self.assertIn("carry no links", out)
+                self.assertIsNone(g.pr_title(7, "owner/name"))
+            g._pr_cache.clear()
+
+    def test_the_warning_names_the_cause_it_was_given(self):
+        """With an `errors` array the cause is GitHub's; without one it is the exit code."""
+        self.assertIn("INVALID: Field 'issueType'", self._drive(json.dumps({"data": None, "errors": [
+            {"type": "INVALID", "message": "Field 'issueType' doesn't exist on type 'Issue'"}]})))
+        g._pr_cache.clear()
+        self.assertIn("gh exit 1, 0 bytes of stdout", self._drive("", returncode=1))
+
+    def test_a_healthy_response_warns_about_nothing(self):
+        """The negative control. A guard that cries wolf is turned off within a week."""
+        shapes = {
+            "one typed issue": self._ok(1, [{"issueType": {"name": "Bug"},
+                                             "labels": {"nodes": [{"name": "development"}]}}]),
+            "one untyped issue": self._ok(1, [{"issueType": None, "labels": {"nodes": []}}]),
+            "no closing issues": self._ok(0, []),
+            "nodes null": self._ok(0, None),
+            "a number that is not a pull request": json.dumps({"data": {"repository": {"p7": None}}}),
+        }
+        for label, body in shapes.items():
+            with self.subTest(label):
+                self.assertEqual(self._drive(body), "")
+            g._pr_cache.clear()
+
+    def test_truncation_is_reported_rather_than_guessed(self):
+        """Since #178 a dropped closing issue can decide the BUCKET, not just lose a label."""
+        out = self._drive(self._ok(25, [{"issueType": {"name": "Feature"}, "labels": {"nodes": []}}]))
+
+        self.assertIn("#7 closes 25 issues; only 1 were read", out)
+        self.assertEqual(g.pr_issue_types(7), ("feature",))
+
+    def test_a_full_page_that_is_the_whole_list_is_not_truncation(self):
+        """The boundary: `totalCount` equal to what was read is complete, and says nothing."""
+        nodes = [{"issueType": None, "labels": {"nodes": []}}] * 20
+
+        self.assertEqual(self._drive(self._ok(20, nodes)), "")
+
+    def test_the_query_reads_the_total_and_a_page_of_twenty(self):
+        """Without `totalCount` in the query, the truncation check compares against nothing."""
+        sent = []
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps({"data": {"repository": {"p11": None}}})
+            stderr = ""
+
+        def record(args, **kwargs):
+            sent.append(" ".join(args))
+            return Result()
+
+        with mock.patch.object(g.subprocess, "run", record):
+            g.prime_pr_cache([11], "owner/name")
+
+        self.assertIn("closingIssuesReferences(first:20){totalCount ", sent[0])
 
 
 if __name__ == "__main__":

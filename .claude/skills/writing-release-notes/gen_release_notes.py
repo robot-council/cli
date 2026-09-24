@@ -412,23 +412,54 @@ def prime_pr_cache(nums, repo):
         batch = nums[start:start + _PR_BATCH]
         fields = " ".join(
             f'p{n}: pullRequest(number:{n}){{title '
-            f'closingIssuesReferences(first:5){{nodes{{issueType{{name}} '
+            f'closingIssuesReferences(first:20){{totalCount nodes{{issueType{{name}} '
             f'labels(first:20){{nodes{{name}}}}}}}}}}'
             for n in batch)
         q = f'query {{repository(owner:"{owner}",name:"{name}"){{{fields}}}}}'
         r = subprocess.run(["gh", "api", "graphql", "-f", f"query={q}"],
                            capture_output=True, text=True)
         try:
-            data = (json.loads(r.stdout).get("data") or {}).get("repository") or {}
+            payload = json.loads(r.stdout)
+            data = (payload.get("data") or {}).get("repository") or {}
         except (json.JSONDecodeError, AttributeError):
-            data = {}
+            payload, data = {}, {}
+
+        # **A field error costs one alias; a VALIDATION error costs the whole batch**, and the two
+        # are told apart only here. `issueType` is a newer schema field than everything else this
+        # query asks for, so an endpoint whose schema predates it rejects the entire document:
+        # `data` comes back null, every alias in the batch caches as a miss, and the run emits a
+        # full set of bullets with no `[#N]` links -- the exact outcome the comment above says the
+        # partial-data handling exists to prevent, arriving through a door that handling does not
+        # cover. Reported on stderr rather than raised, because a release note with plain subjects
+        # still beats no release note; what must not happen is that it looks complete.
+        # **Gated on `not data`, NOT on an `errors` array being present**, because the shapes that
+        # carry no `errors` are the ones most likely to happen: `gh` exiting non-zero with empty
+        # stdout (no credential, no network, an HTTP 403 from a proxy), an HTML error page from a
+        # gateway, and `{"data":{"repository":null}}`. Every one of those reaches here with the
+        # whole batch uncached. Ported from `robot-council/core#274`, whose first draft of this
+        # guard asked whether GraphQL had complained rather than whether anything had come back,
+        # and stayed silent for all three.
+        if not data:
+            errs = payload.get("errors") or []
+            why = (f"{errs[0].get('type') or 'error'}: {errs[0].get('message', '')[:160]}"
+                   if errs else f"no data, gh exit {r.returncode}, {len(r.stdout)} bytes of stdout")
+            print(f"warning: the pull-request query returned no data for #{batch[0]}-#{batch[-1]} "
+                  f"({why}). Those bullets will fall back to commit subjects and carry no links.",
+                  file=sys.stderr)
         for n in batch:
             node = data.get(f"p{n}")
             if not node:
                 # Not a pull request, or unreachable: resolve() falls back to the subject.
                 _pr_cache[n] = (None, (), ())
                 continue
-            issues = (node.get("closingIssuesReferences") or {}).get("nodes", [])
+            cir = node.get("closingIssuesReferences") or {}
+            issues = cir.get("nodes") or []
+            # The page is 20 and nothing orders it, so a pull request closing more than that would
+            # have its types decided by an ordering nobody pinned -- and since #178 the type can
+            # decide the bucket, where before it could only lose a label. Reported, never guessed.
+            if (cir.get("totalCount") or 0) > len(issues):
+                print(f"warning: #{n} closes {cir['totalCount']} issues; only {len(issues)} were "
+                      f"read, so its labels and type may be incomplete.", file=sys.stderr)
             labels = tuple(
                 l["name"]
                 for iss in issues
