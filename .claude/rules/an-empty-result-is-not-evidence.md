@@ -41,7 +41,7 @@ These were measured in `UAMS-Web/uams-statamic` sessions, and every one looked c
 | --- | --- | --- | --- |
 | a count of `catch` blocks per version, to decide whether a fix was present | a difference in the right direction | the fix was in one function; a mere refactor would have produced the same count | another reader asked which function |
 | `stat -f %Sm` (local time) against a `date -u` "now" | a 32-second-old file read as 5 hours old | the two sides used different clocks | re-derived from epoch seconds |
-| a duplicate check run against issues only | no conflicting work | an open pull request on the same file, which `repos/{o}/{r}/issues` returns and `gh issue list` filters out | another reader named the pull request |
+| a duplicate check run against issues only | no conflicting work | an open pull request on the same file, which `repos/{owner}/{repo}/issues` returns and `gh issue list` filters out | another reader named the pull request |
 | a one-line count of open issues versus pull requests | `prs=0` | `prs=5`, by direct membership test | a membership test run for another reason |
 | a project-board read with an explicit page size | exactly 400 items, missing both issues sought | the board held 1,982; 400 was the limit | the two issues were known to exist |
 
