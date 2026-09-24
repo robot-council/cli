@@ -453,3 +453,32 @@ it('stops asking for a renewal once the feed is accepted again', function (): vo
     // Still one: the reads after the first were accepted, so nothing asked again.
     expect(goneRenewals())->toBe(1);
 });
+
+it('says so when the feed keeps refusing and the renewal keeps succeeding', function (): void {
+    // **The hole suppression would otherwise open.** Every 401 branch of `EnsureAgentSession` is
+    // either repaired by the renewal or reported by it -- except a feed that goes on refusing while
+    // the renewal goes on working, which a proxy in front of the service can produce. Silence there
+    // is a bridge that never reads the fleet again and never mentions it. The first refusal is
+    // quiet, because the renewal usually does explain it; the rest are not.
+    goneService(renewStatus: 200, sessionTokenStatus: 401);
+
+    $said = [];
+    $session = goneSession();
+    // Zero backoff, so the second refusal is reachable without sitting through `BACKOFF_SECONDS`.
+    $follower = new FleetFollower($session, GONE_SERVICE, goneSink(), 0, 0);
+    $record = function (string $message) use (&$said): void {
+        $said[] = $message;
+    };
+
+    $follower->tick($record);
+
+    expect($said)->toBeEmpty();
+
+    $follower->tick($record);
+    $follower->tick($record);
+
+    expect(implode('
+', $said))->toContain('refused this session')
+        ->and(implode('
+', $said))->toContain('renewing has not fixed it');
+});

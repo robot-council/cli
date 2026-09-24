@@ -113,7 +113,7 @@ final class FleetFollower
     /**
      * How long the next failure waits, in seconds.
      */
-    private int $backoff = self::BACKOFF_SECONDS;
+    private int $backoff;
 
     /**
      * Whether the last feed read was refused outright.
@@ -124,6 +124,19 @@ final class FleetFollower
      * refused heartbeat.
      */
     private bool $refused = false;
+
+    /**
+     * How many reads in a row have been refused.
+     *
+     * **The guard on suppressing a 401 at all.** Every branch of `EnsureAgentSession` that answers
+     * 401 is either repaired by the renewal or reported by it -- a session the fleet ended gets a
+     * `409`, and an unusable installation refuses the renewal too, which `Session::renew()` reports.
+     * The one shape neither covers is a feed that keeps refusing while the renewal keeps
+     * succeeding, which a proxy in front of the service can produce. Silence there would be a
+     * bridge that never reads the feed again and never says so, so the first refusal is quiet and
+     * the rest are not.
+     */
+    private int $refusals = 0;
 
     /**
      * The tasks this session is holding, as far as the feed has said.
@@ -147,8 +160,16 @@ final class FleetFollower
         private readonly Session $session,
         private readonly string $service,
         private readonly PendingEvents $pending,
-        private readonly int $pollSeconds = self::POLL_SECONDS
+        private readonly int $pollSeconds = self::POLL_SECONDS,
+
+        // A parameter for the same reason `$pollSeconds` is one: the schedule is read from `time()`
+        // inside a loop a test cannot advance, so nothing could show what a SECOND consecutive
+        // refusal does without sitting through `BACKOFF_SECONDS`. Nothing in the application passes
+        // anything but the default.
+        private readonly int $backoffSeconds = self::BACKOFF_SECONDS
     ) {
+        $this->backoff = $backoffSeconds;
+
         $this->cursor = $session->feedCursor();
     }
 
@@ -200,7 +221,7 @@ final class FleetFollower
         } catch (Throwable $throwable) {
             $this->nextPoll = time() + $this->backoff;
 
-            $this->backoff = min($this->backoff * 2, self::MAX_BACKOFF_SECONDS);
+            $this->backoff = min(max($this->backoff, 1) * 2, self::MAX_BACKOFF_SECONDS);
 
             // **A 401 is not a feed problem, so it is recorded rather than described.** It says this
             // session's token is no longer honored, which the feed cannot explain and the renewal
@@ -208,15 +229,25 @@ final class FleetFollower
             // ended answers `409`. Measured before this, a swept session was told its feed was
             // unreadable one line before being told why -- the symptom ahead of the cause (#169).
             $this->refused = $throwable->getCode() === 401;
+            $this->refusals = $this->refused ? $this->refusals + 1 : 0;
 
             if (! $this->refused) {
                 $diagnostic('Could not read the fleet feed: '.$throwable->getMessage());
+            } elseif ($this->refusals > 1) {
+                // A renewal has been asked for and the feed is still refusing, so the renewal is
+                // not going to explain this one. Said once per read rather than suppressed, because
+                // the alternative is a bridge that stops reading the fleet and never mentions it.
+                $diagnostic(sprintf(
+                    'The fleet feed has refused this session %d times in a row, and renewing has not fixed it. Tool calls are unaffected.',
+                    $this->refusals
+                ));
             }
 
             return false;
         }
 
-        $this->backoff = self::BACKOFF_SECONDS;
+        $this->backoff = $this->backoffSeconds;
+        $this->refusals = 0;
         $this->nextPoll = time() + $this->pollSeconds;
 
         // The cursor the service returns, not the last event's id: a page can be short or empty
