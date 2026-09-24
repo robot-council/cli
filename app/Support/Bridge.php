@@ -63,8 +63,12 @@ final class Bridge
      * turn end the hook's loop guard does not drain -- and the session goes idle with the events
      * still waiting. PROBE-D waited four minutes there, until an operator prompt happened along.
      *
-     * Longer than a continuation turn usually runs, so an ordinary drain almost always gets there
-     * first and nothing is sent twice.
+     * **The first wait; each one after doubles** (see `reannounceDelay()`). The bridge cannot see
+     * a turn begin or end -- a continuation that only runs Bash sends it nothing -- so a repeat can
+     * land inside the very turn that stranded the sink, and be folded in exactly as the notice
+     * was. Evenly spaced repeats would all be spent inside one long turn; doubling ones reach past
+     * it. The cost is that a turn longer than this is told more than once that events are waiting,
+     * which its own end would have delivered anyway.
      */
     public const int REANNOUNCE_SECONDS = 60;
 
@@ -74,9 +78,10 @@ final class Bridge
      * **The bound is what makes this safe to ship** (cli#196). A session with channels on and no
      * stop hook never drains, so without a limit it would be woken every interval for as long as
      * the bridge runs, each wake a turn that finds nothing to do. With one, it is woken at most this
-     * many extra times per batch.
+     * many extra times per batch -- and with the doubling, the last repeat comes 31 minutes after
+     * the notice, so a continuation turn shorter than that still has one land after it ends.
      */
-    public const int REANNOUNCE_LIMIT = 3;
+    public const int REANNOUNCE_LIMIT = 5;
 
     /**
      * How much to read from stdin at a time.
@@ -165,16 +170,16 @@ final class Bridge
      * @param  int  $heartbeatSeconds  How long to wait between heartbeats.
      * @param  int  $renewRetrySeconds  How long a refused renewal waits before another is tried.
      * @param  bool  $channel  Whether to act as a Claude Code channel (cli#62).
-     * @param  int  $reannounceSeconds  How long a notice is given to be acted on before it is sent again.
      * @param  (Closure(array{role: string|null, repository: string|null, work_location: string|null}): Joined)|null  $join
      *                                                                                                                       What the `join` tool does. It throws a `RuntimeException` carrying what to tell the agent when joining fails.
+     * @param  int  $reannounceSeconds  How long a notice is given to be acted on before it is first sent again.
      *
-     * Both intervals are parameters rather than only constants because otherwise nothing can show
+     * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
      * `stream_select`, so a test cannot advance the clock from outside it and would have to sit
      * through a real minute -- or, for the retry, half a real one. Passing 0 makes the next pass
      * due, which is what the tests do. Nothing in this application passes anything but the
-     * defaults. `$reannounceSeconds` is the third, for the same reason.
+     * defaults.
      *
      * `$channel` is off unless the caller turns it on, because it is one harness's extension: only
      * Claude Code reads `claude/channel`, and how another harness's client treats an unknown server
@@ -1037,7 +1042,7 @@ final class Bridge
         $this->announcedSink = $this->follower?->waiting();
         $this->announcedNew = $this->unannounced;
         $this->repeats = 0;
-        $this->nextReannounce = time() + $this->reannounceSeconds;
+        $this->nextReannounce = time() + self::reannounceDelay($this->reannounceSeconds, 0);
 
         $this->unannounced = 0;
     }
@@ -1070,7 +1075,22 @@ final class Bridge
 
         $this->notify($out, ['new' => (string) $this->announcedNew, 'repeat' => (string) $this->repeats]);
 
-        $this->nextReannounce = time() + $this->reannounceSeconds;
+        $this->nextReannounce = time() + self::reannounceDelay($this->reannounceSeconds, $this->repeats);
+    }
+
+    /**
+     * How long to wait before the next repeat, once this many have been sent.
+     *
+     * Doubling, for the reason `REANNOUNCE_SECONDS` gives. Its own function because the loop reads
+     * `time()` and a test cannot advance it, so this is the only place the schedule can be shown.
+     *
+     * @param  int  $base  The first wait, in seconds.
+     * @param  int  $repeats  How many repeats have already been sent.
+     * @return int The wait, in seconds.
+     */
+    public static function reannounceDelay(int $base, int $repeats): int
+    {
+        return $base << $repeats;
     }
 
     /**
