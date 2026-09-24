@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace App\Commands;
 
-use Symfony\Component\Console\Application;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use LaravelZero\Framework\Commands\Command;
 use NunoMaduro\LaravelConsoleSummary\SummaryCommand;
+use Symfony\Component\Console\Application;
 use Symfony\Component\Console\Exception\CommandNotFoundException;
 use Symfony\Component\Console\Input\ArrayInput;
 
@@ -81,6 +81,6 @@ final class HomeCommand extends Command
             '--raw' => $this->option('raw'),
             '--format' => $this->option('format'),
             '--short' => $this->option('short'),
-        ], static fn (mixed $value): bool => !in_array($value, [null, false, ''], true))), $this->output->getOutput());
+        ], static fn (mixed $value): bool => ! in_array($value, [null, false, ''], true))), $this->output->getOutput());
     }
 }

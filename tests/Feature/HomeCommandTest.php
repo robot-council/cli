@@ -61,8 +61,11 @@ it('still runs `pending` with the arguments the stop hook passes, printing nothi
 
     try {
         $process = runRobotCouncil(['pending', '--project=org/repo'], [
+            // Both variables the hook script exports. The harness has to be named here: a local
+            // run inside an agent harness would otherwise have it detected, and CI has none.
             'XDG_STATE_HOME' => $state,
             'ROBOT_COUNCIL_SERVICE' => 'https://fleet.example.test',
+            'ROBOT_COUNCIL_HARNESS' => 'claude',
         ]);
 
         expect($process->getExitCode())->toBe(0)
