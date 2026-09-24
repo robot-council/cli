@@ -1,6 +1,6 @@
 # Rule — write GitHub artifacts in an impersonal voice
 
-`robot-council/core` is worked from a **single account**, although the `robot-council` organization owns it. Every pull request, issue, and comment posts under that one account: the same account authors the change, files the ticket, reviews the branch, and posts the validation comment. So **first person reads as that person narrating their own work, and second person reads as them addressing themselves** — to anyone who opens the tracker. Neither is what the sentence means.
+This repository is worked from a **single account**, although the `robot-council` organization owns it, and the same is true of its sibling. Every pull request, issue, and comment posts under that one account: the same account authors the change, files the ticket, reviews the branch, and posts the validation comment. So **first person reads as that person narrating their own work, and second person reads as them addressing themselves** — to anyone who opens the tracker. Neither is what the sentence means.
 
 Write the artifact as a statement about runs, files, and tickets. There is no narrator in it.
 
