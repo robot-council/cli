@@ -520,8 +520,8 @@ class NoDataGuard(unittest.TestCase):
         self.addCleanup(g._pr_cache.clear)
 
     @staticmethod
-    def _drive(stdout, returncode=0):
-        """Run one batch for #7 against a canned `gh` answer, and return what reached stderr."""
+    def _drive(stdout, returncode=0, nums=(7,)):
+        """Run one batch against a canned `gh` answer, and return what reached stderr."""
         class Result:
             pass
 
@@ -529,7 +529,7 @@ class NoDataGuard(unittest.TestCase):
         err = io.StringIO()
         with mock.patch.object(g.subprocess, "run", lambda *a, **k: Result()), \
                 contextlib.redirect_stderr(err):
-            g.prime_pr_cache([7], "owner/name")
+            g.prime_pr_cache(list(nums), "owner/name")
 
         return err.getvalue()
 
@@ -558,7 +558,30 @@ class NoDataGuard(unittest.TestCase):
 
                 self.assertIn("returned no data for #7-#7", out)
                 self.assertIn("carry no links", out)
-                self.assertIsNone(g.pr_title(7, "owner/name"))
+                # Cached as a miss, so nothing after this asks `gh` again.
+                self.assertEqual(g._pr_cache.get(7), (None, (), ()))
+            g._pr_cache.clear()
+
+    def test_the_warning_names_the_batch_range(self):
+        """A one-number batch cannot tell the first number from the last."""
+        self.assertIn("for #7-#9 ", self._drive("", returncode=1, nums=(7, 8, 9)))
+
+    def test_a_malformed_errors_array_still_warns_rather_than_raising(self):
+        """This path runs only on a response that is already wrong, so it must not raise.
+
+        Every shape here violates the GraphQL spec, which is why they are unlikely rather than
+        impossible, and each raised in the first version of this port.
+        """
+        shapes = {
+            "errors an object": {"data": None, "errors": {"message": "x"}},
+            "errors a string": {"data": None, "errors": "x"},
+            "an entry that is a string": {"data": None, "errors": ["x"]},
+            "an entry that is null": {"data": None, "errors": [None]},
+            "a null message": {"data": None, "errors": [{"type": "INVALID", "message": None}]},
+        }
+        for label, body in shapes.items():
+            with self.subTest(label):
+                self.assertIn("carry no links", self._drive(json.dumps(body), returncode=1))
             g._pr_cache.clear()
 
     def test_the_warning_names_the_cause_it_was_given(self):
@@ -576,12 +599,26 @@ class NoDataGuard(unittest.TestCase):
             "one untyped issue": self._ok(1, [{"issueType": None, "labels": {"nodes": []}}]),
             "no closing issues": self._ok(0, []),
             "nodes null": self._ok(0, None),
-            "a number that is not a pull request": json.dumps({"data": {"repository": {"p7": None}}}),
         }
         for label, body in shapes.items():
             with self.subTest(label):
                 self.assertEqual(self._drive(body), "")
             g._pr_cache.clear()
+
+    def test_a_number_that_is_not_a_pull_request_is_partial_data_not_no_data(self):
+        """The alias comes back null beside a field error, and `gh` exits 1.
+
+        Some data came back, so this is the partial-data case the existing handling covers, not
+        the no-data case this guard is for. The `errors` array is what makes this control bite:
+        a guard gated on `errors` being present would warn here.
+        """
+        body = json.dumps({"data": {"repository": {"p7": None, "p8": {
+            "title": "T", "closingIssuesReferences": {"totalCount": 0, "nodes": []}}}},
+            "errors": [{"type": "NOT_FOUND", "path": ["repository", "p7"],
+                        "message": "Could not resolve to a PullRequest with the number of 7."}]})
+
+        self.assertEqual(self._drive(body, returncode=1, nums=(7, 8)), "")
+        self.assertEqual(g.pr_title(8, "owner/name"), "T")
 
     def test_truncation_is_reported_rather_than_guessed(self):
         """Since #178 a dropped closing issue can decide the BUCKET, not just lose a label."""
@@ -589,6 +626,13 @@ class NoDataGuard(unittest.TestCase):
 
         self.assertIn("#7 closes 25 issues; only 1 were read", out)
         self.assertEqual(g.pr_issue_types(7), ("feature",))
+
+    def test_a_null_entry_in_nodes_is_an_unread_issue_not_a_crash(self):
+        """It raised `AttributeError` before, and one issue nobody could read is still missing."""
+        out = self._drive(self._ok(2, [None, {"issueType": {"name": "Bug"}, "labels": {"nodes": []}}]))
+
+        self.assertIn("#7 closes 2 issues; only 1 were read", out)
+        self.assertEqual(g.pr_issue_types(7), ("bug",))
 
     def test_a_full_page_that_is_the_whole_list_is_not_truncation(self):
         """The boundary: `totalCount` equal to what was read is complete, and says nothing."""

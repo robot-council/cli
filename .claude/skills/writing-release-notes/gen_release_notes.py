@@ -440,9 +440,14 @@ def prime_pr_cache(nums, repo):
         # guard asked whether GraphQL had complained rather than whether anything had come back,
         # and stayed silent for all three.
         if not data:
-            errs = payload.get("errors") or []
-            why = (f"{errs[0].get('type') or 'error'}: {errs[0].get('message', '')[:160]}"
-                   if errs else f"no data, gh exit {r.returncode}, {len(r.stdout)} bytes of stdout")
+            # Read defensively, because this line runs only when the response is already wrong,
+            # and a warning path that raises takes the whole run down with it. `errors` is
+            # specified as a list of objects with a string `message`; anything else falls back to
+            # the exit code rather than crashing on the way to saying so.
+            errs = payload.get("errors")
+            first = errs[0] if isinstance(errs, list) and errs and isinstance(errs[0], dict) else None
+            why = (f"{first.get('type') or 'error'}: {str(first.get('message') or '')[:160]}"
+                   if first else f"no data, gh exit {r.returncode}, {len(r.stdout)} bytes of stdout")
             print(f"warning: the pull-request query returned no data for #{batch[0]}-#{batch[-1]} "
                   f"({why}). Those bullets will fall back to commit subjects and carry no links.",
                   file=sys.stderr)
@@ -453,7 +458,8 @@ def prime_pr_cache(nums, repo):
                 _pr_cache[n] = (None, (), ())
                 continue
             cir = node.get("closingIssuesReferences") or {}
-            issues = cir.get("nodes") or []
+            # A null list and a null entry in it are both tolerated; each crashed this loop once.
+            issues = [iss for iss in (cir.get("nodes") or []) if isinstance(iss, dict)]
             # The page is 20 and nothing orders it, so a pull request closing more than that would
             # have its types decided by an ordering nobody pinned -- and since #178 the type can
             # decide the bucket, where before it could only lose a label. Reported, never guessed.
