@@ -7,7 +7,7 @@ The command line for [Robot Council](https://github.com/robot-council/core), a c
 Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) and [#13](https://github.com/robot-council/cli/issues/13):
 
 - **`robot-council enroll`** — enroll this machine. It requests a device code, prints the user code and the verification URL, and polls until a developer approves. The credential it receives is stored in the OS keychain or a user-only file, and never printed.
-- **`robot-council mcp`** — the stdio MCP bridge. An agent harness launches it, and it serves the coordination tools over stdio while renewing its own session token, so a token expiring needs no restart and no human.
+- **`robot-council mcp`** — the stdio MCP bridge. An agent harness launches it, and it comes up **without joining the fleet**: its one tool is `join`, and the fleet's coordination tools appear once an agent calls it. Once joined, it renews its own session token, so a token expiring needs no restart and no human.
 - **`robot-council pending`** — print the fleet events waiting for this harness, and clear them. The bridge reads the change feed while it runs and leaves anything that concerns its own session here; a harness's stop hook runs this at a turn boundary so an agent finds out without being asked. Prints nothing and exits `0` when the fleet has been quiet.
 - **`robot-council api`** — the fallback for anything the bridge does not cover.
 
@@ -116,6 +116,22 @@ So the only secret-adjacent thing below is a URL, and each harness is configured
 
 Pass `--project` as well where one harness works several checkouts, so the fleet can tell the sessions apart. See [naming a project](#naming-a-project) for what to put in it.
 
+### Joining the fleet
+
+**Launching the bridge does not join the fleet** ([#127](https://github.com/robot-council/cli/issues/127)). Opening an editor is not a decision to join, so the bridge comes up with no session and no credential read. It answers the harness's handshake itself and lists one tool, `join`, which an agent calls when the operator asks it to, or when its instructions say the checkout works with the fleet. Joining reads the credential, starts the session, and tells the harness the tool list changed, so the fleet's tools are callable in the same turn.
+
+`join` takes three optional arguments:
+
+| argument | meaning |
+| --- | --- |
+| `role` | `build`, `ci` or `coordinator`. Anything but `build` is **a request an administrator decides**, not a grant: the session holds `build`'s abilities until it is approved. |
+| `repository` | `owner/name`, when the checkout cannot say or says wrong. Read from the checkout otherwise. |
+| `work_location` | which working copy this is. Read from the checkout otherwise. |
+
+**A machine that cannot join still comes up.** With no credential, `join` answers with what is missing, in a tool result the agent can relay, where the bridge used to exit at launch with a line most harnesses bury. Calling `join` a second time is refused and leaves the session already held open.
+
+**To join every time a checkout launches**, add `--auto-join` after `mcp`, and `--role=<role>` beside it to ask for a role; that role is still only a request. The outcome of an automatic join goes to stderr, prefixed `robot-council:`.
+
 ### Claude Code
 
 ```bash
@@ -132,6 +148,8 @@ claude mcp add robot-council \
 | `claude` | `Connected` |
 | *omitted* | `Connected` — Claude Code exports a variable the detector reads, so detection alone is enough here |
 | `cursor`, which this machine has not enrolled | `Failed to connect` |
+
+These runs were measured before [#127](https://github.com/robot-council/cli/issues/127), when the bridge joined at launch; today the same command comes up unjoined, as [joining the fleet](#joining-the-fleet) describes. To join at launch instead, put `--auto-join` after `mcp`.
 
 So for **this** harness the variable is belt and braces rather than required. It is in the command above anyway, because it is the line that stops working depending on somebody else's environment, and because the third row is what a wrong value looks like: a clean refusal rather than somebody else's credential.
 
@@ -163,7 +181,7 @@ Add `"ROBOT_COUNCIL_HARNESS": "cursor"` to that `env` block. **Here the recommen
 
 **Verified 2026-09-21**, on Cursor 3.7.21 and Windows 11 Pro 25H2 (build 26200.8875), against a live fleet: the block above (without a `type` field) is the shape that launched. Cursor's [MCP docs](https://cursor.com/docs/mcp) put `command`, `args`, and `env` under `mcpServers.<id>` for stdio servers, and name `~/.cursor/mcp.json` (global) and `.cursor/mcp.json` (project) as the config locations. The same page's STDIO field table lists `type: "stdio"` as required while its examples omit it; the run that connected omitted it.
 
-After enroll with `--harness=cursor`, Settings, then Tools & MCP, showed the server connected. Reloading it there closed the old stdio process and started a new one: the fleet's agents list marked the previous session `gone` and showed a new `active` session for the same machine, harness `cursor`, last seen within seconds. That is the control that matters — the dashboard reading changes with the reload, so the variable reached the process and a session started on the service.
+After enroll with `--harness=cursor`, Settings, then Tools & MCP, showed the server connected. This run was measured before [#127](https://github.com/robot-council/cli/issues/127), when launching joined the fleet; today the session below starts only once an agent calls `join`, or at launch with `"args": ["mcp", "--auto-join"]`. Reloading it there closed the old stdio process and started a new one: the fleet's agents list marked the previous session `gone` and showed a new `active` session for the same machine, harness `cursor`, last seen within seconds. That is the control that matters — the dashboard reading changes with the reload, so the variable reached the process and a session started on the service.
 
 Put the entry in the **global** file when the fleet URL is yours. A project `.cursor/mcp.json` is shared with whoever opens that checkout; this repository does not ship one, because the URL is per deployment rather than part of the CLI source.
 
@@ -177,6 +195,8 @@ command = "robot-council"
 args = ["mcp"]
 env = { ROBOT_COUNCIL_SERVICE = "https://your-fleet.example.com", ROBOT_COUNCIL_HARNESS = "codex" }
 ```
+
+The bridge this launches joins the fleet only when an agent calls `join`; add `"--auto-join"` to `args` to join at launch, as [joining the fleet](#joining-the-fleet) describes.
 
 **Not run.** Codex is not installed on the machine this was written on, so nothing above launched a bridge. What *was* checked, on 2026-09-18, is the spelling: `command`, `args`, and `env` are the key names OpenAI's [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) gives under `mcp_servers.<id>`. That reference carries no combined example, so the arrangement of those keys into the block above is this project's, and the claim here is about three key names and the table they sit under, not about a working setup. Send a correction if it does not launch.
 
@@ -254,7 +274,7 @@ For Cursor and Codex the flag goes in the same place — the `args` array, after
 
 ### When the bridge refuses
 
-The bridge presents one harness's credential, so it will not run without knowing which harness it is. Three refusals, each naming what to do:
+The bridge presents one harness's credential, so it will not join without knowing which harness it is. Three refusals, each naming what to do. Since [#127](https://github.com/robot-council/cli/issues/127) they arrive when the fleet is joined rather than at launch: as the `join` tool's result, after `Could not join the fleet:`, and on stderr for `--auto-join`. The bridge stays up either way.
 
 ```
 robot-council: Could not tell which harness this is, and a credential belongs to one.
@@ -280,7 +300,7 @@ A credential stored before harnesses were told apart is here. Pass
 
 **The upgrade case, and it needs one action per machine, once.** A machine enrolled before credentials were kept per harness has one filed under the fleet alone. It is not adopted automatically, because it belongs to whichever harness enrolled it and nothing here can know which — handing it to whoever asks first is the guess this design refuses. Naming the harness claims it, moving it under the harness's own key. **Nothing is lost and no re-enrollment is required.**
 
-All three were produced by running the bridge on 2026-09-21 rather than read off the source, which is why the second line of the first one says `cursor, claude`. All three go to stderr, prefixed `robot-council:`. `mcp`'s stdout is a protocol stream a harness parses, so nothing else ever goes there.
+All three were produced by running the bridge on 2026-09-21, when it still joined at launch, rather than read off the source, which is why the second line of the first one says `cursor, claude`. All three go to stderr, prefixed `robot-council:`. `mcp`'s stdout is a protocol stream a harness parses, so nothing else ever goes there.
 
 **The list of enrolled harnesses is a lower bound**, for two reasons. It is built by asking about each harness `laravel/agent-detector` knows, because no credential store can list its keys, so a harness named by hand that the detector has never heard of will not appear in it. And a harness whose credential cannot be read — a credential store that has broken since the command started — is reported as not enrolled rather than aborting the refusal, so the list stays short rather than being replaced by a different error.
 

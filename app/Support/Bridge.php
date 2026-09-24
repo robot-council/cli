@@ -4,12 +4,18 @@ declare(strict_types=1);
 
 namespace App\Support;
 
+use Closure;
 use RuntimeException;
 use stdClass;
 use Throwable;
 
 /**
- * Forwards MCP messages between a harness's stdio and the coordination service.
+ * Forwards MCP messages between a harness's stdio and the coordination service, once it has joined.
+ *
+ * **Not a pure proxy any more (cli#127).** A bridge given a way to join rather than a session comes
+ * up with no session at all: it answers `initialize` itself, lists one tool, `join`, and starts a
+ * session only when that tool is called. Opening an editor is not a decision to join a fleet, and a
+ * bridge that started a session before it could answer anything made it one.
  *
  * Separated from the command so that the loop can be driven by a test with ordinary streams rather
  * than the real `STDIN`, which a test process does not own.
@@ -80,17 +86,46 @@ final class Bridge
      * working, and an unconditional "end the turn" would abandon a task halfway for news the stop
      * hook delivers at that task's natural end anyway.
      */
+    /**
+     * The tool an unjoined bridge offers.
+     */
+    public const string JOIN_TOOL = 'join';
+
+    /**
+     * The roles `join` may ask for, as `robot-council/core`'s `Access\\Role` names them.
+     *
+     * A copy rather than a lookup, because `core` is not a dependency of this package. The service
+     * validates the request too, so a copy that fell behind would refuse a role it knows rather than
+     * grant one it does not.
+     */
+    public const array ROLES = ['build', 'ci', 'coordinator'];
+
+    /**
+     * The protocol version answered to a harness that did not offer one.
+     */
+    public const string PROTOCOL_VERSION = '2025-11-25';
+
+    /**
+     * What the agent is told about joining, in the `initialize` result.
+     */
+    public const string JOIN_INSTRUCTIONS = 'This server connects this session to a Robot Council fleet, and it joins only '
+        ."when asked. Until then its one tool is `join`; the fleet's own tools appear once it has joined. Call `join` when "
+        .'the operator asks you to join the fleet, or when your instructions say this checkout works with it.';
+
     public const string CHANNEL_INSTRUCTIONS = 'A channel notice from this server says only that new Robot Council fleet events '
         .'are waiting for this session. The events themselves are delivered by the stop hook when the current turn ends. '
         .'If a notice arrives while nothing else is in progress, end the turn without other work; if you are in the middle '
         .'of a task, carry on with it, and the events arrive when it ends.';
 
     /**
-     * @param  Session  $session  The started session this bridge forwards through.
+     * @param  Session|null  $session  A started session to forward through at once, or null to
+     *                                 start unjoined and join through `$join`.
      * @param  string  $service  The service's base URL.
      * @param  int  $heartbeatSeconds  How long to wait between heartbeats.
      * @param  int  $renewRetrySeconds  How long a refused renewal waits before another is tried.
      * @param  bool  $channel  Whether to act as a Claude Code channel (cli#62).
+     * @param  (Closure(array{role: string|null, repository: string|null, work_location: string|null}): Joined)|null  $join
+     *                                                                                                                       What the `join` tool does. It throws a `RuntimeException` carrying what to tell the agent when joining fails.
      *
      * Both intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -104,15 +139,16 @@ final class Bridge
      * notification has not been measured.
      */
     public function __construct(
-        private readonly Session $session,
+        private ?Session $session,
         private readonly string $service,
         private readonly int $heartbeatSeconds = self::HEARTBEAT_SECONDS,
 
         // Optional, because the loop's own guarantees must not depend on it: a bridge with no
         // follower forwards tool calls exactly as it did before one existed (cli#60).
-        private readonly ?FleetFollower $follower = null,
+        private ?FleetFollower $follower = null,
         private readonly int $renewRetrySeconds = self::RENEW_RETRY_SECONDS,
         private readonly bool $channel = false,
+        private readonly ?Closure $join = null,
     ) {}
 
     /**
@@ -154,16 +190,6 @@ final class Bridge
     private bool $stopping = false;
 
     /**
-     * The ids of `initialize` requests still waiting for their result, keyed by their JSON form.
-     *
-     * JSON-RPC allows a string or a number, and `1` and `"1"` are different ids, so the key keeps
-     * the type rather than letting PHP's array keys fold them together.
-     *
-     * @var array<string, true>
-     */
-    private array $initializing = [];
-
-    /**
      * Whether the harness has said it finished initializing, after which a notice may be sent.
      *
      * A notification written before `notifications/initialized` goes into a transport the harness
@@ -186,6 +212,35 @@ final class Bridge
     public function stop(): void
     {
         $this->stopping = true;
+    }
+
+    /**
+     * The session this bridge joined, or null while it has not.
+     *
+     * The command reads it on the way out, because ending a session is its job and there is only
+     * a session to end once somebody joined.
+     */
+    public function session(): ?Session
+    {
+        return $this->session;
+    }
+
+    /**
+     * Join now rather than waiting to be asked, for `--auto-join`.
+     *
+     * **The same path the tool takes**, so a role named here is still only a request and a
+     * machine with no credential still comes up. A failure is said on stderr and the bridge serves
+     * `join` exactly as if nothing had been tried, because an agent can relay a tool result and an
+     * operator rarely reads a harness's server log.
+     *
+     * @param  array{role: string|null, repository: string|null, work_location: string|null}  $arguments  What to join with.
+     * @param  callable(string):void  $diagnostic  Where the outcome is said.
+     */
+    public function joinNow(array $arguments, callable $diagnostic): void
+    {
+        $outcome = $this->attemptJoin($arguments);
+
+        $diagnostic($outcome['text']);
     }
 
     /**
@@ -263,17 +318,26 @@ final class Bridge
      */
     private function forward(string $message, $out, callable $diagnostic): void
     {
-        $initializing = $this->observe($message);
+        if ($this->answerLocally($message, $out, $diagnostic)) {
+            return;
+        }
+
+        $session = $this->session;
+
+        if (! $session instanceof Session) {
+            // Nothing reaches the fleet before a session exists: there is no token to send it with
+            return;
+        }
 
         try {
-            $response = $this->post($message);
+            $response = $this->post($session, $message);
 
             // One renewal and one retry on a 401, never a loop: a second consecutive refusal means
             // the installation itself is revoked, and retrying forever would hide that
             if ($response === 401) {
-                $this->session->renew();
+                $session->renew();
 
-                $response = $this->post($message);
+                $response = $this->post($session, $message);
 
                 if ($response === 401) {
                     throw new RuntimeException('The service refused this session twice. The installation may have been revoked.');
@@ -295,13 +359,6 @@ final class Bridge
             // To stderr, never to stdout: a harness parsing stdout would read a diagnostic as a
             // malformed protocol message rather than as an error
             $diagnostic($throwable->getMessage());
-        } finally {
-            // **Whatever became of the request, its id stops being an `initialize`.** A result
-            // that was relayed has already cleared it; one that failed, or was not a protocol
-            // message, would otherwise leave it waiting for a later response that reuses the id.
-            if ($initializing !== null) {
-                unset($this->initializing[$initializing]);
-            }
         }
     }
 
@@ -338,113 +395,290 @@ final class Bridge
             return;
         }
 
-        // One of the two things this class writes to `$out`; the other is `announce()`
-        fwrite($out, $this->declareChannel($trimmed)."\n");
+        $this->write($out, $trimmed);
     }
 
     /**
-     * Note what the harness sent that the channel depends on.
+     * Answer what the bridge answers itself, and say whether it did.
+     *
+     * **What the bridge owns, whether or not it has joined:** the handshake, `ping`, and the `join`
+     * tool. `initialize` is answered here rather than relayed, because an unjoined bridge has no
+     * session to relay it with, and one answer for both states is what keeps a harness from seeing
+     * two different servers. The fleet's MCP endpoint is stateless -- a `tools/list` with no
+     * `initialize` before it is served its first page, measured against the production fleet -- so
+     * nothing it relays later depends on the handshake it never saw.
+     *
+     * **What only an unjoined bridge answers:** `tools/list` with the one tool it has, empty lists
+     * for resources and prompts, and an error for anything else a harness asks, since there is no
+     * session to ask the fleet with.
      *
      * @param  string  $message  One JSON-RPC message, as the harness wrote it.
-     * @return string|null The key an `initialize` request was recorded under, or null.
+     * @param  resource  $out  Where protocol messages go.
+     * @param  callable(string):void  $diagnostic  Where anything else goes.
+     * @return bool Whether the message was answered here, and so must not be relayed.
      */
-    private function observe(string $message): ?string
+    private function answerLocally(string $message, $out, callable $diagnostic): bool
     {
-        // Both methods this looks for contain the word, and a tool call can run to hundreds of
-        // kilobytes, so the rest are not decoded a second time for nothing
-        if (! $this->channel || ! str_contains($message, 'initialize')) {
-            return null;
-        }
-
         $decoded = json_decode($message, true);
 
-        if (! \is_array($decoded)) {
-            return null;
+        if (! \is_array($decoded) || array_is_list($decoded)) {
+            // A batch, or something that is not JSON at all: the service's to refuse, once joined
+            return ! $this->session instanceof Session;
         }
 
         $method = $decoded['method'] ?? null;
+        $id = $decoded['id'] ?? null;
+        $joined = $this->session instanceof Session;
 
         if ($method === 'notifications/initialized') {
             $this->initialized = true;
+
+            return true;
         }
 
-        if ($method !== 'initialize' || ! isset($decoded['id'])) {
-            return null;
+        if ($method === 'initialize') {
+            $this->result($out, $id, $this->initializeResult($decoded['params'] ?? null));
+
+            return true;
         }
 
-        $key = (string) json_encode($decoded['id']);
+        if ($method === 'ping') {
+            $this->result($out, $id, new stdClass);
 
-        $this->initializing[$key] = true;
+            return true;
+        }
 
-        return $key;
+        if ($method === 'tools/call' && \is_array($decoded['params'] ?? null) && ($decoded['params']['name'] ?? null) === self::JOIN_TOOL) {
+            $this->callJoin($out, $id, $decoded['params']['arguments'] ?? null, $diagnostic);
+
+            return true;
+        }
+
+        if ($joined) {
+            return false;
+        }
+
+        match ($method) {
+            'tools/list' => $this->result($out, $id, ['tools' => [$this->joinTool()]]),
+            'resources/list' => $this->result($out, $id, ['resources' => []]),
+            'resources/templates/list' => $this->result($out, $id, ['resourceTemplates' => []]),
+            'prompts/list' => $this->result($out, $id, ['prompts' => []]),
+
+            // A notification needs no answer, and one about a session that does not exist has
+            // nothing to act on
+            default => $id === null ? null : $this->error($out, $id, -32002, 'This bridge has not joined the fleet. Call the `join` tool first.'),
+        };
+
+        return true;
     }
 
     /**
-     * Add the channel capability and its instructions to an `initialize` result, and leave anything
-     * else exactly as the service sent it.
+     * The `initialize` result, the same before joining and after.
      *
-     * **Decoded as objects, never as arrays.** The service's capabilities hold empty objects such as
-     * `"tools":{}`, and an associative decode turns those into empty arrays that re-encode as `[]` --
-     * a different value, in the one message a harness reads to decide what this server can do.
+     * **`tools.listChanged` is what makes joining work.** A harness re-reads the tool list when it
+     * is told the list changed only if the server declared that it would say so: Claude Code ignores
+     * the notification otherwise, measured headless (#126) and interactive (#130). Cursor re-reads
+     * either way, so the declaration costs it nothing.
      *
-     * **Only when there is a follower.** A notice announces what the follower left in the sink, so a
-     * bridge without one would declare a channel that can never send anything.
+     * **Resources and prompts are declared** because the fleet serves both once joined, and a harness
+     * reads the capabilities once, here, before anybody has joined.
      *
-     * **The service's bytes when the rewrite cannot be encoded**, rather than no answer at all: a
-     * harness that never receives its `initialize` result does not start the server, and a channel
-     * is not worth that. The round trip otherwise changes only how some numbers are spelled.
-     *
-     * @param  string  $response  One protocol message, already known to parse.
-     * @return string The message to write.
+     * @param  mixed  $params  The request's params, for the protocol version the harness offered.
+     * @return array<string, mixed> The result.
      */
-    private function declareChannel(string $response): string
+    private function initializeResult(mixed $params): array
     {
-        if (! $this->channel || ! $this->follower instanceof FleetFollower || $this->initializing === []) {
-            return $response;
+        $offered = \is_array($params) && \is_string($params['protocolVersion'] ?? null) ? $params['protocolVersion'] : null;
+
+        $capabilities = [
+            'tools' => ['listChanged' => true],
+            'resources' => new stdClass,
+            'prompts' => new stdClass,
+        ];
+
+        $instructions = [self::JOIN_INSTRUCTIONS];
+
+        // Only where a follower can exist, since a notice announces what it left in the sink
+        if ($this->channel && ($this->follower instanceof FleetFollower || $this->join instanceof Closure)) {
+            $capabilities['experimental'] = [self::CHANNEL_CAPABILITY => new stdClass];
+
+            $instructions[] = self::CHANNEL_INSTRUCTIONS;
         }
 
-        $decoded = json_decode($response);
+        return [
+            // The harness's own version when it offered one, which is what the service answered
+            // when it held the handshake: `2025-11-25` from both Claude Code and Cursor
+            'protocolVersion' => $offered ?? self::PROTOCOL_VERSION,
+            'capabilities' => $capabilities,
+            'serverInfo' => ['name' => 'Robot Council', 'version' => Version::current()],
+            'instructions' => implode("\n\n", $instructions),
+        ];
+    }
 
-        if (! $decoded instanceof stdClass || ! isset($decoded->id)) {
-            return $response;
+    /**
+     * The one tool an unjoined bridge offers.
+     *
+     * @return array<string, mixed> The tool, as `tools/list` describes it.
+     */
+    private function joinTool(): array
+    {
+        return [
+            'name' => self::JOIN_TOOL,
+            'title' => 'Join the fleet',
+            'description' => 'Join the Robot Council fleet this bridge is configured for, so that its coordination tools become '
+                .'available. Call it when the operator asks you to join, or when your instructions say this checkout works '
+                .'with the fleet. A role other than build is a request an administrator decides, not a grant.',
+            'inputSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'role' => [
+                        'type' => 'string',
+                        'enum' => self::ROLES,
+                        'description' => 'The role to ask for. Omit it, or say build, to join as a build agent.',
+                    ],
+                    'repository' => [
+                        'type' => 'string',
+                        'description' => 'The GitHub repository this session works in, as owner/name. Read from the checkout when omitted.',
+                    ],
+                    'work_location' => [
+                        'type' => 'string',
+                        'description' => 'Which working copy of that repository this is. Read from the checkout when omitted.',
+                    ],
+                ],
+                'additionalProperties' => false,
+            ],
+        ];
+    }
+
+    /**
+     * Answer a call to `join`.
+     *
+     * **A second call is refused and changes nothing.** The session already held stays held: ending
+     * it to start another would release its claims and locks for a caller who most likely only
+     * forgot they had joined.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     * @param  mixed  $id  The request's id.
+     * @param  mixed  $arguments  The tool call's arguments.
+     * @param  callable(string):void  $diagnostic  Where anything else goes.
+     */
+    private function callJoin($out, mixed $id, mixed $arguments, callable $diagnostic): void
+    {
+        $session = $this->session;
+
+        if ($session instanceof Session) {
+            $this->toolResult($out, $id, \sprintf(
+                'This bridge has already joined the fleet, as session %s. Nothing was changed; the session it holds stays open.',
+                $session->id() ?? 'unknown'
+            ), true);
+
+            return;
         }
 
-        $key = (string) json_encode($decoded->id);
+        $outcome = $this->attemptJoin([
+            'role' => $this->argument($arguments, 'role'),
+            'repository' => $this->argument($arguments, 'repository'),
+            'work_location' => $this->argument($arguments, 'work_location'),
+        ]);
 
-        if (! isset($this->initializing[$key])) {
-            return $response;
+        if ($outcome['joined'] && $this->initialized) {
+            // Before the result, the order #126 measured: the harness re-reads the list at once,
+            // and the agent can call a fleet tool in the same turn it joined in
+            $this->write($out, (string) json_encode(['jsonrpc' => '2.0', 'method' => 'notifications/tools/list_changed']));
         }
 
-        unset($this->initializing[$key]);
+        $this->toolResult($out, $id, $outcome['text'], ! $outcome['joined']);
 
-        $result = $decoded->result ?? null;
+        if (! $outcome['joined']) {
+            $diagnostic($outcome['text']);
+        }
+    }
 
-        // An error, or a result with no capabilities to add to: relayed untouched
-        if (! $result instanceof stdClass || ! ($result->capabilities ?? null) instanceof stdClass) {
-            return $response;
+    /**
+     * Join, and say what happened in a sentence an agent can relay.
+     *
+     * @param  array{role: string|null, repository: string|null, work_location: string|null}  $arguments  What to join with.
+     * @return array{joined: bool, text: string} Whether a session now exists, and what to say.
+     */
+    private function attemptJoin(array $arguments): array
+    {
+        if (! $this->join instanceof Closure) {
+            return ['joined' => false, 'text' => 'This bridge cannot join a fleet: it was started without a way to.'];
         }
 
-        $capabilities = $result->capabilities;
-
-        $experimental = $capabilities->experimental ?? null;
-
-        if (! $experimental instanceof stdClass) {
-            $experimental = new stdClass;
+        if ($arguments['role'] !== null && ! \in_array($arguments['role'], self::ROLES, true)) {
+            return ['joined' => false, 'text' => \sprintf('There is no role called %s. Roles are: %s.', $arguments['role'], implode(', ', self::ROLES))];
         }
 
-        $experimental->{self::CHANNEL_CAPABILITY} = new stdClass;
-        $capabilities->experimental = $experimental;
+        try {
+            $joined = ($this->join)($arguments);
+        } catch (RuntimeException $runtimeException) {
+            return ['joined' => false, 'text' => 'Could not join the fleet: '.$runtimeException->getMessage()];
+        }
 
-        // Added to what the service says rather than replacing it
-        $existing = $result->instructions ?? null;
+        $this->session = $joined->session;
+        $this->follower = $joined->follower;
 
-        $result->instructions = \is_string($existing) && trim($existing) !== ''
-            ? $existing."\n\n".self::CHANNEL_INSTRUCTIONS
-            : self::CHANNEL_INSTRUCTIONS;
+        // The schedules start at the join, since nothing was due while there was no session
+        $this->nextHeartbeat = time() + $this->heartbeatSeconds;
 
-        $encoded = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+        return ['joined' => true, 'text' => $joined->summary];
+    }
 
-        return $encoded === false ? $response : $encoded;
+    /**
+     * One string argument, or null when it is absent, empty, or not a string.
+     */
+    private function argument(mixed $arguments, string $name): ?string
+    {
+        $value = \is_array($arguments) ? ($arguments[$name] ?? null) : null;
+
+        return \is_string($value) && trim($value) !== '' ? trim($value) : null;
+    }
+
+    /**
+     * Write a JSON-RPC result.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function result($out, mixed $id, mixed $result): void
+    {
+        $this->write($out, (string) json_encode(['jsonrpc' => '2.0', 'id' => $id, 'result' => $result], JSON_UNESCAPED_SLASHES));
+    }
+
+    /**
+     * Write a JSON-RPC error.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function error($out, mixed $id, int $code, string $message): void
+    {
+        $this->write($out, (string) json_encode(['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => $code, 'message' => $message]], JSON_UNESCAPED_SLASHES));
+    }
+
+    /**
+     * Write a tool result carrying one sentence.
+     *
+     * **`isError` rather than a JSON-RPC error**, so the agent reads the sentence: a protocol error
+     * is the harness's to handle, and most report it as a failed call without the text.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function toolResult($out, mixed $id, string $text, bool $isError): void
+    {
+        $this->result($out, $id, ['content' => [['type' => 'text', 'text' => $text]], 'isError' => $isError]);
+    }
+
+    /**
+     * Write one protocol message.
+     *
+     * **Every write to the harness goes through here**, which is what keeps stdout to protocol
+     * messages and nothing else.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function write($out, string $message): void
+    {
+        fwrite($out, $message."\n");
     }
 
     /**
@@ -492,9 +726,9 @@ final class Bridge
      * @param  string  $message  The JSON-RPC message.
      * @return string|int The response body, or the status when it was 401.
      */
-    private function post(string $message): string|int
+    private function post(Session $session, string $message): string|int
     {
-        $response = $this->session->request()
+        $response = $session->request()
             ->withBody($message, 'application/json')
             ->post($this->service.'/robot-council/api/mcp');
 
@@ -513,13 +747,21 @@ final class Bridge
      */
     private function periodic($out, callable $diagnostic): void
     {
+        $session = $this->session;
+
+        // Nothing is due before joining: there is no session to keep alive, feed to read, or token
+        // to renew
+        if (! $session instanceof Session) {
+            return;
+        }
+
         // **A refused heartbeat is how an IDLE bridge learns anything at all.** Every endpoint
         // taking the session token answers 401 once the fleet has ended a session, and an idle
         // bridge makes no tool calls and may be an hour from its scheduled renewal -- so without
         // this it would sit there, failing quietly, until the token aged out. What the refusal
         // MEANS is settled by the renewal below, which is the only endpoint that still answers.
         if (time() >= $this->nextHeartbeat) {
-            $refused = ! $this->session->heartbeat();
+            $refused = ! $session->heartbeat();
 
             $this->nextHeartbeat = time() + $this->heartbeatSeconds;
 
@@ -551,9 +793,9 @@ final class Bridge
             $this->renewalDue = true;
         }
 
-        if (($this->roleChanged || $this->renewalDue || $this->session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
+        if (($this->roleChanged || $this->renewalDue || $session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
             try {
-                $this->session->renew();
+                $session->renew();
 
                 $this->renewalDue = false;
 

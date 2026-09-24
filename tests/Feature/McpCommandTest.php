@@ -102,9 +102,27 @@ function bridgeService(int $startStatus = 201): void
             ], 201)
             : Http::response(['message' => 'no'], $startStatus),
         '*/api/agent/session' => Http::response(['fleet_can_direct' => true], 200),
+        '*/api/agent/role' => Http::response(['session_id' => MCP_SESSION, 'pending' => true, 'requested_role' => 'coordinator', 'role' => 'build'], 202),
         '*' => Http::response('', 200),
     ]);
 }
+
+it('starts no session and ends none when nobody joins', function (): void {
+    bridgeEnrolled();
+    bridgeService();
+
+    // **Opening an editor is not a decision to join a fleet (cli#127).** Stdin is already at end
+    // of file under a test runner, so this is a harness that launched the bridge and went away
+    // without anybody asking it to join.
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE]);
+
+    expect($exit)->toBe(0)
+        ->and(bridgeStartCalls())->toBe(0)
+        ->and(bridgeEndCalls())->toBe(0)
+
+        // Not even the describing call the fleet-cannot-deliver line needs: that moved to the join
+        ->and(Http::recorded(fn (Request $request): bool => str_contains($request->url(), '/api/agent/session'))->count())->toBe(0);
+});
 
 it('ends the session exactly once when stdin closes', function (): void {
     bridgeEnrolled();
@@ -113,7 +131,7 @@ it('ends the session exactly once when stdin closes', function (): void {
     // **Stdin is already at end of file under a test runner**, which is exactly the case this
     // asserts: the reader's child sees it immediately, exits, and the bridge's loop returns. That
     // is the ordinary shutdown -- the harness went away -- reached without waiting for anything.
-    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE]);
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true]);
 
     expect($exit)->toBe(0)
         ->and(bridgeStartCalls())->toBe(1)
@@ -146,15 +164,16 @@ it('leaves no reader child behind', function (): void {
     'Counting another process is implemented here for Windows and Linux only.'
 );
 
-it('ends no session when it could not choose an installation', function (): void {
+it('comes up and ends no session when it could not choose an installation', function (): void {
     bridgeUnenrolled();
     bridgeService();
 
-    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE]);
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true]);
 
-    // Nothing was started, so nothing may be ended: a `DELETE` here would be against a session id
-    // this process never had.
-    expect($exit)->toBe(1)
+    // **Up rather than dead (cli#127).** A machine with no credential used to exit at launch with a
+    // line most harnesses bury; the join failing now leaves the bridge serving `join`, whose
+    // result names what is missing. Nothing was started, so nothing may be ended.
+    expect($exit)->toBe(0)
         ->and(bridgeStartCalls())->toBe(0)
         ->and(bridgeEndCalls())->toBe(0);
 });
@@ -163,9 +182,9 @@ it('ends no session when the service refuses to start one', function (): void {
     bridgeEnrolled();
     bridgeService(startStatus: 401);
 
-    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE]);
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true]);
 
-    expect($exit)->toBe(1)
+    expect($exit)->toBe(0)
         ->and(bridgeStartCalls())->toBe(1)
         ->and(bridgeEndCalls())->toBe(0);
 });
@@ -217,3 +236,45 @@ function readersRunning(): int
 
     return (int) trim((string) $output);
 }
+
+it('asks for a role named with --auto-join, which is a request and not a grant', function (): void {
+    bridgeEnrolled();
+    bridgeService();
+
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true, '--role' => 'coordinator']);
+
+    $asked = Http::recorded(
+        fn (Request $request): bool => $request->method() === 'POST'
+            && str_ends_with($request->url(), '/api/agent/role')
+            && $request['role'] === 'coordinator'
+    )->count();
+
+    // **A separate call, because session start takes no role** and drops one it is sent
+    expect($asked)->toBe(1)
+        ->and(Http::recorded(
+            fn (Request $request): bool => str_ends_with($request->url(), '/api/sessions')
+                && array_key_exists('requested_role', (array) json_decode($request->body(), true))
+        )->count())->toBe(0);
+});
+
+it('asks for no role when --auto-join names build, which every session starts as', function (): void {
+    bridgeEnrolled();
+    bridgeService();
+
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true, '--role' => 'build']);
+
+    expect(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/api/agent/role'))->count())->toBe(0)
+        ->and(bridgeStartCalls())->toBe(1);
+});
+
+it('describes the fleet at the join, not at launch', function (): void {
+    bridgeEnrolled();
+    bridgeService();
+
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true]);
+
+    expect(Http::recorded(fn (Request $request): bool => str_contains($request->url(), '/api/agent/session'))->count())->toBe(1)
+
+        // **Still on stderr, never on stdout**, the property #122 measured byte for byte
+        ->and(Artisan::output())->toBeEmpty();
+});

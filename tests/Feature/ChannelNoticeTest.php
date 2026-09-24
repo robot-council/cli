@@ -153,6 +153,24 @@ function channelNotices(array $written): array
 }
 
 /**
+ * Whether the fake service was sent a message with the given method.
+ */
+function channelServiceWasAskedFor(string $method): bool
+{
+    $asked = false;
+
+    Http::assertSent(function (Request $request) use ($method, &$asked): bool {
+        if (str_contains($request->url(), '/api/mcp') && data_get(json_decode($request->body(), true), 'method') === $method) {
+            $asked = true;
+        }
+
+        return true;
+    });
+
+    return $asked;
+}
+
+/**
  * A state directory this test file owns, so the sink never lands in a real home.
  */
 function channelStateHome(): string
@@ -181,17 +199,20 @@ afterEach(function (): void {
         : File::deleteDirectory(channelStateHome());
 });
 
-it('declares the channel capability and its instructions in the initialize result it relays', function (): void {
+it('declares the channel capability and its instructions in the initialize result it answers', function (): void {
     channelService();
 
     [$result] = channelRun([CHANNEL_INITIALIZE]);
 
     expect($result['id'])->toBe(0)
         ->and(data_get($result, 'result.capabilities.experimental'))->toHaveKey(Bridge::CHANNEL_CAPABILITY)
-        ->and(data_get($result, 'result.instructions'))->toBe(Bridge::CHANNEL_INSTRUCTIONS);
+        ->and(data_get($result, 'result.instructions'))->toContain(Bridge::CHANNEL_INSTRUCTIONS)
+
+        // The handshake is the bridge's own since cli#127, so the fleet is never asked for it
+        ->and(channelServiceWasAskedFor('initialize'))->toBeFalse();
 });
 
-it("keeps the service's empty objects as objects, which an array decode would turn into lists", function (): void {
+it('writes the empty capability objects as objects, which a harness reads as declared', function (): void {
     channelService();
 
     $out = tmpfile();
@@ -206,38 +227,37 @@ it("keeps the service's empty objects as objects, which an array decode would tu
     // The raw bytes, because a decoded comparison cannot tell `{}` from `[]`
     $raw = trim((string) stream_get_contents($out));
 
-    expect($raw)->toContain('"tools":{}')
-        ->and($raw)->toContain('"experimental":{"claude/channel":{}}')
+    expect($raw)->toContain('"experimental":{"claude/channel":{}}')
+        ->and($raw)->toContain('"prompts":{}')
         ->and($raw)->not->toContain('[]');
 });
 
-it('adds to instructions the service already gives rather than replacing them', function (): void {
-    channelService(initializeResult: '{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"experimental":{"other/thing":{}}},"instructions":"Use the fleet tools."}');
-
-    [$result] = channelRun([CHANNEL_INITIALIZE]);
-
-    expect(data_get($result, 'result.instructions'))->toBe("Use the fleet tools.\n\n".Bridge::CHANNEL_INSTRUCTIONS)
-        ->and(data_get($result, 'result.capabilities.experimental'))->toHaveKeys(['other/thing', Bridge::CHANNEL_CAPABILITY]);
-});
-
-it('declares nothing when it has no follower, because nothing could ever be announced', function (): void {
+it('declares nothing when no follower can exist, because nothing could ever be announced', function (): void {
     channelService();
 
     [$result] = channelRun([CHANNEL_INITIALIZE], withFollower: false);
 
     expect(data_get($result, 'result.capabilities'))->not->toHaveKey('experimental')
-        ->and(data_get($result, 'result'))->not->toHaveKey('instructions');
+        ->and(data_get($result, 'result.instructions'))->not->toContain(Bridge::CHANNEL_INSTRUCTIONS);
 });
 
-it('leaves every response other than the initialize result untouched', function (): void {
+it('is not a channel for any harness but Claude Code', function (): void {
+    channelService([channelDirective(11)]);
+
+    $written = channelRun([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED], channel: false);
+
+    expect(data_get($written, '0.result.capabilities'))->not->toHaveKey('experimental')
+        ->and(data_get($written, '0.result.instructions'))->not->toContain(Bridge::CHANNEL_INSTRUCTIONS)
+        ->and(channelNotices($written))->toBeEmpty();
+});
+
+it('keeps a string id a string', function (): void {
     channelService();
 
-    $written = channelRun([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED, '{"jsonrpc":"2.0","id":1,"method":"tools/list"}']);
+    [$result] = channelRun(['{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{"protocolVersion":"2025-11-25"}}']);
 
-    $list = array_values(array_filter($written, fn (array $m): bool => ($m['id'] ?? null) === 1));
-
-    expect($list)->toHaveCount(1)
-        ->and(data_get($list, '0.result'))->toBe(['tools' => []]);
+    expect($result['id'])->toBe('init-1')
+        ->and(data_get($result, 'result.capabilities.experimental'))->toHaveKey(Bridge::CHANNEL_CAPABILITY);
 });
 
 it('announces new events the follower left, once the harness has initialized', function (): void {
@@ -297,63 +317,6 @@ it('counts only what the last tick wrote, so one batch is announced once', funct
 
     expect($first)->toBe(1)
         ->and($follower->delivered())->toBe(0);
-});
-
-it('is not a channel for any harness but Claude Code, so another client sees the service unchanged', function (): void {
-    channelService([channelDirective(11)]);
-
-    $written = channelRun([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED], channel: false);
-
-    expect(data_get($written, '0.result.capabilities'))->not->toHaveKey('experimental')
-        ->and(data_get($written, '0.result'))->not->toHaveKey('instructions')
-        ->and(channelNotices($written))->toBeEmpty();
-});
-
-it('keeps a string id a string, and declares the channel on it', function (): void {
-    channelService();
-
-    [$result] = channelRun(['{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{"protocolVersion":"2025-11-25"}}']);
-
-    expect($result['id'])->toBe('init-1')
-        ->and(data_get($result, 'result.capabilities.experimental'))->toHaveKey(Bridge::CHANNEL_CAPABILITY);
-});
-
-it('relays an error answer to initialize untouched', function (): void {
-    Http::fake([
-        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => []], 201),
-        '*/api/events*' => Http::response(['events' => [], 'cursor' => 99], 200),
-        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"Unsupported protocol version"}}', 200),
-    ]);
-
-    [$result] = channelRun([CHANNEL_INITIALIZE]);
-
-    expect($result)->toBe(['jsonrpc' => '2.0', 'id' => 0, 'error' => ['code' => -32602, 'message' => 'Unsupported protocol version']]);
-});
-
-it('replaces an experimental entry that is not an object, which laravel/mcp sends as [] when empty', function (): void {
-    channelService(initializeResult: '{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"experimental":[]}}');
-
-    [$result] = channelRun([CHANNEL_INITIALIZE]);
-
-    expect(data_get($result, 'result.capabilities.experimental'))->toBe([Bridge::CHANNEL_CAPABILITY => []]);
-});
-
-it('sets the instructions when the service gives null for them', function (): void {
-    channelService(initializeResult: '{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"instructions":null}');
-
-    [$result] = channelRun([CHANNEL_INITIALIZE]);
-
-    expect(data_get($result, 'result.instructions'))->toBe(Bridge::CHANNEL_INSTRUCTIONS);
-});
-
-it("relays the service's own bytes when the rewrite cannot be encoded, rather than no answer", function (): void {
-    // `1e999` decodes to INF, which json_encode refuses
-    channelService(initializeResult: '{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"limit":1e999}');
-
-    $written = channelRun([CHANNEL_INITIALIZE]);
-
-    expect($written)->toHaveCount(1)
-        ->and(data_get($written, '0.id'))->toBe(0);
 });
 
 it('announces nothing when the sink could not be written, because the stop hook would find nothing', function (): void {

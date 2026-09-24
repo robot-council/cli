@@ -166,8 +166,9 @@ it('writes only parseable protocol messages to stdout, across a whole run', func
         '*/api/mcp' => Http::sequence()
             ->push('{"jsonrpc":"2.0","id":1,"result":{}}', 200)
 
-            // A notification: `laravel/mcp` answers 202 with NO body, and
-            // `notifications/initialized` is mandatory, so this happens on every real session
+            // A notification: `laravel/mcp` answers 202 with NO body. `notifications/initialized`
+            // did this on every real session until the bridge began answering it itself (cli#127);
+            // a cancellation is still relayed and is answered the same way
             ->push('', 202)
 
             // An nginx page in front of the fleet -- multi-line, and not JSON at all
@@ -180,7 +181,7 @@ it('writes only parseable protocol messages to stdout, across a whole run', func
 
     $messages = implode("\n", [
         '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
-        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}',
         '{"jsonrpc":"2.0","id":3,"method":"tools/call"}',
         '{"jsonrpc":"2.0","id":4,"method":"tools/list"}',
     ])."\n";
