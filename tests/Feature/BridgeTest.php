@@ -137,7 +137,13 @@ it('renews once and retries after a 401, without restarting', function (): void 
         ->and($retriedWithNewToken)->toBeTrue();
 });
 
-it('reports a second consecutive 401 rather than retrying forever', function (): void {
+it('reports a second consecutive 401 rather than retrying forever, without blaming the enrollment', function (): void {
+    // **The renewal below answers 200, and that is what the message may not contradict.** Core puts
+    // `sessions/{id}/renew` inside the `EnsureInstallation` group, which refuses unless
+    // `revoked_at === null && expires_at->isFuture()`, and `Session::renew()` returns normally only
+    // on a 2xx. So a fake that renews 200 and then refuses the retry is the state where the
+    // enrollment has just been PROVED usable -- and until #185 the diagnostic named it as the
+    // likely cause, which is what this test pinned.
     Http::fake([
         '*/api/sessions/7/renew' => Http::response(['token' => SECOND_TOKEN, 'expires_in' => 3600], 200),
         '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
@@ -157,7 +163,16 @@ it('reports a second consecutive 401 rather than retrying forever', function ():
     // Nothing on stdout, because there was no protocol response to write
     expect(trim((string) stream_get_contents($out)))->toBeEmpty()
         ->and($diagnostics)->toHaveCount(1)
-        ->and($diagnostics[0])->toContain('revoked');
+        // **The first two are the control for the three after them.** #185 is a rewording, not a
+        // removal: without these, deleting the throw outright would satisfy every absence below and
+        // the test would report clean on a bridge that had gone silent. Measured both ways.
+        ->and($diagnostics[0])->toContain('refused it on the next call')
+        ->and($diagnostics[0])->toContain('did not reach the fleet')
+        // Not the cause the preceding renewal disproved ...
+        ->and($diagnostics[0])->not->toContain('revoked')
+        ->and($diagnostics[0])->not->toContain('installation')
+        // ... nor an instruction that repairs none of what is actually left.
+        ->and($diagnostics[0])->not->toContain('enroll');
 });
 
 it('writes only parseable protocol messages to stdout, across a whole run', function (): void {
