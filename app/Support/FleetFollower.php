@@ -121,12 +121,20 @@ final class FleetFollower
      * forwarding tool calls: the feed is an extra, and a fleet that cannot be read is not a reason
      * to stop answering the agent in front of you.
      *
+     * **Answers whether this session's own role changed**, which the caller acts on by renewing.
+     * The abilities a session believes it holds are the ones it was handed at start, and
+     * `concerns()` gates on them -- so a session promoted to `coordinator` goes on discarding the
+     * very events it was promoted to hear, for as long as an hour, while the service would let it
+     * post a directive. The client and the service disagree, and the client is the one deciding
+     * what reaches the agent.
+     *
      * @param  callable(string):void  $diagnostic  Where anything that is not a protocol message goes.
+     * @return bool Whether this session's role changed and its token should be renewed now.
      */
-    public function tick(callable $diagnostic): void
+    public function tick(callable $diagnostic): bool
     {
         if ($this->cursor === null || time() < $this->nextPoll) {
-            return;
+            return false;
         }
 
         try {
@@ -138,7 +146,7 @@ final class FleetFollower
 
             $diagnostic('Could not read the fleet feed: '.$throwable->getMessage());
 
-            return;
+            return false;
         }
 
         $this->backoff = self::BACKOFF_SECONDS;
@@ -149,8 +157,34 @@ final class FleetFollower
         $this->cursor = $page['cursor'] ?? $this->cursor;
 
         $concerning = [];
+        $roleChanged = false;
 
         foreach ($page['events'] as $event) {
+            // **Its own role, which `concerns()` filters out with everything else this session did.**
+            // That filter is right for the sink -- an agent does not need to be told what it just
+            // did -- and wrong here: a role is decided by an administrator rather than by this
+            // session, so it arrives as an event about this session that this session did not cause,
+            // and it is the one thing about itself the bridge has to act on.
+            if ($this->actor($event) === $this->session->id() && $this->noteOwnRole($event, $diagnostic)) {
+                $roleChanged = true;
+
+                // **And nothing below it in this page is decided here.** Those events happened
+                // after the role did, so deciding them against abilities this session is about to
+                // stop having would discard them *permanently* -- the cursor moves past the whole
+                // page either way, and the feed serves strictly what is after it. A page holds up
+                // to 200 events (`FleetFeed::MAX_PAGE` in `robot-council/core`, and this client
+                // sends no `limit`), so on a busy fleet that is a page-worth of exactly what the
+                // promotion was granted for. Rewinding the cursor to this event hands the rest back
+                // on the next tick, by which time the bridge has renewed.
+                $id = $event['id'] ?? null;
+
+                if (\is_int($id)) {
+                    $this->cursor = $id;
+
+                    break;
+                }
+            }
+
             // **Decided before the held set is updated, and the order is the whole of it.** A
             // `task.cancelled` for a task this session holds both concerns it AND ends the hold, so
             // tracking first would drop the task from the set and then ask whether it was in it --
@@ -165,7 +199,7 @@ final class FleetFollower
         }
 
         if ($concerning === []) {
-            return;
+            return $roleChanged;
         }
 
         try {
@@ -173,6 +207,79 @@ final class FleetFollower
         } catch (Throwable $throwable) {
             $diagnostic($throwable->getMessage());
         }
+
+        return $roleChanged;
+    }
+
+    /**
+     * Report an event about this session's own role, and say whether the role actually changed.
+     *
+     * **A denial reports and returns false**, because nothing changed and a renewal would be a
+     * round trip that tells the session what it already holds. Reporting it is the point: a session
+     * whose request was refused otherwise runs as `build` for the rest of its life while its
+     * operator believes an approval is still pending.
+     *
+     * **Said once, on the event, rather than on every tick.** A demotion that announced itself
+     * repeatedly, or a coordinator that collected a refusal per attempt, is the noise that stops
+     * stderr being read.
+     *
+     * @param  array<array-key, mixed>  $event  The event, already known to name this session.
+     * @param  callable(string):void  $diagnostic  Where it is reported.
+     * @return bool Whether the role changed, and so whether the token needs renewing.
+     */
+    private function noteOwnRole(array $event, callable $diagnostic): bool
+    {
+        $type = $this->type($event);
+
+        if ($type === 'session.role_changed') {
+            // **Neutral about the direction, because this client cannot order the roles.** The
+            // service owns that list, and a demotion is as likely as a promotion -- an imposed one
+            // is core's named path for an emergency. "Renewing so it can act on it" was true of a
+            // promotion and precisely backwards for the narrowing case it matters most in.
+            $how = $this->metaString($event, 'how');
+
+            $diagnostic(sprintf(
+                'This session is now in the `%s` role, from `%s`%s. Refreshing what it may do.',
+                $this->metaString($event, 'to') ?? 'unknown',
+                $this->metaString($event, 'from') ?? 'unknown',
+                $how === null ? '' : ', '.$how.' by an administrator'
+            ));
+
+            return true;
+        }
+
+        // The service records a refusal against the request rather than as a role change, so the
+        // `refused` key is what tells the two apart -- a request this session made carries `to`.
+        $refused = $this->metaString($event, 'refused');
+
+        if ($type === 'session.role_requested' && $refused !== null) {
+            $diagnostic(sprintf(
+                'The request for the `%s` role was refused. This session stays `%s`.',
+                $refused,
+                $this->metaString($event, 'stays') ?? 'unknown'
+            ));
+        }
+
+        return false;
+    }
+
+    /**
+     * One string out of an event's `meta`.
+     *
+     * @param  array<array-key, mixed>  $event  The event.
+     * @param  string  $key  The key to read.
+     */
+    private function metaString(array $event, string $key): ?string
+    {
+        $meta = $event['meta'] ?? null;
+
+        if (! \is_array($meta)) {
+            return null;
+        }
+
+        $value = $meta[$key] ?? null;
+
+        return \is_string($value) && $value !== '' ? $value : null;
     }
 
     /**
