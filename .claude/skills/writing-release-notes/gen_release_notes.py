@@ -309,34 +309,6 @@ def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0, iss
     if _all_maint(paths):
         return "maint"
 
-    # 5a. The linked issue's GitHub type, where a human set one.
-    #
-    #    **Placed HERE, after rule 5, and the position is the whole of the correctness.** A
-    #    reader would naturally put it above rule 4, and that is wrong: `#154` is typed `Bug`
-    #    and is confined to `.claude/`, so rule 5 routes it to maintenance, which is right --
-    #    a change to a skill file is maintenance whatever the ticket it closes is typed. Taken
-    #    first, the type would call it a fix. That single placement is what turned #162's
-    #    measured "1 of 2 `Bug` agreement" into 2 of 2.
-    #
-    #    **`Feature` is checked before `Bug`, deliberately.** The two buckets fail
-    #    asymmetrically: a fix shown under *What's new* is visible and merely mislabelled,
-    #    while a feature under *What's fixed* understates the release, and only the second is
-    #    forbidden. So a change closing both answers `new`, which is the safe direction.
-    #
-    #    **`Task` is NOT consulted, despite predicting `fix` six times out of six** on the
-    #    v0.3.0 range. `writing-issues` assigns `Task` to a research spike, a decision fork, a
-    #    follow-up cleanup or an epic -- never to a bug -- so that agreement is an artifact of
-    #    how those particular tickets were typed. A rule built on it breaks the first time
-    #    somebody types one correctly, and it breaks toward the forbidden direction.
-    #
-    #    An issue with no type set reaches none of this and falls through unchanged, which is
-    #    the majority: 14 of the 25 in that range carried none.
-    if "feature" in issue_types:
-        return "new"
-
-    if "bug" in issue_types:
-        return "fix"
-
     # 6. Test-dominant diff with no source edit: the change is coverage, not product.
     #
     #    **The source exclusion is what makes this rule mean anything** (#161, ported from
@@ -357,9 +329,49 @@ def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0, iss
     if test_lines > other_lines and not any(p.startswith(SOURCE_PREFIXES) for p in paths):
         return "maint"
 
+    # 7. The maintenance vocabulary: a verb the title opens with, or a word it names.
     if MAINT_VERBS.match(t) or "update dependencies" in t.lower() or MAINT_WORDS.search(t):
         return "maint"
 
+    # 8. The linked issue's GitHub type, where a human set one. **Last**, so it decides only what
+    #    nothing else could, and the answer it replaces is the bare `new` below.
+    #
+    #    **It was first written after rule 5, and that was wrong** -- #166's review measured the
+    #    consequence. Placed there it also preempted rules 6 and 7, so a `Bug`-typed dependency
+    #    bump titled `Raise dependency floors to their latest stable releases` became a **fix**,
+    #    and a `Feature`-typed skill change became **new**. The ticket said "nothing else", and
+    #    that placement quietly overrode the maintenance vocabulary. Here it cannot: anything the
+    #    paths, the labels or the title already identify as maintenance has returned.
+    #
+    #    The case it exists for still reaches it. `Tell a session the sweep marked it stale or
+    #    gone` (#158) matches no maintenance verb, word or path, so it arrives here and its `Bug`
+    #    type routes it to *What's fixed* instead of the `new` it would otherwise get.
+    #
+    #    **`Feature` earns its line only for a change that closes BOTH kinds**, and that is worth
+    #    stating because it is not obvious: the fallthrough below already answers `new`, so a
+    #    `Feature`-typed change reaching here would route there anyway. What the branch does is
+    #    win against `Bug` when a pull request closes one of each. The two buckets fail
+    #    asymmetrically -- a fix shown under *What's new* is visible and merely mislabeled, while a
+    #    feature under *What's fixed* understates the release, and only the second is forbidden --
+    #    so the mixed case takes `new`. It is kept rather than deleted because the alternative is a
+    #    bare `if "bug"` whose mixed-case behavior is an accident of the fallthrough rather than a
+    #    decision.
+    #
+    #    **`Task` is NOT consulted, despite predicting `fix` six times out of six** on the v0.3.0
+    #    range. `writing-issues` assigns `Task` to a research spike, a decision fork, a follow-up
+    #    cleanup or an epic -- never to a bug -- so that agreement is an artifact of how those
+    #    tickets were typed. A rule built on it breaks the first time somebody types one correctly,
+    #    and it breaks toward the forbidden direction.
+    #
+    #    An issue with no type reaches none of this and falls through to `new`, which is the
+    #    majority: 14 of the 25 in that range carried none.
+    if "feature" in issue_types:
+        return "new"
+
+    if "bug" in issue_types:
+        return "fix"
+
+    # 9. Everything else.
     return "new"
 
 
