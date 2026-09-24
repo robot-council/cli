@@ -225,12 +225,6 @@ final class Bridge
     private ?string $fleetInstructions = null;
 
     /**
-     * Whether a join happened before the harness finished initializing, so the list-changed notice
-     * is still owed.
-     */
-    private bool $listChangedOwed = false;
-
-    /**
      * Ask the loop to finish after the message it is handling.
      */
     public function stop(): void
@@ -466,11 +460,12 @@ final class Bridge
         if ($method === 'notifications/initialized') {
             $this->initialized = true;
 
-            if ($this->listChangedOwed) {
-                $this->listChangedOwed = false;
-
-                $this->notifyListChanged($out);
-            }
+            // **Every time, not only when something changed since (cli#208).** A harness may be
+            // holding a list from an earlier process of this server: Cursor, restarting a stopped
+            // bridge or reloading one, keeps the previous process's tools and does not ask again,
+            // so an agent that had joined was left offered the fleet's tools and not `join`, with
+            // every call refused. The notice makes it ask; one extra `tools/list` is the cost.
+            $this->notifyListChanged($out);
 
             return true;
         }
@@ -636,8 +631,11 @@ final class Bridge
         if ($outcome['joined']) {
             // Before the result, the order #126 measured: the harness re-reads the list at once,
             // and the agent can call a fleet tool in the same turn it joined in. A harness that has
-            // not finished initializing is told once it has, rather than not at all.
-            $this->initialized ? $this->notifyListChanged($out) : $this->listChangedOwed = true;
+            // not finished initializing is told when it does, by the notice every
+            // `notifications/initialized` is answered with.
+            if ($this->initialized) {
+                $this->notifyListChanged($out);
+            }
         }
 
         $this->toolResult($out, $id, $outcome['text'], ! $outcome['joined']);
