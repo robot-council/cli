@@ -121,6 +121,11 @@ final class Bridge
     public const string JOIN_TOOL = 'join';
 
     /**
+     * The fleet tool an agent takes up a task with, which moves it from `Claimed` to `InProgress`.
+     */
+    public const string START_TOOL = 'task_start';
+
+    /**
      * The type of the record left when the fleet ends this bridge's session.
      *
      * **The prefix is the whole point.** `PendingCommand` renders an entry with no `type` as
@@ -207,6 +212,10 @@ final class Bridge
         private readonly bool $channel = false,
         private readonly ?Closure $join = null,
         private readonly int $reannounceSeconds = self::REANNOUNCE_SECONDS,
+
+        // What branch the checkout is on, asked when an agent starts a task. Optional, so a bridge
+        // built without it relays `task_start` exactly as the agent wrote it.
+        private readonly ?Closure $branch = null,
     ) {}
 
     /**
@@ -502,6 +511,8 @@ final class Bridge
             return;
         }
 
+        $message = $this->withBranch($message);
+
         try {
             $response = $this->exchange($session, $message);
 
@@ -517,6 +528,64 @@ final class Bridge
             // malformed protocol message rather than as an error
             $diagnostic($throwable->getMessage());
         }
+    }
+
+    /**
+     * Add the checkout's branch to an agent's `task_start`, when the agent named none.
+     *
+     * **Only the lane can say which branch it is building on, and the checkout knows better than
+     * the agent does** (#238). Core records the branch a start reports beside the take-up itself
+     * (`robot-council/core#316`), and its tool asks the agent to omit it when it cannot tell --
+     * which an agent working in a checkout never needs to. A branch the agent did name is left
+     * alone: it said something on purpose, and the bridge does not overrule it.
+     *
+     * **Anything else is relayed byte for byte.** Decoded as objects, never as arrays, so a call
+     * whose arguments hold `{}` is not re-encoded as `[]`; and a message that is not a start, or a
+     * checkout with no reportable branch, returns the original string untouched. A service that
+     * predates the field ignores an argument it does not validate, so this is safe to send to one.
+     *
+     * @param  string  $message  One JSON-RPC message, as the harness wrote it.
+     * @return string The message to relay.
+     */
+    private function withBranch(string $message): string
+    {
+        if (! $this->branch instanceof Closure || ! str_contains($message, self::START_TOOL)) {
+            return $message;
+        }
+
+        $decoded = json_decode($message);
+
+        if (! $decoded instanceof stdClass
+            || ($decoded->method ?? null) !== 'tools/call'
+            || ! ($decoded->params ?? null) instanceof stdClass
+            || ($decoded->params->name ?? null) !== self::START_TOOL) {
+            return $message;
+        }
+
+        $arguments = $decoded->params->arguments ?? new stdClass;
+
+        if (! $arguments instanceof stdClass) {
+            return $message;
+        }
+
+        $named = $arguments->branch ?? null;
+
+        if (\is_string($named) && trim($named) !== '') {
+            return $message;
+        }
+
+        $branch = ($this->branch)();
+
+        if (! \is_string($branch) || $branch === '') {
+            return $message;
+        }
+
+        $arguments->branch = $branch;
+        $decoded->params->arguments = $arguments;
+
+        $encoded = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        return $encoded === false ? $message : $encoded;
     }
 
     /**

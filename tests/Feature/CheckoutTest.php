@@ -270,6 +270,57 @@ it('says nothing when the directory does not exist', function (): void {
         ->and(Checkout::workLocation($missing))->toBeNull();
 });
 
+it('reads the branch a checkout is on, and says nothing for a detached HEAD', function (): void {
+    $repository = scratchDirectory();
+    $bare = scratchDirectory();
+
+    try {
+        makeRepository($repository);
+        runGit($repository, ['checkout', '-q', '-b', 'feature/report-branch']);
+
+        expect(Checkout::branch($repository))->toBe('feature/report-branch');
+
+        // A name git accepts and the service refuses is not reported either.
+        runGit($repository, ['checkout', '-q', '-b', 'fix@thing']);
+
+        expect(Checkout::branch($repository))->toBeNull();
+
+        // **A commit hash is never offered in a branch's place** (#238). `rev-parse --abbrev-ref`
+        // would answer `HEAD` here, which reads as a branch by that name.
+        runGit($repository, ['checkout', '-q', '--detach']);
+
+        expect(Checkout::branch($repository))->toBeNull()
+
+            // And a directory that is not a repository at all.
+            ->and(Checkout::branch($bare))->toBeNull();
+    } finally {
+        removeDirectory($repository);
+        removeDirectory($bare);
+    }
+});
+
+it('reports only a branch the service will accept', function (string $branch, ?string $expected): void {
+    // Git allows every one of these names; the service's `BranchName` refuses the ones mapped to
+    // null, and a refused branch would fail the agent's start for a value the agent never wrote.
+    expect(Checkout::branchNamed($branch))->toBe($expected);
+})->with([
+    'a plain name' => ['main', 'main'],
+    'a path' => ['feature/report-branch', 'feature/report-branch'],
+    'dots and dashes' => ['release-1.2.x', 'release-1.2.x'],
+    'an at sign' => ['fix@thing', null],
+    'a plus' => ['a+b', null],
+    'non-ASCII' => ["caf\u{e9}", null],
+    'a trailing .lock' => ['topic.lock', null],
+    'at the length bound' => [str_repeat('a', 200), str_repeat('a', 200)],
+    'past the length bound' => [str_repeat('a', 201), null],
+]);
+
+it('mirrors the branch rules core enforces', function (): void {
+    // Read from `robot-council/core`'s `Support\BranchName` on `main` at `6f33cf5` (#329).
+    expect(Checkout::MAX_BRANCH)->toBe(200)
+        ->and(Checkout::BRANCH_PATTERN)->toBe('/^(?![-.\/])(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock$)[A-Za-z0-9._\/-]+(?<![.\/])$/D');
+});
+
 it('agrees with the bounds core actually enforces', function (): void {
     // Written out rather than imported, because `core` is a separate package this one does not
     // depend on. Read from its `Support\WorkIdentity` at `session-work-location`. If these drift,

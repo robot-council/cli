@@ -356,3 +356,116 @@ it('sends no heartbeat before one is due, which is what makes the test above mea
 
     Http::assertNotSent(fn (Request $request): bool => str_ends_with($request->url(), '/agent/heartbeat'));
 });
+
+/**
+ * The body of every MCP request the bridge sent the fleet.
+ *
+ * @return list<string>
+ */
+function sentMcpBodies(): array
+{
+    return array_values(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/api/mcp'))
+        ->map(fn (array $pair): string => $pair[0]->body())
+        ->all());
+}
+
+/**
+ * The tool call the bridge sent the fleet at this position, decoded.
+ *
+ * @return array{name: mixed, arguments: mixed}
+ */
+function sentToolCall(int $index): array
+{
+    $sent = json_decode(sentMcpBodies()[$index], true, 512, JSON_THROW_ON_ERROR);
+
+    if (! is_array($sent) || ! is_array($sent['params'] ?? null)) {
+        throw new RuntimeException('The bridge sent something that is not a tool call.');
+    }
+
+    return ['name' => $sent['params']['name'] ?? null, 'arguments' => $sent['params']['arguments'] ?? null];
+}
+
+/**
+ * Relay these lines through a bridge whose checkout is on this branch.
+ *
+ * @param  string  $lines  What the harness writes.
+ * @return resource What the bridge wrote back.
+ */
+function relayWithBranch(string $lines, ?string $branch, ?string $answer = null)
+{
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/mcp' => Http::response($answer ?? '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}', 200),
+    ]);
+
+    $out = tmpfile();
+
+    new Bridge(startedSession(), BRIDGE_SERVICE, branch: static fn (): ?string => $branch)
+        ->run(streamOf($lines), $out, fn (string $m): null => null);
+
+    return $out;
+}
+
+it('tells the fleet which branch a task was taken up on, read from the checkout', function (): void {
+    relayWithBranch('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_start","arguments":{"task_id":42}}}'."\n", 'feature/report-branch');
+
+    // The start itself is the take-up: core moves the task from `Claimed` to `InProgress` and
+    // records the branch beside it (#238, `robot-council/core#316`).
+    $sent = sentToolCall(0);
+
+    expect($sent['name'])->toBe('task_start')
+        ->and($sent['arguments'])->toBe(['task_id' => 42, 'branch' => 'feature/report-branch']);
+});
+
+it('keeps a branch the agent named, rather than overruling it with the checkout', function (): void {
+    $line = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_start","arguments":{"task_id":42,"branch":"agent/said-so"}}}';
+
+    relayWithBranch($line."\n", 'feature/report-branch');
+
+    expect(sentMcpBodies()[0])->toBe($line);
+});
+
+it('adds a branch to a start that has no arguments object at all', function (): void {
+    relayWithBranch('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_start"}}'."\n", 'main');
+
+    expect(sentToolCall(0)['arguments'])->toBe(['branch' => 'main']);
+});
+
+it('relays a start unchanged when the checkout has no branch to report', function (): void {
+    // A detached HEAD, or no checkout at all: nothing, rather than something wrong.
+    $line = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_start","arguments":{"task_id":42}}}';
+
+    relayWithBranch($line."\n", null);
+
+    expect(sentMcpBodies()[0])->toBe($line);
+});
+
+it('relays every other message byte for byte, empty objects included', function (): void {
+    // Decoding as arrays would turn `{}` into `[]`, a different value in a schema the harness wrote.
+    $lines = [
+        '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_claim","arguments":{"task_id":42}}}',
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"events_narrate","arguments":{"body":"task_start is next","meta":{}}}}',
+    ];
+
+    relayWithBranch(implode("\n", $lines)."\n", 'main');
+
+    expect(sentMcpBodies())->toBe($lines);
+});
+
+it('passes on a start the service refuses and keeps relaying, since a refusal says nothing about the work', function (): void {
+    $out = relayWithBranch(
+        '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_start","arguments":{"task_id":42}}}'."\n"
+            .'{"jsonrpc":"2.0","id":2,"method":"tools/list"}'."\n",
+        'main',
+        '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"That task is not yours to start."}],"isError":true}}',
+    );
+
+    rewind($out);
+
+    $replies = array_values(array_filter(explode("\n", (string) stream_get_contents($out))));
+
+    // The refusal reaches the agent as the service wrote it, and the next call is still relayed:
+    // the bridge neither ended the session nor dropped anything.
+    expect($replies[0])->toContain('That task is not yours to start.')
+        ->and(sentMcpBodies())->toHaveCount(2);
+});

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Commands;
 
 use App\Support\Bridge;
+use App\Support\Checkout;
 use App\Support\Credentials\Credentials;
 use App\Support\FleetJoin;
 use App\Support\MachineIdentity;
@@ -87,6 +88,9 @@ final class McpCommand extends Command
             // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
             channel: $harness === 'claude',
             join: $join(...),
+
+            // Read when an agent starts a task, not once at launch: a lane switches branches.
+            branch: static fn (): ?string => Checkout::branch(),
         );
 
         if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {

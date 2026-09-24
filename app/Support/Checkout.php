@@ -64,6 +64,21 @@ final class Checkout
     public const int MAX_LOCATION = 32;
 
     /**
+     * The longest branch this will report, and the characters it may hold.
+     *
+     * **Mirrored from `robot-council/core`'s `Support\BranchName`**, which `task_start` validates a
+     * branch against, for the reason `MAX_REPOSITORY` gives: a branch this sends and the service
+     * refuses would fail the agent's start for a value the agent never wrote (#238). Git allows
+     * names the service does not -- `@`, `+`, non-ASCII -- and such a branch is left unreported.
+     */
+    public const int MAX_BRANCH = 200;
+
+    /**
+     * What a reportable branch looks like, character for character as core has it.
+     */
+    public const string BRANCH_PATTERN = '/^(?![-.\/])(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock$)[A-Za-z0-9._\/-]+(?<![.\/])$/D';
+
+    /**
      * The only host whose remotes name a repository this fleet can talk about.
      *
      * A remote pointing anywhere else is not an error and is not coerced: it proposes nothing. An
@@ -167,6 +182,34 @@ final class Checkout
         $gitDir = self::git(['rev-parse', '--absolute-git-dir'], $directory);
 
         return $gitDir === null ? null : self::locationFromGitDir($gitDir);
+    }
+
+    /**
+     * Which branch this checkout is on, or null when nothing true can be said.
+     *
+     * **`symbolic-ref`, not `rev-parse --abbrev-ref`**, because of the detached case: `rev-parse`
+     * answers the literal `HEAD` there, which reads as a branch named `HEAD`, while `symbolic-ref
+     * --quiet` fails, and a failure is null. A commit hash is never offered in a branch's place.
+     *
+     * @param  string|null  $directory  Where to ask from; the current working directory by default.
+     * @return string|null The branch's short name, or null.
+     */
+    public static function branch(?string $directory = null): ?string
+    {
+        $branch = self::git(['symbolic-ref', '--quiet', '--short', 'HEAD'], $directory);
+
+        return $branch === null ? null : self::branchNamed($branch);
+    }
+
+    /**
+     * Judge a branch name against what the service accepts.
+     *
+     * @param  string  $value  The branch as git named it.
+     * @return string|null The branch, or null when the service would refuse it.
+     */
+    public static function branchNamed(string $value): ?string
+    {
+        return mb_strlen($value) <= self::MAX_BRANCH && preg_match(self::BRANCH_PATTERN, $value) === 1 ? $value : null;
     }
 
     /**
