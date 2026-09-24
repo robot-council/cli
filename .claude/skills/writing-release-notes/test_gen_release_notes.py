@@ -5,9 +5,11 @@ Offline tests for gen_release_notes.py: title cleanup and bucket routing. Neithe
 
   python3 -m unittest discover -s .claude/skills/writing-release-notes
 """
+import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -89,6 +91,157 @@ class Routing(unittest.TestCase):
         # this title reached Maintenance only when its test diff happened to be the larger one.
         self.assertEqual(g.bucket("s", self.TITLE, paths=paths, other_lines=10), "maint")
         self.assertEqual(g.bucket("s", self.TITLE, paths=paths, test_lines=20, other_lines=10), "maint")
+
+    def test_the_linked_issues_type_routes_a_change_the_verbs_miss(self):
+        """#166. `FIX_VERBS` matches a title *opening* with `Fix|Resolve|Repair|...`, and almost no
+        title here opens that way, because `writing-pull-requests` sanctions leading with the
+        symptom or the outcome. Measured for #162 over `v0.2.0..main`: 19 bullets in What's new
+        against 1 in What's fixed, roughly a dozen of the 19 being fixes.
+        """
+        source = ["app/Support/FleetFollower.php"]
+
+        # #158's real title and shape: a fix whose title opens with a verb the list does not know.
+        fix = "Tell a session the sweep marked it stale or gone"
+
+        self.assertEqual(g.bucket("s", fix, paths=source, other_lines=10), "new")
+        self.assertEqual(
+            g.bucket("s", fix, paths=source, other_lines=10, issue_types=("Bug",)), "fix")
+
+        self.assertEqual(
+            g.bucket("s", "Report the fleet's roles on the dashboard", paths=source,
+                     other_lines=10, issue_types=("Feature",)),
+            "new")
+
+    def test_the_type_is_read_after_the_maintenance_path_rule_not_before_the_verbs(self):
+        """The placement is the whole of the correctness, and it is not the obvious one.
+
+        `#154` is typed `Bug` and is confined to `.claude/`. Rule 5 routes it to Maintenance,
+        which is right -- a change to a skill file is maintenance whatever the ticket it closes
+        is typed. A type rule placed above rule 4 would take it first and call it a fix.
+        """
+        self.assertEqual(
+            g.bucket("s", "Take the pull-request skill from `robot-council/core` verbatim",
+                     paths=[".claude/skills/writing-pull-requests/SKILL.md"],
+                     issue_types=("Bug",)),
+            "maint")
+
+        # And a category-bearing label on the linked issue still wins, because rule 2 is above
+        # the type. `LABEL_SEC` is empty in this repository, so `build` is the one to assert on:
+        # a `documentation` or `build` ticket is maintenance whatever its type says.
+        self.assertEqual(
+            g.bucket("s", "Add a release-cascade rule", labels=["build"],
+                     paths=["app/Support/Thing.php"], other_lines=10,
+                     issue_types=("Feature",)),
+            "maint")
+
+    def test_the_type_does_not_override_the_maintenance_rules(self):
+        """#166's review measured this, and it is why the rule sits last rather than after rule 5.
+
+        Placed after rule 5 the type also preempted rule 6 (test-dominance) and rule 7 (the
+        maintenance vocabulary), so a `Bug`-typed dependency bump became a **fix** and a
+        `Feature`-typed skill change became **new**. The ticket said the rule should do "nothing
+        else", and that placement quietly overrode every maintenance signal a title carries.
+        """
+        source = ["app/Support/Store.php"]
+
+        # Rule 7, the maintenance vocabulary: a verb, a dependency phrase, and a maintenance word.
+        self.assertEqual(
+            g.bucket("s", "Refactor the credential store", paths=source, other_lines=10,
+                     issue_types=("Bug",)),
+            "maint")
+        self.assertEqual(
+            g.bucket("s", self.TITLE, paths=source, other_lines=10, issue_types=("Bug",)),
+            "maint")
+        self.assertEqual(
+            g.bucket("s", "Add a skill for cutting releases", paths=source, other_lines=10,
+                     issue_types=("Feature",)),
+            "maint")
+
+        # Rule 6, a test-dominant diff with no source path.
+        self.assertEqual(
+            g.bucket("s", "Cover the credential store", paths=["tests/FooTest.php", "docs/x.md"],
+                     test_lines=90, other_lines=10, issue_types=("Bug",)),
+            "maint")
+
+    def test_task_is_not_consulted(self):
+        """`Task` predicted `fix` six times out of six on the v0.3.0 range, and that is an artifact.
+
+        `writing-issues` assigns `Task` to a research spike, a decision fork, a follow-up cleanup
+        or an epic -- never to a bug. A rule built on it breaks the first time somebody types one
+        correctly, and it breaks toward the direction #162's criteria forbid.
+        """
+        self.assertEqual(
+            g.bucket("s", "Tell a session the sweep marked it stale or gone",
+                     paths=["app/Support/FleetFollower.php"], other_lines=10,
+                     issue_types=("Task",)),
+            "new")
+
+    def test_an_untyped_issue_routes_exactly_as_before(self):
+        """14 of the 25 in that range carried no type, so this is the majority path.
+
+        **Asserted against the expected bucket, not against `bucket()` called twice.** The first
+        version of this test compared `bucket(...)` with `bucket(..., issue_types=())`, and `()`
+        is the parameter's default -- so the two calls were byte-identical and it asserted
+        `f(x) == f(x)`, which holds for every implementation including one that routed everything
+        to Maintenance.
+        """
+        source = ["app/Support/FleetFollower.php"]
+        rules = [".claude/rules/worktrees.md"]
+
+        # (title, paths, the bucket this reached before the type rule existed)
+        for title, paths, expected in (
+            ("Tell a session the sweep marked it stale or gone", source, "new"),
+            ("Fix the provider name", source, "fix"),
+            (self.TITLE, source, "maint"),
+            ("Tell a session the sweep marked it stale or gone", rules, "maint"),
+            ("Fix the provider name", rules, "fix"),
+        ):
+            self.assertEqual(
+                g.bucket("s", title, paths=paths, other_lines=10, issue_types=()),
+                expected,
+                f"{title} / {paths}")
+
+    def test_a_feature_and_a_bug_together_route_to_whats_new(self):
+        """A pull request can close several issues of differing types, and the buckets fail
+        asymmetrically: a fix under What's new is visible and merely mislabelled, while a feature
+        under What's fixed understates the release. Only the second is forbidden, so the mixed
+        case takes the safe direction.
+        """
+        source = ["app/Support/FleetFollower.php"]
+        title = "Tell a session the sweep marked it stale or gone"
+
+        self.assertEqual(
+            g.bucket("s", title, paths=source, other_lines=10, issue_types=("Bug", "Feature")),
+            "new")
+        self.assertEqual(
+            g.bucket("s", title, paths=source, other_lines=10, issue_types=("Feature", "Bug")),
+            "new")
+
+    def test_a_feature_titled_like_a_fix_does_not_reach_whats_fixed(self):
+        """#121, named in #162's criteria as the shape most likely to be caught by a wrong rule:
+        a **feature** whose title opens with `Say`. A widened `FIX_VERBS` was rejected for exactly
+        this, and the type rule must not reintroduce it.
+        """
+        title = "Say when nothing on the fleet can reach a waiting agent"
+        source = ["app/Support/FleetDelivery.php"]
+
+        self.assertEqual(g.bucket("s", title, paths=source, other_lines=10), "new")
+        self.assertEqual(
+            g.bucket("s", title, paths=source, other_lines=10, issue_types=("Feature",)), "new")
+
+        # Typed `Bug`, a human said it was a fix, and the rule does not argue with them.
+        self.assertEqual(
+            g.bucket("s", title, paths=source, other_lines=10, issue_types=("Bug",)), "fix")
+
+    def test_the_type_is_case_insensitive(self):
+        """GitHub returns `Bug` and `Feature`; nothing should depend on that casing."""
+        source = ["app/Support/FleetFollower.php"]
+        title = "Tell a session the sweep marked it stale or gone"
+
+        for spelling in ("Bug", "bug", "BUG"):
+            self.assertEqual(
+                g.bucket("s", title, paths=source, other_lines=10, issue_types=(spelling,)),
+                "fix", spelling)
 
     def test_published_surface_still_wins(self):
         self.assertEqual(g.bucket("s", self.TITLE, paths=["CLAUDE.md", "config/commands.php"]), "new")
@@ -256,6 +409,96 @@ class RepoDerivation(unittest.TestCase):
 
     def test_returns_nothing_when_there_is_no_remote_at_all(self):
         self.assertIsNone(g.derive_repo(self.runner({})))
+
+
+class PullRequestCache(unittest.TestCase):
+    """The plumbing between the GraphQL query and `bucket()`.
+
+    **Every line of it was a silent no-op under mutation and all 31 tests stayed green** (#166's
+    review): deleting `issueType{name}` from the query, hard-coding the parsed types to `()`, and
+    reading the wrong cache slot each left the feature inert. The range run caught it, but a range
+    run is evidence, not a regression test.
+    """
+
+    def setUp(self):
+        g._pr_cache.clear()
+        self.addCleanup(g._pr_cache.clear)
+
+    @staticmethod
+    def _answers(payload):
+        """Stand in for `gh api graphql`, returning one canned response."""
+        class Result:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+
+        return lambda *a, **k: Result()
+
+    def _prime(self, nodes, number=7):
+        payload = {"data": {"repository": {
+            f"p{number}": {"title": "A title", "closingIssuesReferences": {"nodes": nodes}}}}}
+        with mock.patch.object(g.subprocess, "run", self._answers(payload)):
+            g.prime_pr_cache([number], "owner/name")
+
+    def test_the_type_reaches_the_accessor_and_is_not_the_labels(self):
+        """The label and the type differ on purpose.
+
+        Reading the wrong slot would answer `("documentation",)`, which is exactly the mutation
+        that survived -- and it would route any issue labelled `bug` into What's fixed with
+        nothing to report it.
+        """
+        self._prime([{"issueType": {"name": "Bug"},
+                      "labels": {"nodes": [{"name": "documentation"}]}}])
+
+        self.assertEqual(g.pr_issue_types(7), ("bug",))
+        self.assertEqual(g.pr_labels(7), ("documentation",))
+        self.assertEqual(g.pr_title(7, "owner/name"), "A title")
+
+    def test_the_query_asks_for_the_type(self):
+        """Deleting the field from the query is invisible to every other test here."""
+        sent = []
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps({"data": {"repository": {}}})
+            stderr = ""
+
+        def record(args, **kwargs):
+            sent.append(args)
+            return Result()
+
+        with mock.patch.object(g.subprocess, "run", record):
+            g.prime_pr_cache([11], "owner/name")
+
+        query = " ".join(" ".join(a) for a in sent)
+
+        self.assertIn("issueType", query)
+        self.assertIn("closingIssuesReferences", query)
+
+    def test_an_issue_with_no_type_yields_no_type(self):
+        """`issueType` is null on the majority of issues, and a null node must not become a name."""
+        self._prime([{"issueType": None, "labels": {"nodes": []}}])
+
+        self.assertEqual(g.pr_issue_types(7), ())
+
+    def test_several_closed_issues_contribute_several_types(self):
+        self._prime([
+            {"issueType": {"name": "Bug"}, "labels": {"nodes": []}},
+            {"issueType": {"name": "Feature"}, "labels": {"nodes": []}},
+        ])
+
+        self.assertEqual(set(g.pr_issue_types(7)), {"bug", "feature"})
+
+    def test_a_number_that_is_not_a_pull_request_answers_empty(self):
+        """`prime_pr_cache` caches `(None, (), ())` for an alias that resolved to nothing, and the
+        three-slot shape has to hold there too or the accessors raise.
+        """
+        with mock.patch.object(g.subprocess, "run", self._answers({"data": {"repository": {}}})):
+            g.prime_pr_cache([99], "owner/name")
+
+        self.assertEqual(g.pr_issue_types(99), ())
+        self.assertEqual(g.pr_labels(99), ())
+        self.assertIsNone(g.pr_title(99, "owner/name"))
 
 
 if __name__ == "__main__":

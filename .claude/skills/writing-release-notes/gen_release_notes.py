@@ -268,7 +268,7 @@ def _all_maint(paths):
     return bool(paths) and all(_is_maint(p) for p in paths)
 
 
-def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0):
+def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0, issue_types=()):
     """Route a change to one of: sec | maint | fix | new.
 
     A cascade, and the ORDER carries the correctness. A maintenance change whose title
@@ -276,6 +276,7 @@ def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0):
     because its label is consulted first.
     """
     labels = {l.lower() for l in labels}
+    issue_types = {t.lower() for t in issue_types}
     t = strip_cc_prefix(title)
     combo = strip_cc_prefix(subject) + " || " + t
     low = combo.lower()
@@ -328,9 +329,49 @@ def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0):
     if test_lines > other_lines and not any(p.startswith(SOURCE_PREFIXES) for p in paths):
         return "maint"
 
+    # 7. The maintenance vocabulary: a verb the title opens with, or a word it names.
     if MAINT_VERBS.match(t) or "update dependencies" in t.lower() or MAINT_WORDS.search(t):
         return "maint"
 
+    # 8. The linked issue's GitHub type, where a human set one. **Last**, so it decides only what
+    #    nothing else could, and the answer it replaces is the bare `new` below.
+    #
+    #    **It was first written after rule 5, and that was wrong** -- #166's review measured the
+    #    consequence. Placed there it also preempted rules 6 and 7, so a `Bug`-typed dependency
+    #    bump titled `Raise dependency floors to their latest stable releases` became a **fix**,
+    #    and a `Feature`-typed skill change became **new**. The ticket said "nothing else", and
+    #    that placement quietly overrode the maintenance vocabulary. Here it cannot: anything the
+    #    paths, the labels or the title already identify as maintenance has returned.
+    #
+    #    The case it exists for still reaches it. `Tell a session the sweep marked it stale or
+    #    gone` (#158) matches no maintenance verb, word or path, so it arrives here and its `Bug`
+    #    type routes it to *What's fixed* instead of the `new` it would otherwise get.
+    #
+    #    **`Feature` earns its line only for a change that closes BOTH kinds**, and that is worth
+    #    stating because it is not obvious: the fallthrough below already answers `new`, so a
+    #    `Feature`-typed change reaching here would route there anyway. What the branch does is
+    #    win against `Bug` when a pull request closes one of each. The two buckets fail
+    #    asymmetrically -- a fix shown under *What's new* is visible and merely mislabeled, while a
+    #    feature under *What's fixed* understates the release, and only the second is forbidden --
+    #    so the mixed case takes `new`. It is kept rather than deleted because the alternative is a
+    #    bare `if "bug"` whose mixed-case behavior is an accident of the fallthrough rather than a
+    #    decision.
+    #
+    #    **`Task` is NOT consulted, despite predicting `fix` six times out of six** on the v0.3.0
+    #    range. `writing-issues` assigns `Task` to a research spike, a decision fork, a follow-up
+    #    cleanup or an epic -- never to a bug -- so that agreement is an artifact of how those
+    #    tickets were typed. A rule built on it breaks the first time somebody types one correctly,
+    #    and it breaks toward the forbidden direction.
+    #
+    #    An issue with no type reaches none of this and falls through to `new`, which is the
+    #    majority: 14 of the 25 in that range carried none.
+    if "feature" in issue_types:
+        return "new"
+
+    if "bug" in issue_types:
+        return "fix"
+
+    # 9. Everything else.
     return "new"
 
 
@@ -371,7 +412,8 @@ def prime_pr_cache(nums, repo):
         batch = nums[start:start + _PR_BATCH]
         fields = " ".join(
             f'p{n}: pullRequest(number:{n}){{title '
-            f'closingIssuesReferences(first:5){{nodes{{labels(first:20){{nodes{{name}}}}}}}}}}'
+            f'closingIssuesReferences(first:5){{nodes{{issueType{{name}} '
+            f'labels(first:20){{nodes{{name}}}}}}}}}}'
             for n in batch)
         q = f'query {{repository(owner:"{owner}",name:"{name}"){{{fields}}}}}'
         r = subprocess.run(["gh", "api", "graphql", "-f", f"query={q}"],
@@ -384,23 +426,36 @@ def prime_pr_cache(nums, repo):
             node = data.get(f"p{n}")
             if not node:
                 # Not a pull request, or unreachable: resolve() falls back to the subject.
-                _pr_cache[n] = (None, ())
+                _pr_cache[n] = (None, (), ())
                 continue
+            issues = (node.get("closingIssuesReferences") or {}).get("nodes", [])
             labels = tuple(
                 l["name"]
-                for iss in (node.get("closingIssuesReferences") or {}).get("nodes", [])
+                for iss in issues
                 for l in (iss.get("labels") or {}).get("nodes", []))
-            _pr_cache[n] = (node.get("title") or None, labels)
+            # `issueType` is null on the majority of issues -- 14 of the 25 in the v0.3.0
+            # range carried none -- so this is often empty, and an empty tuple must route
+            # exactly as before rather than becoming a third answer.
+            types = tuple(
+                (iss.get("issueType") or {}).get("name")
+                for iss in issues
+                if (iss.get("issueType") or {}).get("name"))
+            _pr_cache[n] = (node.get("title") or None, labels, types)
 
 
 def pr_title(num, repo):
     if num not in _pr_cache:
         prime_pr_cache([num], repo)
-    return _pr_cache.get(num, (None, ()))[0]
+    return _pr_cache.get(num, (None, (), ()))[0]
 
 
 def pr_labels(num):
-    return _pr_cache.get(num, (None, ()))[1]
+    return _pr_cache.get(num, (None, (), ()))[1]
+
+
+def pr_issue_types(num):
+    """The GitHub issue types of the issues this pull request closes, lowercased."""
+    return tuple(t.lower() for t in _pr_cache.get(num, (None, (), ()))[2])
 
 
 def diff_signals(sha):
@@ -503,7 +558,8 @@ def main():
         if not disp:
             continue
         paths, test_lines, other_lines = diff_signals(sha)
-        b = bucket(s, title, pr_labels(pr) if pr else (), paths, test_lines, other_lines)
+        b = bucket(s, title, pr_labels(pr) if pr else (), paths, test_lines, other_lines,
+                   pr_issue_types(pr) if pr else ())
         bullet = f"- {noamp(disp)} {link}".rstrip()
         if bullet not in buckets[b]:
             buckets[b].append(bullet)

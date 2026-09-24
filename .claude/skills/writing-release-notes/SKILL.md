@@ -156,9 +156,9 @@ Do **not** invent headings outside this closed set. If something doesn't obvious
 
 ## Routing (which bucket) — by title, closing-issue label, and diff shape
 
-A change routes on its resolved title, the labels of the issue its PR closes (read from that issue,
-not from the PR), and which paths its diff touches. A cascade, first match wins — the order is
-what makes it correct:
+A change routes on its resolved title, the **labels** and the **GitHub issue type** of the issue
+its PR closes (read from that issue, not from the PR), and which paths its diff touches. A cascade,
+first match wins — the order is what makes it correct:
 
 1. **Breaking changes** — editorial call, per the bucket definition above; the generator cannot
    infer it, so it is passed in by flag.
@@ -178,15 +178,41 @@ what makes it correct:
    `Correct`/`Harden`/`Stop`/`Avoid`.
 6. **Maintenance and tooling** — the diff is confined to tooling (`.github/`, `.claude/`, `tests/`,
    `composer.json`, `composer.lock`, `box.json`, `phpstan.neon.dist`, `phpunit.xml.dist`, `rector.php`,
-   top-level dotfiles, `CHANGELOG.md`, `CLAUDE.md`, `README.md`, `LICENSE.md`); or it adds more lines under
-   `tests/` than elsewhere; or the title opens with a maintenance verb (`Refactor`, `Bump`,
+   top-level dotfiles, `CHANGELOG.md`, `CLAUDE.md`, `README.md`, `LICENSE.md`).
+
+7. **Maintenance and tooling** — the diff adds more lines under `tests/` than elsewhere **and
+   touches no source path**. The source exclusion is what makes this mean anything: by the time
+   control arrives here every remaining change has touched `app/`, and comparing line counts alone
+   would decide a product change on the size of its test suite. This repository asks for a control
+   per detector and a negative control per fix, so a test-dominant diff is the normal shape of a
+   feature here. Measured over `v0.2.0..main` before the exclusion existed, eleven user-visible
+   changes landed in Maintenance this way, including both the v0.3.0 release was named for (#161,
+   ported from `robot-council/core#266`).
+
+8. **Maintenance and tooling** — the title opens with a maintenance verb (`Refactor`, `Bump`,
    `Document`, …) or names tests, coverage, mutation, a skill, or a worktree.
+
+9. **What's fixed / What's new** — the closing issue's **GitHub issue type**: `Bug` routes to
+   *What's fixed*, `Feature` to *What's new* (#166). **Last, so it decides only what nothing else
+   could.** Step 5 matches a title *opening* with a fix verb, and almost no title here opens that
+   way, because `writing-pull-requests` sanctions leading with the symptom or the outcome instead —
+   so fixes were landing in *What's new*.
+
+   It sits below every maintenance rule deliberately. Placed higher it preempted them, and a
+   `Bug`-typed dependency bump became a fix while a `Feature`-typed skill change became new. Here
+   it cannot: anything the paths, the labels or the title already identify as maintenance has
+   returned before control reaches it.
+
+   **`Task` is not consulted**, although it predicted `fix` six times out of six on the v0.3.0
+   range. `writing-issues` assigns it to a spike, a decision fork, a cleanup or an epic, never to a
+   bug, so that agreement is an artifact of how those tickets happened to be typed. An issue with
+   no type set — 14 of the 25 in that range — reaches none of this.
 
    `composer.lock` is on that list because **this repository commits it and `robot-council/core`
    does not**, so a Dependabot bump lands as a manifest-and-lock diff here. `box.json` is the PHAR
    build config. There is no `phpstan-baseline.neon` and deliberately so — `CLAUDE.md` says to fix
    the errors instead — and no `workbench/`, which is a package's host application.
-7. **What's new** — everything else.
+10. **What's new** — everything else.
 
 ## Generating the body — [`gen_release_notes.py`](gen_release_notes.py)
 
