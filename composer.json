@@ -19,6 +19,7 @@
     ],
     "require": {
         "php": "^8.4",
+        "illuminate/http": "^13.24",
         "laravel-zero/foundation": "^13.23",
         "laravel-zero/framework": "^13.0",
         "laravel/agent-detector": "^2.0"
