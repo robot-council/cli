@@ -11,7 +11,8 @@
  * It reads the top-level `use` imports of every file under `app/` and asks the autoloader
  * for each. A class the container resolves by a string, or one written fully qualified
  * without an import, is not seen; the smoke step beside this script in the workflow covers
- * the HTTP client that way.
+ * the HTTP client that way. Imports inside a braced `namespace X { }` block are not read
+ * either, and no file under `app/` uses one.
  */
 
 declare(strict_types=1);
@@ -71,8 +72,9 @@ function importsOf(string $path): array
         $names = [];
 
         if (preg_match('/^(.*?)\\\\?\s*\{(.*)\}\s*$/s', trim($statement), $group) === 1) {
-            foreach (explode(',', $group[2]) as $member) {
-                $names[] = rtrim(trim($group[1]), '\\').'\\'.trim($member);
+            // A trailing comma leaves an empty member, which is not an import.
+            foreach (array_filter(array_map(trim(...), explode(',', $group[2])), static fn (string $member): bool => $member !== '') as $member) {
+                $names[] = rtrim(trim($group[1]), '\\').'\\'.$member;
             }
         } else {
             $names = explode(',', $statement);

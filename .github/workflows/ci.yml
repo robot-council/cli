@@ -135,19 +135,27 @@ jobs:
         with:
           composer-options: --no-dev
 
+      # Both checks below pass trivially if a dev package slipped in, which is how #237 hid.
+      - name: Confirm no dev dependency was installed
+        run: |
+          for package in larastan/larastan pestphp/pest phpstan/phpstan; do
+            if [ -d "vendor/$package" ]; then echo "vendor/$package is present"; exit 1; fi
+          done
+
       - name: Check every import under app/ resolves
         run: php .github/scripts/check-production-imports.php
 
-      # The import scan cannot see a class the container resolves by name, so resolve the HTTP
-      # client for real: an unreachable host must fail at the network, not in the container.
+      # The import scan cannot see a class the container resolves by name, so make a request for
+      # real. `Could not reach the service.` alone is not enough: it is the fallback text for any
+      # Throwable, a missing class included, so require the connection failure `-v` names.
       - name: Reach the network from enroll
         run: |
           set +e
-          out=$(./robot-council enroll --service=https://example.invalid --harness=claude --machine-label=ci 2>&1)
+          out=$(./robot-council enroll -v --service=https://example.invalid --harness=claude --machine-label=ci 2>&1)
           rc=$?
           echo "$out"
           echo "exit=$rc"
-          [ "$rc" -ne 0 ] && grep -q 'Could not reach the service' <<< "$out"
+          [ "$rc" -ne 0 ] && grep -q 'Illuminate\\Http\\Client\\ConnectionException' <<< "$out"
 
   generator:
     name: generator (Python ${{ matrix.python }})
