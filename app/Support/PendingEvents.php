@@ -300,10 +300,12 @@ final class PendingEvents
         try {
             if (! $this->lockWithinTheWait($handle)) {
                 if ($diagnostic !== null) {
+                    // "Could not lock" rather than "another process held it": `flock` also fails
+                    // on a filesystem that cannot lock at all, and that retries for the same wait.
                     $diagnostic(sprintf(
-                        'Left the unread fleet events in `%s`: another process held it for %d seconds.',
+                        'Left the unread fleet events in `%s`: could not lock it within %s seconds.',
                         $path,
-                        intdiv(self::CLEAR_WAIT_MILLISECONDS, 1000),
+                        self::CLEAR_WAIT_MILLISECONDS / 1000,
                     ));
                 }
 
