@@ -222,7 +222,7 @@ Shared with `writing-pull-requests` — the short version:
   (`robot-council.members`), commands (`vendor/bin/pest`), env vars, version arrows
   (`` `13.31.0` → `13.32.0` ``).
 - **File paths are linked.** The target is the **absolute branch URL**
-  (`` [`src/RobotCouncil.php`](https://github.com/robot-council/core/blob/main/src/RobotCouncil.php) ``,
+  (`` [`<path>`](https://github.com/<owner>/<repo>/blob/<branch>/<path>) ``,
   `/tree/` for directories), exactly as the PR skill specifies; vendor refs may include line
   anchors (`…/PackageServiceProvider.php#L20-L35`).
 - **Fenced code blocks** (`php`, `yaml`, `bash`) quote the offending or proposed code in bug
@@ -441,7 +441,7 @@ Discovered while writing feature tests for the `robot-council` command. `RobotCo
 
 ## Root cause
 
-[`src/RobotCouncil.php`](https://github.com/robot-council/core/blob/main/src/RobotCouncil.php):
+[`src/RobotCouncil.php`](https://github.com/robot-council/core/blob/main/src/RobotCouncil.php) -- **the package's file, named because the example is its**; the application has no `src/`:
 
 ```php
 public function members(): array
