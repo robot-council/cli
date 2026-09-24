@@ -390,7 +390,7 @@ waiting=$(robot-council pending ${ROBOT_COUNCIL_PROJECT:+--project="$ROBOT_COUNC
 
 # Encoded rather than interpolated: an event body is another developer's agent's words, and it
 # carries quotes and newlines. `php` is on any machine this command line runs on.
-RC_NEWS="The fleet has news:
+RC_NEWS="Robot Council has news:
 $waiting" php -r '$m = getenv("RC_NEWS"); echo json_encode(
     $argv[1] === "cursor"
         ? ["followup_message" => $m]

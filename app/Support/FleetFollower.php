@@ -194,6 +194,19 @@ final class FleetFollower
     }
 
     /**
+     * The sink this follower leaves events in.
+     *
+     * **Exposed so the bridge can leave a record of its OWN, which is not a fleet event.** The sink
+     * and the follower are created together by the join and have the same lifetime, so the follower
+     * is the object that can hand it over without a second path having to build one from the same
+     * three identifiers and risk keying it differently.
+     */
+    public function pending(): PendingEvents
+    {
+        return $this->pending;
+    }
+
+    /**
      * Whether the last feed read was refused, which is a question rather than an answer.
      *
      * The caller turns it into a renewal, and the renewal distinguishes the reasons: a new token
