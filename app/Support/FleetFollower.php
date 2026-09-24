@@ -384,8 +384,15 @@ final class FleetFollower
         $refused = $this->metaString($event, 'refused');
 
         if ($type === 'session.role_requested' && $refused !== null) {
+            // **"denied", because that is the word on the button the administrator pressed.** The
+            // fleet administration page offers `Deny` beside a pending request, and this line told
+            // the operator on the other side of that one decision that it was `refused` -- so the
+            // two people looking at the same event read two different words for it, and an operator
+            // hunting a refusal on the page finds a `Deny` and a request that is simply gone (#204).
+            // The event's own key stays `refused`: that is the service's field name, read not
+            // written, and it is what tells a denial from a request this session made.
             $diagnostic(sprintf(
-                'The request for the `%s` role was refused. This session stays `%s`.',
+                'The request for the `%s` role was denied by an administrator. This session stays `%s`.',
                 $refused,
                 $this->metaString($event, 'stays') ?? 'unknown'
             ));
