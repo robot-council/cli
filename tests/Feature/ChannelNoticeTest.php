@@ -104,9 +104,10 @@ function channelDirective(int $id): array
  * @param  bool  $withFollower  Whether the bridge follows the feed.
  * @param  bool  $channel  Whether the bridge acts as a channel, which only a Claude Code bridge does.
  * @param  resource|null  $in  Input to read instead of `$lines`, for one that arrives over time.
+ * @param  int  $reannounceSeconds  How long a notice waits before it is sent again; 0 makes every pass due.
  * @return list<array<array-key, mixed>> What the bridge wrote.
  */
-function channelRun(array $lines, bool $withFollower = true, bool $channel = true, $in = null): array
+function channelRun(array $lines, bool $withFollower = true, bool $channel = true, $in = null, int $reannounceSeconds = Bridge::REANNOUNCE_SECONDS): array
 {
     $session = new Session(app(Factory::class), CHANNEL_SERVICE, new Credential(CHANNEL_INSTALLATION));
     $session->start();
@@ -117,7 +118,7 @@ function channelRun(array $lines, bool $withFollower = true, bool $channel = tru
 
     $out = tmpfile();
 
-    new Bridge($session, CHANNEL_SERVICE, follower: $follower, channel: $channel)
+    new Bridge($session, CHANNEL_SERVICE, follower: $follower, channel: $channel, reannounceSeconds: $reannounceSeconds)
         ->run($in ?? channelInput($lines), $out, fn (string $m): null => null);
 
     rewind($out);
@@ -356,4 +357,166 @@ it('announces a batch that arrived before the harness finished initializing, onc
     proc_close($feeder);
 
     expect($notices)->toHaveCount(1);
+})->skipOnWindows();
+
+/**
+ * A child process that plays the harness's side over time, one step at a time.
+ *
+ * **One bridge pass per line**, which is what these tests need and one stream read cannot give:
+ * `run()` reads what has arrived, forwards it, and does its periodic work once, so input written
+ * all at once is a single pass however many lines it holds. A pause before each line makes each
+ * its own pass.
+ *
+ * Steps are a line to write, a pause in microseconds, or `['empty' => <path>]`, which empties the
+ * sink between passes the way a stop hook's drain does.
+ *
+ * @param  list<string|int|array{empty: string}>  $steps  What the harness does, in order.
+ * @return array{0: resource, 1: resource} The process, and its stdout for the bridge to read.
+ */
+function channelFeeder(array $steps): array
+{
+    $feeder = proc_open(
+        [\PHP_BINARY, '-r', 'foreach (json_decode($argv[1], true) as $s) {
+            if (is_int($s)) { usleep($s); }
+            elseif (is_string($s)) { echo $s, "\n"; fflush(STDOUT); }
+            else { file_put_contents($s["empty"], ""); }
+        }', (string) json_encode($steps)],
+        [1 => ['pipe', 'w']],
+        $pipes
+    );
+
+    // A feeder that never started would read as a bridge that announced nothing
+    expect($feeder)->toBeResource();
+
+    return [$feeder, $pipes[1]];
+}
+
+/**
+ * `count` pings, each after a pause long enough to be its own bridge pass.
+ *
+ * @return list<string|int> Feeder steps.
+ */
+function channelPings(int $count, int $from = 100): array
+{
+    $steps = [];
+
+    for ($i = 0; $i < $count; $i++) {
+        $steps[] = 150000;
+        $steps[] = '{"jsonrpc":"2.0","id":'.($from + $i).',"method":"ping"}';
+    }
+
+    return $steps;
+}
+
+/**
+ * A feed that serves the given pages in order and nothing after them.
+ *
+ * @param  list<list<array<string, mixed>>>  $pages  Each read's events.
+ */
+function channelPages(array $pages): mixed
+{
+    $sequence = Http::sequence();
+
+    foreach ($pages as $i => $events) {
+        $sequence->push(['events' => $events, 'cursor' => 20 + $i], 200);
+    }
+
+    return $sequence->whenEmpty(Http::response(['events' => [], 'cursor' => 99], 200));
+}
+
+/**
+ * Run a bridge that re-announces on every due pass, fed by `channelFeeder()`, and return its notices' meta.
+ *
+ * @param  list<string|int|array{empty: string}>  $steps  What the harness does.
+ * @return list<mixed> Each notice's meta, in order.
+ */
+function channelRepeats(array $steps, bool $channel = true, int $reannounceSeconds = 0): array
+{
+    [$feeder, $stdout] = channelFeeder($steps);
+
+    $notices = channelNotices(channelRun([], channel: $channel, in: $stdout, reannounceSeconds: $reannounceSeconds));
+
+    proc_close($feeder);
+
+    return array_map(fn (array $notice): mixed => data_get($notice, 'params.meta'), $notices);
+}
+
+it('announces a sink nothing drained again, up to the bound, and then stops', function (): void {
+    // The #211 shape: the notice was spent inside a continuation turn and nothing drained the
+    // sink, so without a repeat the session sits idle with a directive waiting
+    channelService(feed: channelPages([[channelDirective(11)]]));
+
+    // Two more passes than the bound, so a repeat past it would be seen
+    $metas = channelRepeats([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED, ...channelPings(Bridge::REANNOUNCE_LIMIT + 2)]);
+
+    expect($metas)->toBe([
+        ['new' => '1'],
+        ['new' => '1', 'repeat' => '1'],
+        ['new' => '1', 'repeat' => '2'],
+        ['new' => '1', 'repeat' => '3'],
+    ]);
+})->skipOnWindows();
+
+it('waits the interval before announcing again', function (): void {
+    // The control for the test above: the same input, with the real interval rather than 0, so
+    // the repeats there are the interval elapsing and not something every pass does
+    channelService(feed: channelPages([[channelDirective(11)]]));
+
+    $metas = channelRepeats([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED, ...channelPings(Bridge::REANNOUNCE_LIMIT + 2)], reannounceSeconds: Bridge::REANNOUNCE_SECONDS);
+
+    expect($metas)->toBe([['new' => '1']]);
+})->skipOnWindows();
+
+it('stops announcing once the sink has been drained', function (): void {
+    channelService(feed: channelPages([[channelDirective(11)]]));
+
+    $sink = new PendingEvents(CHANNEL_SERVICE, 'claude', 'channel-probe')->path();
+
+    // One repeat, then a stop hook drains, then passes enough to repeat twice more if it were wrong
+    $metas = channelRepeats([
+        CHANNEL_INITIALIZE, CHANNEL_INITIALIZED,
+        ...channelPings(1),
+        300000, ['empty' => $sink],
+        ...channelPings(3, from: 200),
+    ]);
+
+    expect($metas)->toBe([
+        ['new' => '1'],
+        ['new' => '1', 'repeat' => '1'],
+    ]);
+})->skipOnWindows();
+
+it('announces a new batch as new, and counts its repeats afresh', function (): void {
+    // A second directive on the third read: the sink changed because more arrived, which is news
+    // in its own right rather than a repeat of the first
+    channelService(feed: channelPages([[channelDirective(11)], [], [channelDirective(12)]]));
+
+    $metas = channelRepeats([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED, ...channelPings(3)]);
+
+    expect($metas)->toBe([
+        ['new' => '1'],
+        ['new' => '1', 'repeat' => '1'],
+        ['new' => '1'],
+        ['new' => '1', 'repeat' => '1'],
+    ]);
+})->skipOnWindows();
+
+it('never announces an empty sink, however many passes are due', function (): void {
+    channelService(feed: channelPages([]));
+
+    expect(channelRepeats([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED, ...channelPings(3)]))->toBe([]);
+})->skipOnWindows();
+
+it('repeats nothing for a harness that is not a channel', function (): void {
+    channelService(feed: channelPages([[channelDirective(11)]]));
+
+    $notChannel = channelRepeats([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED, ...channelPings(3)], channel: false);
+
+    expect($notChannel)->toBe([]);
+})->skipOnWindows();
+
+it('repeats nothing before the harness has initialized', function (): void {
+    channelService(feed: channelPages([[channelDirective(11)]]));
+
+    expect(channelRepeats([CHANNEL_INITIALIZE, ...channelPings(3)]))->toBe([]);
 })->skipOnWindows();
