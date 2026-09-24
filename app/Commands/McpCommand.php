@@ -144,7 +144,7 @@ final class McpCommand extends Command
             // And the fleet events go with it. Unread ones name tasks and locks THIS session held,
             // so leaving them for the next one would hand it somebody else's work to react to. What
             // the bridge itself wrote stays, because the next session is the reader it was for.
-            $join->pending()?->clearFleetEvents();
+            $join->pending()?->clearFleetEvents($this->diagnostic(...));
         }
 
         return self::SUCCESS;
