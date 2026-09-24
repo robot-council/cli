@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Support;
 
+use Illuminate\Support\Sleep;
 use JsonException;
 use RuntimeException;
 
@@ -50,6 +51,21 @@ final class PendingEvents
      * history. The oldest go first, because the newest are what a harness can still act on.
      */
     public const int MAX_EVENTS = 200;
+
+    /**
+     * How long the shutdown clear waits for another holder of the sink's lock.
+     *
+     * **Bounded, because it runs in a bridge's shutdown.** A blocking lock let a stuck reader hold
+     * the bridge open after `SIGTERM`, and bought nothing in exchange: a harness that escalates to
+     * `SIGKILL` skips the `finally` the clear runs in altogether (#223, #228). The session has
+     * already ended by then, so nothing on the fleet waits on this.
+     */
+    public const int CLEAR_WAIT_MILLISECONDS = 2000;
+
+    /**
+     * How long the shutdown clear sleeps between attempts at the lock.
+     */
+    public const int CLEAR_RETRY_MILLISECONDS = 50;
 
     /**
      * @param  string  $service  The fleet's base URL.
@@ -260,8 +276,14 @@ final class PendingEvents
      * in the sink written FOR the reader that comes after. Scoping the clearing here rather than
      * ordering the caller's shutdown means nothing breaks if that order later changes, which a
      * comment asking for an order does not give.
+     *
+     * **It gives up rather than waits** when another process holds the sink for longer than
+     * `CLEAR_WAIT_MILLISECONDS`, leaving the sink as it was and saying so once. `add()`, `drain()`
+     * and `peek()` keep their blocking locks, since none of them sits in a shutdown path.
+     *
+     * @param  (callable(string): void)|null  $diagnostic  Told when the clear gives up.
      */
-    public function clearFleetEvents(): void
+    public function clearFleetEvents(?callable $diagnostic = null): void
     {
         $path = $this->path();
 
@@ -276,7 +298,17 @@ final class PendingEvents
         }
 
         try {
-            if (! flock($handle, LOCK_EX)) {
+            if (! $this->lockWithinTheWait($handle)) {
+                if ($diagnostic !== null) {
+                    // "Could not lock" rather than "another process held it": `flock` also fails
+                    // on a filesystem that cannot lock at all, and that retries for the same wait.
+                    $diagnostic(sprintf(
+                        'Left the unread fleet events in `%s`: could not lock it within %s seconds.',
+                        $path,
+                        self::CLEAR_WAIT_MILLISECONDS / 1000,
+                    ));
+                }
+
                 return;
             }
 
@@ -309,6 +341,31 @@ final class PendingEvents
         } finally {
             flock($handle, LOCK_UN);
             fclose($handle);
+        }
+    }
+
+    /**
+     * Take the sink's lock without blocking, retrying until the wait runs out.
+     *
+     * Counted in attempts rather than against a clock, so a test that fakes `Sleep` sees the same
+     * schedule a real run does: a first try, then one after each sleep, until the sleeps add up to
+     * `CLEAR_WAIT_MILLISECONDS`.
+     *
+     * @param  resource  $handle  The open sink.
+     * @return bool Whether the lock was taken.
+     */
+    private function lockWithinTheWait(mixed $handle): bool
+    {
+        for ($waited = 0; ; $waited += self::CLEAR_RETRY_MILLISECONDS) {
+            if (flock($handle, LOCK_EX | LOCK_NB)) {
+                return true;
+            }
+
+            if ($waited >= self::CLEAR_WAIT_MILLISECONDS) {
+                return false;
+            }
+
+            Sleep::for(self::CLEAR_RETRY_MILLISECONDS)->milliseconds();
         }
     }
 
