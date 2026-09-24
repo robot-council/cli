@@ -93,6 +93,14 @@ final class Bridge
     public const int READ_BYTES = 65536;
 
     /**
+     * How many reads the bridge makes, after the fleet ends its session, of what stdin already holds.
+     *
+     * Bounded because a harness still writing would otherwise keep a stopping bridge reading; at
+     * `READ_BYTES` each this is 4 MiB, far past anything a harness has queued.
+     */
+    public const int ENDING_READS = 64;
+
+    /**
      * The capability that makes Claude Code treat this server as a channel.
      *
      * Declared by the bridge rather than by the service, because the notice originates here: the
@@ -253,6 +261,14 @@ final class Bridge
     private bool $sessionEnded = false;
 
     /**
+     * Why the fleet ended this session, in the words the sink record carries, once it has.
+     *
+     * Kept so every call read after the ending is answered with the same sentence the next turn
+     * will read, rather than with nothing (#226).
+     */
+    private ?string $endedSentence = null;
+
+    /**
      * Whether a signal has asked the loop to stop.
      */
     private bool $stopping = false;
@@ -360,17 +376,18 @@ final class Bridge
         // unreachable there. The constructor does allow the pair separately, and a test that builds
         // one that way gets no record rather than a failure.
         $pending = $this->follower?->pending();
+        $id = $this->session?->id();
+
+        $this->endedSentence = sprintf(
+            '%s. Whatever it was holding is being released, and the bridge that ran it has '
+            .'stopped. The enrollment on this machine is not the problem and needs no repair: '
+            .'a new session needs a new bridge.',
+            $id === null ? 'The fleet ended this session' : 'The fleet ended session '.$id
+        );
 
         if ($pending instanceof PendingEvents) {
-            $id = $this->session?->id();
-
             try {
-                $pending->leaveNotice(self::SESSION_ENDED, sprintf(
-                    '%s. Whatever it was holding is being released, and the bridge that ran it has '
-                    .'stopped. The enrollment on this machine is not the problem and needs no repair: '
-                    .'a new session needs a new bridge.',
-                    $id === null ? 'The fleet ended this session' : 'The fleet ended session '.$id
-                ));
+                $pending->leaveNotice(self::SESSION_ENDED, $this->endedSentence);
             } catch (Throwable $failure) {
                 $diagnostic($failure->getMessage());
             }
@@ -453,24 +470,71 @@ final class Bridge
 
                 $buffer .= $chunk;
 
-                // **Read by chunk and split here, never `fgets`.** `stream_select` reports a stream
-                // readable when ANY bytes have arrived, not a whole line, and on a non-blocking
-                // stream `fgets` hands back whatever is there. Measured: a 200,065-byte
-                // `tools/call` arrived as 24 fragments at the socket buffer's 8,192 bytes, and
-                // every one was forwarded as its own malformed request -- 0 valid messages of 24.
-                // A message only leaves here once its terminating newline has.
-                while (($break = strpos($buffer, "\n")) !== false) {
-                    $line = trim(substr($buffer, 0, $break));
-
-                    $buffer = substr($buffer, $break + 1);
-
-                    if ($line !== '') {
-                        $this->forward($line, $out, $diagnostic);
-                    }
-                }
+                $this->forwardLines($buffer, $out, $diagnostic);
             }
 
             $this->periodic($out, $diagnostic);
+        }
+
+        if ($this->sessionEnded) {
+            $this->answerWhatIsWaiting($in, $buffer, $out, $diagnostic);
+        }
+    }
+
+    /**
+     * Forward every complete line in the buffer, leaving any partial one.
+     *
+     * **Read by chunk and split here, never `fgets`.** `stream_select` reports a stream readable
+     * when ANY bytes have arrived, not a whole line, and on a non-blocking stream `fgets` hands back
+     * whatever is there. Measured: a 200,065-byte `tools/call` arrived as 24 fragments at the socket
+     * buffer's 8,192 bytes, and every one was forwarded as its own malformed request -- 0 valid
+     * messages of 24. A message only leaves here once its terminating newline has.
+     *
+     * @param  string  $buffer  What has been read and not yet forwarded, consumed in place.
+     * @param  resource  $out  Where responses go.
+     * @param  callable(string):void  $diagnostic  Where anything else goes.
+     */
+    private function forwardLines(string &$buffer, $out, callable $diagnostic): void
+    {
+        while (($break = strpos($buffer, "\n")) !== false) {
+            $line = trim(substr($buffer, 0, $break));
+
+            $buffer = substr($buffer, $break + 1);
+
+            if ($line !== '') {
+                $this->forward($line, $out, $diagnostic);
+            }
+        }
+    }
+
+    /**
+     * Answer what stdin already holds, once the fleet has ended the session.
+     *
+     * **A call the harness wrote while the ending was being discovered is still in the pipe**, not
+     * in the buffer: a harness sending calls concurrently writes the next while the first is
+     * waiting on the fleet. The loop stops without reading it, and the harness then fails it with
+     * a generic `Connection closed` instead of the reason (#226). So read what is already there,
+     * without waiting for more -- the stream is non-blocking, so an empty read means nothing is
+     * waiting -- and answer it the way `forward()` answers everything after the ending. A partial
+     * line at the end is left: it is not a request yet.
+     *
+     * @param  resource  $in  The harness's stdin.
+     * @param  string  $buffer  What has been read and not yet forwarded.
+     * @param  resource  $out  Where responses go.
+     * @param  callable(string):void  $diagnostic  Where anything else goes.
+     */
+    private function answerWhatIsWaiting($in, string $buffer, $out, callable $diagnostic): void
+    {
+        for ($reads = 0; $reads < self::ENDING_READS; $reads++) {
+            $chunk = fread($in, self::READ_BYTES);
+
+            if ($chunk === false || $chunk === '') {
+                return;
+            }
+
+            $buffer .= $chunk;
+
+            $this->forwardLines($buffer, $out, $diagnostic);
         }
     }
 
@@ -498,7 +562,9 @@ final class Bridge
             // **Nothing reaches a fleet that has ended this session either.** `run()` splits every
             // line already in the buffer before it looks at `stopping` again, so without this each
             // one costs a refused call and a refused renewal against a session whose tokens are
-            // already deleted. The harness receives no reply either way, which is #226.
+            // already deleted. Answered here instead, with the reason (#226).
+            $this->refuseAfterTheEnding($message, $out);
+
             return;
         }
 
@@ -512,11 +578,50 @@ final class Bridge
             // claims and locks are already released. Reported once and the loop ends, rather than
             // every subsequent call repeating it.
             $this->endBecauseTheSessionIsGone($gone, $diagnostic);
+
+            // The call that found out has no result from the fleet either, and is answered alike.
+            $this->refuseAfterTheEnding($message, $out);
         } catch (Throwable $throwable) {
             // To stderr, never to stdout: a harness parsing stdout would read a diagnostic as a
             // malformed protocol message rather than as an error
             $diagnostic($throwable->getMessage());
         }
+    }
+
+    /**
+     * Answer a request read after the fleet ended the session, with why.
+     *
+     * **Without a reply, the harness learns only that the connection closed.** A client built on
+     * `@modelcontextprotocol/sdk` rejects every outstanding request with a generic `Connection
+     * closed` once the process exits (1.25.1, `shared/protocol.js` `_onclose()`), so the agent saw
+     * its calls fail without the reason the sink record gives the next turn (#221, #226).
+     *
+     * `-32002`, the code the pre-join refusal uses, since both mean there is no session to serve
+     * the call, but never that refusal's words: this bridge did join, and `join` will not help. A
+     * notification carries no id and is answered by nothing, as everywhere else, and neither is a
+     * response the client sent. A batch is not answered either -- MCP removed batching in
+     * 2025-06-18, and no harness this bridge serves sends one.
+     *
+     * @param  string  $message  One JSON-RPC message, as the harness wrote it.
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function refuseAfterTheEnding(string $message, $out): void
+    {
+        $decoded = json_decode($message, true);
+
+        // A list never carries an `id` key, so a batch falls out here too. And no `method` means a
+        // RESPONSE from the client, which JSON-RPC forbids answering.
+        if (! \is_array($decoded) || ! \array_key_exists('id', $decoded) || ! \array_key_exists('method', $decoded)) {
+            return;
+        }
+
+        $id = $decoded['id'];
+
+        if (! \is_int($id) && ! \is_string($id)) {
+            return;
+        }
+
+        $this->error($out, $id, -32002, $this->endedSentence ?? 'The fleet ended this session.');
     }
 
     /**
@@ -780,6 +885,14 @@ final class Bridge
         }
 
         if ($method === 'tools/call' && \is_array($decoded['params'] ?? null) && ($decoded['params']['name'] ?? null) === self::JOIN_TOOL) {
+            // **After an ending, `join` gets the reason, not `callJoin()`'s answer**, which would say
+            // the session this bridge holds stays open -- the one thing no longer true.
+            if ($this->sessionEnded) {
+                $this->refuseAfterTheEnding($message, $out);
+
+                return true;
+            }
+
             $this->callJoin($out, $id, $decoded['params']['arguments'] ?? null, $diagnostic);
 
             return true;
