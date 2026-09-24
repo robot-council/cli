@@ -206,6 +206,16 @@ final class Session
             ->withToken($this->installation->reveal())
             ->post($this->service.'/robot-council/api/sessions/'.$this->id.'/renew');
 
+        // **409 is the one terminal answer, and the only in-band way a client learns it.** Core's
+        // `SessionRenewController` documents it as exactly and only the gone case, and this endpoint
+        // takes the installation credential rather than the session token -- so it still answers for
+        // a session whose tokens have been deleted, where every other endpoint is a 401. Collapsing
+        // it into the message below left the bridge unable to tell a bad minute from an ended
+        // session (#165).
+        if ($response->status() === 409) {
+            throw new SessionHasGone;
+        }
+
         if (! $response->successful()) {
             throw new RuntimeException(sprintf('The session could not be renewed (HTTP %d).', $response->status()));
         }
@@ -228,20 +238,24 @@ final class Session
     }
 
     /**
-     * Tell the service this session is still alive.
+     * Tell the service this session is still alive, and say whether it was accepted.
+     *
+     * @return bool False when the service refused the heartbeat, which for a session token means it
+     *              is no longer honored. True when it landed, and also when it could not be sent at
+     *              all -- an unsent heartbeat is not evidence about the session.
      *
      * Without it the presence sweep marks an idle session `stale` and then `gone`, and `core`
      * releases whatever it was holding -- so a bridge sitting quietly between tool calls would have
      * its work handed to somebody else.
      */
-    public function heartbeat(): void
+    public function heartbeat(): bool
     {
         if (! $this->token instanceof Credential) {
-            return;
+            return false;
         }
 
         try {
-            $this->http
+            $response = $this->http
                 ->acceptJson()
                 ->asJson()
                 ->withToken($this->token->reveal())
@@ -249,7 +263,19 @@ final class Session
         } catch (Throwable) {
             // A missed heartbeat is recoverable -- the next one lands, and the sweep's threshold is
             // minutes rather than seconds. Failing the whole bridge over one would be worse.
+            //
+            // Answered as "not refused", because a heartbeat that never arrived says nothing about
+            // whether this session still exists, and the caller must not read it as though it did.
+            return true;
         }
+
+        // **A refusal is reported rather than swallowed, and it is the only way an IDLE bridge
+        // learns anything.** A 401 does not throw in this client, so the catch above never saw one
+        // and the caller could not tell a delivered heartbeat from a rejected one. For a session
+        // the fleet has ended, every endpoint that takes the session token answers 401 -- so this
+        // is the earliest routine signal that something is wrong, and what it means is settled by
+        // a renewal, which answers 409 for exactly that case (#165).
+        return $response->status() !== 401;
     }
 
     /**
