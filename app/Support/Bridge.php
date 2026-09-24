@@ -207,7 +207,9 @@ final class Bridge
      * Whether the loop stopped because the fleet ended this session.
      *
      * Distinct from `$stopping`, which says only that the loop should finish and is set by an
-     * ordinary `SIGTERM` as well. What the command does on the way out differs between the two.
+     * ordinary `SIGTERM` as well. This one says the reason, so the paragraph and the record happen
+     * once however many times the gone path is reached, and so a call read from the buffer after
+     * the news is not sent to a session that cannot serve it.
      */
     private bool $sessionEnded = false;
 
@@ -296,17 +298,23 @@ final class Bridge
 
         $diagnostic($gone->getMessage());
 
-        // Null only for a bridge nobody joined, which cannot reach here: the join is what produces
-        // a session to be ended and a follower to hold the sink, and it produces them together.
+        // **Null leaves no record, and on the production path it cannot be null.** `attemptJoin()`
+        // sets the session and the follower together out of one `Joined`, and `FleetJoin` ends the
+        // session and throws if anything after `start()` fails, so a session without a follower is
+        // unreachable there. The constructor does allow the pair separately, and a test that builds
+        // one that way gets no record rather than a failure.
         $pending = $this->follower?->pending();
 
         if ($pending instanceof PendingEvents) {
+            $id = $this->session?->id();
+
             try {
-                $pending->add([[
-                    'type' => self::SESSION_ENDED,
-                    'body' => 'The fleet ended this session, so the tasks and locks it held were released and the bridge stopped. The enrollment on this machine is not the problem and needs no repair. Join the fleet again to pick work back up.',
-                    'created_at' => gmdate('c'),
-                ]]);
+                $pending->leaveNotice(self::SESSION_ENDED, sprintf(
+                    '%s. Whatever it was holding is being released, and the bridge that ran it has '
+                    .'stopped. The enrollment on this machine is not the problem and needs no repair: '
+                    .'a new session needs a new bridge.',
+                    $id === null ? 'The fleet ended this session' : 'The fleet ended session '.$id
+                ));
             } catch (Throwable $failure) {
                 $diagnostic($failure->getMessage());
             }
@@ -427,6 +435,14 @@ final class Bridge
 
         if (! $session instanceof Session) {
             // Nothing reaches the fleet before a session exists: there is no token to send it with
+            return;
+        }
+
+        if ($this->sessionEnded) {
+            // **Nothing reaches a fleet that has ended this session either.** `run()` splits every
+            // line already in the buffer before it looks at `stopping` again, so without this each
+            // one costs a refused call and a refused renewal against a session whose tokens are
+            // already deleted. The harness receives no reply either way, which is #221.
             return;
         }
 
@@ -942,6 +958,13 @@ final class Bridge
      */
     private function periodic($out, callable $diagnostic): void
     {
+        if ($this->sessionEnded) {
+            // Nothing here can be acted on once the session is over: a heartbeat and a feed read
+            // both take a token the service has deleted, and `run()` calls this unconditionally
+            // after the buffer empties. Each pass would otherwise cost two refused requests.
+            return;
+        }
+
         $session = $this->session;
 
         // Nothing is due before joining: there is no session to keep alive, feed to read, or token

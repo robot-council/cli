@@ -108,6 +108,55 @@ final class PendingEvents
     }
 
     /**
+     * Leave a notice this side wrote, replacing any earlier one of the same type.
+     *
+     * **Replaced rather than appended, because a notice is a fact about the sink and not an event
+     * in it.** A bridge says it once, but the sink is keyed by service, harness and project and
+     * outlives every process that writes it -- and `clearFleetEvents()` deliberately preserves
+     * what is already there. Measured: two bridges reaching the same news with no turn boundary
+     * between them left the agent the same paragraph twice, with nothing to say whether that meant
+     * one ending or two.
+     *
+     * @param  string  $type  The type, which carries `self::LOCAL_PREFIX`.
+     * @param  string  $body  What the agent reads.
+     *
+     * @throws RuntimeException When the sink cannot be written.
+     */
+    public function leaveNotice(string $type, string $body): void
+    {
+        $handle = $this->openForWriting();
+
+        try {
+            if (! flock($handle, LOCK_EX)) {
+                throw new RuntimeException(sprintf('Could not lock `%s` to leave a notice in.', $this->path()));
+            }
+
+            $contents = stream_get_contents($handle);
+
+            $kept = $this->bound([
+                ...array_values(array_filter(
+                    $this->decode($contents === false ? '' : $contents),
+                    static fn (array $event): bool => ($event['type'] ?? null) !== $type
+                )),
+                ['type' => $type, 'body' => $body, 'created_at' => gmdate('c')],
+            ]);
+
+            $encoded = json_encode($kept, JSON_THROW_ON_ERROR);
+
+            rewind($handle);
+
+            if (! ftruncate($handle, 0) || fwrite($handle, $encoded) === false) {
+                throw new RuntimeException(sprintf('Could not write a notice to `%s`.', $this->path()));
+            }
+
+            fflush($handle);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    /**
      * Take everything waiting, leaving the sink empty.
      *
      * **Read and truncate under one lock**, because a hook draining while the bridge appends would
@@ -235,20 +284,23 @@ final class PendingEvents
 
             $kept = array_values(array_filter(
                 $this->decode($contents === false ? '' : $contents),
-                static fn (array $event): bool => \is_string($event['type'] ?? null)
-                    && str_starts_with($event['type'], self::LOCAL_PREFIX)
+                $this->isLocal(...)
             ));
 
-            // Encoded BEFORE the file is emptied, so a failure here leaves the sink as it was
-            // rather than destroying it. This runs during a shutdown that must not throw.
+            // **Encoded before the file is emptied, and a failure RETURNS rather than falling
+            // through.** Swallowing it and carrying on would truncate the sink and destroy the very
+            // record this method exists to keep, which is the one outcome worse than not clearing
+            // at all. Silent by design: this runs inside a shutdown that must not throw.
             try {
                 $encoded = $kept === [] ? '' : json_encode($kept, JSON_THROW_ON_ERROR);
             } catch (JsonException) {
-                $encoded = '';
+                return;
             }
 
             rewind($handle);
 
+            // A failed `ftruncate` leaves the previous session's events in place. That is the wrong
+            // outcome and the only one available here, because unlike `add()` this cannot throw.
             if (ftruncate($handle, 0) && $encoded !== '') {
                 fwrite($handle, $encoded);
             }
@@ -287,10 +339,16 @@ final class PendingEvents
 
         // Created narrow before anything is written, the way the credential store does: event
         // bodies are other developers' agents' words, and this file sits in a shared home.
+        //
+        // **The mode is re-asserted on every open, not only at creation.** The sink used to be
+        // removed at every session end and recreated narrow; it now persists, so a `chmod` that
+        // failed once -- or a file recreated at the umask default in the window between `is_file`
+        // and `fopen` -- would otherwise stay readable for the life of the machine.
         if (! is_file($path)) {
             touch($path);
-            @chmod($path, 0o600);
         }
+
+        @chmod($path, 0o600);
 
         // `c+` rather than `w+`: it does not truncate on open, so the handle can be locked BEFORE
         // anything is destroyed. `w+` would empty the file for any concurrent reader in the window
@@ -305,16 +363,55 @@ final class PendingEvents
     }
 
     /**
+     * Whether an entry was written by this side rather than delivered by the fleet.
+     *
+     * One predicate, because three things turn on it -- the bound, the clearing, and the
+     * rendering -- and a fourth reading of what `bridge.` means is how they drift apart.
+     *
+     * @param  array<array-key, mixed>  $event  One entry from the sink.
+     */
+    private function isLocal(array $event): bool
+    {
+        return \is_string($event['type'] ?? null) && str_starts_with($event['type'], self::LOCAL_PREFIX);
+    }
+
+    /**
      * The newest events a sink may keep.
+     *
+     * **The bound counts only what the fleet sent, and that exemption is load-bearing.** A bare
+     * slice over everything evicts from the head, and the one entry this side writes -- why the
+     * previous session ended -- is at the head by the time it matters. Measured: a record followed
+     * by `MAX_EVENTS` fleet events was sliced away, which is the busy-fleet case the bound exists
+     * for, so the sink dropped the entry exactly when it was least reconstructible. There is at
+     * most one local entry per type, because `leaveNotice()` replaces rather than appends, so the
+     * exemption cannot grow the file without bound.
+     *
+     * The oldest fleet entries go, **in place**, so what survives keeps its order.
      *
      * @param  list<array<array-key, mixed>>  $events  Everything on offer, oldest first.
      * @return list<array<array-key, mixed>> What fits.
      */
     private function bound(array $events): array
     {
-        return \count($events) > self::MAX_EVENTS
-            ? \array_slice($events, -self::MAX_EVENTS)
-            : $events;
+        $excess = \count(array_filter($events, fn (array $event): bool => ! $this->isLocal($event))) - self::MAX_EVENTS;
+
+        if ($excess <= 0) {
+            return $events;
+        }
+
+        $kept = [];
+
+        foreach ($events as $event) {
+            if ($excess > 0 && ! $this->isLocal($event)) {
+                $excess--;
+
+                continue;
+            }
+
+            $kept[] = $event;
+        }
+
+        return $kept;
     }
 
     /**

@@ -51,8 +51,6 @@ beforeEach(function (): void {
 });
 
 afterEach(function (): void {
-    goneSink()->clearFleetEvents();
-
     array_map(unlink(...), glob($this->stateDirectory.'/robot-council/pending/*') ?: []);
     @rmdir($this->stateDirectory.'/robot-council/pending');
     @rmdir($this->stateDirectory.'/robot-council');
@@ -111,14 +109,18 @@ function goneIdleStream()
  * @param  int  $renewStatus  What the renewal answers. 409 is core's gone case.
  * @param  int  $sessionTokenStatus  What endpoints taking the session token answer. 401 once gone.
  * @param  int  $expiresIn  How long the first token lasts.
+ * @param  int|null  $callStatus  What a forwarded MCP call answers, when it differs from the rest.
  */
-function goneService(int $renewStatus = 200, int $sessionTokenStatus = 200, int $expiresIn = 3600): void
+function goneService(int $renewStatus = 200, int $sessionTokenStatus = 200, int $expiresIn = 3600, ?int $callStatus = null): void
 {
     Http::fake([
-        '*/api/sessions/'.GONE_SESSION.'/renew' => Http::response(
-            ['token' => 'rcouncil_2|NEW', 'expires_in' => 3600, 'abilities' => ['tasks:create']],
-            $renewStatus
-        ),
+        // **A non-2xx answers with no body, because core sends none.** `SessionRenewController`
+        // throws a `ConflictHttpException` for the gone case, so a 409 carrying a fresh token is a
+        // response the service cannot produce -- and a later assertion written on top of one would
+        // be asserting against a world that does not exist.
+        '*/api/sessions/'.GONE_SESSION.'/renew' => $renewStatus === 200
+            ? Http::response(['token' => 'rcouncil_2|NEW', 'expires_in' => 3600, 'abilities' => ['tasks:create']], 200)
+            : Http::response(null, $renewStatus),
         '*/api/sessions' => Http::response([
             'session_id' => GONE_SESSION,
             'token' => 'rcouncil_2|FIRST',
@@ -126,11 +128,15 @@ function goneService(int $renewStatus = 200, int $sessionTokenStatus = 200, int 
             'feed_cursor' => 1,
             'abilities' => ['tasks:create'],
         ], 201),
-        '*/api/events*' => Http::response(['events' => [], 'cursor' => 999], $sessionTokenStatus),
-        '*/api/agent/heartbeat' => Http::response(['ok' => true], $sessionTokenStatus),
-        '*/api/mcp' => $sessionTokenStatus === 200
+        '*/api/events*' => $sessionTokenStatus === 200
+            ? Http::response(['events' => [], 'cursor' => 999], 200)
+            : Http::response(null, $sessionTokenStatus),
+        '*/api/agent/heartbeat' => $sessionTokenStatus === 200
+            ? Http::response(['ok' => true], 200)
+            : Http::response(null, $sessionTokenStatus),
+        '*/api/mcp' => ($callStatus ?? $sessionTokenStatus) === 200
             ? Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200)
-            : Http::response('', $sessionTokenStatus),
+            : Http::response('', $callStatus ?? $sessionTokenStatus),
     ]);
 }
 
@@ -578,24 +584,40 @@ it('leaves the agent a record of why its bridge stopped', function (): void {
     $records = goneRecords();
 
     expect($records)->toHaveCount(1)
-        ->and($records[0]['body'])->toContain('The fleet ended this session')
-        ->and($records[0]['body'])->toContain('Join the fleet again')
+        // **It names the session, and it does not tell the agent to call `join`.** Nothing reads
+        // this until the next turn boundary, by which time the bridge process has exited and no
+        // `join` tool is served by anything -- so the instruction `SessionHasGone` already gets
+        // right, that a new session needs a new bridge, is the one that survives the wait.
+        ->and($records[0]['body'])->toContain('The fleet ended session '.GONE_SESSION)
+        ->and($records[0]['body'])->toContain('a new session needs a new bridge')
+        ->and($records[0]['body'])->not->toContain('Join the fleet again')
 
         // Dated, so a reader can tell a session ended a minute ago from one that ended on Friday.
-        ->and($records[0]['created_at'])->toBeString()->not->toBeEmpty();
+        // Matched rather than merely non-empty: `gmdate()` can never answer an empty string, so
+        // `not->toBeEmpty()` would hold against any format at all, including none.
+        ->and($records[0]['created_at'])->toMatch('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/');
 });
 
 it('leaves the record when a tool call is what found out, not only an idle poll', function (): void {
     // The busy bridge reaches the same news by the other door: a forwarded call is refused, the
     // renewal answers 409. An agent working when the sweep ran needs the record just as much.
-    goneService(renewStatus: 409, sessionTokenStatus: 401);
+    //
+    // **The feed is healthy here, and that isolation is the whole test.** `run()` calls
+    // `periodic()` unconditionally after the buffer empties, so with the feed refused too the
+    // renewal would be reached one pass later and write the record from THERE -- and this test
+    // passed with the forwarding path's call site reverted. Refusing only the forwarded call
+    // leaves exactly one route to the record.
+    goneService(renewStatus: 409, callStatus: 401);
 
     $session = goneSession();
 
     new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
         ->run(goneStream(), tmpfile(), fn (string $m): null => null);
 
-    expect(goneRecords())->toHaveCount(1);
+    expect(goneRecords())->toHaveCount(1)
+
+        // One renewal, so the record cannot have come from a second attempt the periodic pass made.
+        ->and(goneRenewals())->toBe(1);
 });
 
 it('leaves one record however many calls had already been read', function (): void {
@@ -633,10 +655,26 @@ it('leaves no record when the bridge stops for any other reason', function (): v
 
     $session = goneSession();
 
-    new Bridge($session, GONE_SERVICE, 0, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
-        ->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
+    $bridge = new Bridge($session, GONE_SERVICE, 0, new FleetFollower($session, GONE_SERVICE, goneSink(), 0));
+
+    $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
+
+    // The pass genuinely ran and nothing was renewed, so the empty sink is an absence rather than
+    // a loop that returned before reaching any of this.
+    expect(goneFeedReads())->toBe(1)
+        ->and(goneRenewals())->toBe(0)
+        ->and(goneRecords())->toBeEmpty();
+
+    // And a bridge asked to stop the ordinary way -- what a SIGTERM does -- still leaves none.
+    $bridge->stop();
+    $bridge->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
 
     expect(goneRecords())->toBeEmpty();
+
+    // The instrument, shown finding what it is being asked about, so "empty" above is evidence.
+    goneSink()->add([['type' => Bridge::SESSION_ENDED, 'body' => 'a control the bridge did not write']]);
+
+    expect(goneRecords())->toHaveCount(1);
 });
 
 it('leaves no record when a renewal fails for an ordinary reason', function (): void {
@@ -652,6 +690,10 @@ it('leaves no record when a renewal fails for an ordinary reason', function (): 
 
     expect(goneRenewals())->toBe(1)
         ->and(goneRecords())->toBeEmpty();
+
+    goneSink()->add([['type' => Bridge::SESSION_ENDED, 'body' => 'a control the bridge did not write']]);
+
+    expect(goneRecords())->toHaveCount(1);
 });
 
 it('leaves a record that outlives the clearing an ending session does', function (): void {
@@ -668,4 +710,67 @@ it('leaves a record that outlives the clearing an ending session does', function
     goneSink()->clearFleetEvents();
 
     expect(goneRecords())->toHaveCount(1);
+});
+
+it('stops sending to a fleet that has ended the session, rather than asking once per buffered call', function (): void {
+    // **`run()` splits the whole buffer before it looks at `stopping` again**, so three calls in one
+    // chunk each cost a refused call and a refused renewal against a session whose tokens the
+    // service has already deleted. Six requests to learn something the first one established.
+    goneService(renewStatus: 409, callStatus: 401);
+
+    $session = goneSession();
+
+    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+        ->run(goneStream(3), tmpfile(), fn (string $m): null => null);
+
+    // One of each: the call that found out, and the renewal that told it. What reaches the harness
+    // is unchanged -- none of the three is answered either way, which is #221.
+    expect(goneForwarded())->toBe(1)
+        ->and(goneRenewals())->toBe(1)
+        ->and(goneRecords())->toHaveCount(1);
+});
+
+it('leaves one record when a later bridge reaches the same news, not a second paragraph', function (): void {
+    // **The guard inside `Bridge` is per process, and the sink is not.** It is keyed by service,
+    // harness and project and outlives every process that writes it, and `clearFleetEvents()`
+    // deliberately keeps what is already there -- so two bridges with no turn boundary between them
+    // left the agent the same paragraph twice, with nothing to say whether that meant one ending or
+    // two. Measured before `leaveNotice()` replaced rather than appended.
+    goneService(renewStatus: 409, sessionTokenStatus: 401);
+
+    foreach (range(1, 2) as $ignored) {
+        $session = goneSession();
+
+        new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+            ->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
+
+        // What `McpCommand` does on the way out, between the two processes.
+        goneSink()->clearFleetEvents();
+    }
+
+    expect(goneRecords())->toHaveCount(1);
+});
+
+it('keeps the record when the fleet has been busy since, rather than evicting it with the oldest', function (): void {
+    // **The bound counted the record.** `MAX_EVENTS` exists for an agent idle for a weekend while
+    // the fleet is busy -- and the record sits at the HEAD of that sink, which is the end a bare
+    // slice drops. So the one case the record was written for is the case it did not survive.
+    goneService(renewStatus: 409, sessionTokenStatus: 401);
+
+    $session = goneSession();
+
+    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+        ->run(goneIdleStream(), tmpfile(), fn (string $m): null => null);
+
+    goneSink()->add(array_map(
+        static fn (int $n): array => ['type' => 'directive', 'body' => 'a later directive '.$n],
+        range(1, PendingEvents::MAX_EVENTS)
+    ));
+
+    $waiting = goneSink()->peek();
+
+    // The fleet events are bounded as before, and the record is not one of them.
+    expect(goneRecords())->toHaveCount(1)
+        ->and($waiting)->toHaveCount(PendingEvents::MAX_EVENTS + 1)
+        ->and($waiting[\count($waiting) - 1]['body'])->toBe('a later directive '.PendingEvents::MAX_EVENTS);
 });

@@ -57,8 +57,6 @@ beforeEach(function (): void {
 });
 
 afterEach(function (): void {
-    pendingSink()->clearFleetEvents();
-
     if (is_dir($this->stateDirectory)) {
         array_map(unlink(...), glob($this->stateDirectory.'/robot-council/pending/*') ?: []);
         @rmdir($this->stateDirectory.'/robot-council/pending');
@@ -161,7 +159,6 @@ it('tells one project from another', function (): void {
     expect(Artisan::call('pending', ['--project' => 'probe']))->toBe(0)
         ->and(pendingSink(project: 'other-checkout')->isEmpty())->toBeFalse();
 
-    pendingSink(project: 'other-checkout')->clearFleetEvents();
 });
 
 it('refuses without a service, rather than reading some other sink', function (): void {
@@ -273,13 +270,16 @@ it('keeps what the bridge wrote about the ending, which the next session is the 
 });
 
 it('clears a fleet event that merely mentions the prefix, rather than anything containing it', function (): void {
-    // The negative control for the filter. A `str_contains` would keep this, and a fleet event
-    // kept across a session boundary is the defect the clearing exists to prevent.
+    // The negative control for the filter, and only the TYPE can supply it: the predicate reads
+    // `type` and nothing else, so a fixture carrying the prefix in its body behaves identically
+    // under `str_starts_with` and `str_contains` and proves nothing. Both of these would be kept
+    // by a `str_contains`, and a fleet event kept across a session boundary is the defect the
+    // clearing exists to prevent.
     $sink = pendingSink();
 
     $sink->add([
-        ['type' => 'task.claimed', 'body' => 'a body mentioning bridge. in passing'],
-        ['type' => 'not-a-bridge.notice', 'body' => 'nor is this one'],
+        ['type' => 'not-a-bridge.notice', 'body' => 'the prefix, one character in'],
+        ['type' => 'task.claimed.bridge.echo', 'body' => 'the prefix, in the middle'],
     ]);
 
     $sink->clearFleetEvents();
@@ -311,4 +311,41 @@ it('still names who said a fleet event, which is what makes its content weighabl
 
     expect(Artisan::call('pending', ['--project' => 'probe']))->toBe(0)
         ->and(Artisan::output())->toContain('from otherdev');
+});
+
+it('keeps attribution on a fleet event whose type merely contains the prefix', function (): void {
+    // The negative control the renderer was missing, and the mutation it guards against is the
+    // expensive one: a `str_contains` here STRIPS provenance from a genuine fleet event, and who
+    // said it is what makes event content weighable by something with shell access.
+    pendingSink()->add([[
+        'type' => 'not-a-bridge.notice',
+        'body' => 'from the fleet, prefix one character in',
+        'actor' => ['github_login' => 'otherdev'],
+    ]]);
+
+    expect(Artisan::call('pending', ['--project' => 'probe']))->toBe(0)
+        ->and(Artisan::output())->toContain('from otherdev');
+});
+
+it('replaces an earlier notice of the same type rather than stacking another', function (): void {
+    $sink = pendingSink();
+
+    $sink->leaveNotice(Bridge::SESSION_ENDED, 'the first ending');
+    $sink->leaveNotice(Bridge::SESSION_ENDED, 'the second ending');
+
+    $waiting = $sink->drain();
+
+    expect($waiting)->toHaveCount(1)
+        ->and($waiting[0]['body'])->toBe('the second ending');
+});
+
+it('leaves a notice of a different type alone, so replacement is per type and not a wipe', function (): void {
+    // The negative control: replacing everything local would pass the test above and silently
+    // destroy any second kind of notice the bridge ever learns to write.
+    $sink = pendingSink();
+
+    $sink->leaveNotice(Bridge::SESSION_ENDED, 'the ending');
+    $sink->leaveNotice(PendingEvents::LOCAL_PREFIX.'something-else', 'a different notice');
+
+    expect($sink->drain())->toHaveCount(2);
 });
