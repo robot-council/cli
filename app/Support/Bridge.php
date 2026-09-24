@@ -104,6 +104,16 @@ final class Bridge
     private bool $roleChanged = false;
 
     /**
+     * Whether something asked for a renewal outside the ordinary schedule.
+     *
+     * Set when a heartbeat is refused, which is the earliest routine sign that the session token is
+     * no longer honored. The renewal that follows is what distinguishes the reasons: a new token
+     * means it was merely stale or revoked and the bridge carries on, and a `409` means the fleet
+     * has ended the session and there is nothing to carry on with.
+     */
+    private bool $renewalDue = false;
+
+    /**
      * Whether a signal has asked the loop to stop.
      */
     private bool $stopping = false;
@@ -209,6 +219,14 @@ final class Bridge
             if (\is_string($response)) {
                 $this->reply($response, $out, $diagnostic);
             }
+        } catch (SessionHasGone $gone) {
+            // **The busy bridge's path to the same news.** A tool call is refused, the renewal above
+            // answers `409`, and there is nothing to retry: this session's claims and locks are
+            // already released. Reported once and the loop ends, rather than every subsequent call
+            // repeating it.
+            $diagnostic($gone->getMessage());
+
+            $this->stop();
         } catch (Throwable $throwable) {
             // To stderr, never to stdout: a harness parsing stdout would read a diagnostic as a
             // malformed protocol message rather than as an error
@@ -279,10 +297,19 @@ final class Bridge
      */
     private function periodic(callable $diagnostic): void
     {
+        // **A refused heartbeat is how an IDLE bridge learns anything at all.** Every endpoint
+        // taking the session token answers 401 once the fleet has ended a session, and an idle
+        // bridge makes no tool calls and may be an hour from its scheduled renewal -- so without
+        // this it would sit there, failing quietly, until the token aged out. What the refusal
+        // MEANS is settled by the renewal below, which is the only endpoint that still answers.
         if (time() >= $this->nextHeartbeat) {
-            $this->session->heartbeat();
+            $refused = ! $this->session->heartbeat();
 
             $this->nextHeartbeat = time() + $this->heartbeatSeconds;
+
+            if ($refused) {
+                $this->renewalDue = true;
+            }
         }
 
         // Read before the renewal rather than after it: a renewal that throws is caught below and
@@ -298,26 +325,11 @@ final class Bridge
             $this->roleChanged = true;
         }
 
-        // **`gone` is final, so there is nothing left for this loop to do correctly.** The service
-        // has refused this session's tokens, released its claims and dropped its locks, so every
-        // request from here fails and every tool call forwarded fails with it. The bridge does not
-        // get quieter about it either: each message takes the 401 path, which renews, retries, and
-        // then reports that the **installation** may be revoked -- naming the one thing that is
-        // fine. Stopping and saying what actually happened is the honest end (#157).
-        //
-        // Returning rather than falling through, because renewing a session the fleet has discarded
-        // is a round trip that can only be refused.
-        if ($this->follower?->sessionHasGone() === true) {
-            $diagnostic('The fleet has marked this session gone, so its claims and locks have been released and its token will be refused. Stopping. Nothing is wrong with the installation, and a new session needs a new bridge.');
-
-            $this->stop();
-
-            return;
-        }
-
-        if (($this->roleChanged || $this->session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
+        if (($this->roleChanged || $this->renewalDue || $this->session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
             try {
                 $this->session->renew();
+
+                $this->renewalDue = false;
 
                 // Carried no further: what this session believes it may do now matches what the
                 // service minted for it.
@@ -331,6 +343,18 @@ final class Bridge
                 // because a successful renewal moves the expiry an hour out; this one has no such
                 // self-limit, so it is given one.
                 $this->nextRenewAttempt = time() + $this->renewRetrySeconds;
+            } catch (SessionHasGone $gone) {
+                // **Terminal, so the loop ends here rather than backing off into a retry.** Nothing
+                // this bridge sends afterwards can be acted on: the session's claims and locks are
+                // already released and its token is already refused. Saying so once and stopping is
+                // the honest end (#157), and it replaces the message an operator got instead --
+                // `The session could not be renewed (HTTP 409).`, which names a status code rather
+                // than a cause.
+                $diagnostic($gone->getMessage());
+
+                $this->stop();
+
+                return;
             } catch (Throwable $failure) {
                 // **Backed off, because a failed renewal does not move the expiry.** Without this,
                 // `expiringWithin()` stays true and the loop retries on every pass -- measured at

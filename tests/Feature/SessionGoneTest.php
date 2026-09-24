@@ -5,15 +5,24 @@ declare(strict_types=1);
 /**
  * What a bridge does when the fleet's presence sweep marks its own session `gone`.
  *
- * **`gone` is final, and that is the whole argument.** `robot-council/core`'s `Support\SessionPresence`
- * refuses the session's tokens, releases its claims and drops its locks, so from that moment every
- * request the bridge makes fails and every tool call it forwards fails with it. Before #165 the
- * loop carried on: each message took the 401 path, renewed, retried, and reported that the
- * *installation* may be revoked -- naming the one thing that was fine.
+ * **`gone` is final.** `robot-council/core`'s `Support\SessionPresence` refuses the session's
+ * tokens, releases its claims and drops its locks, and nothing lifts it: `movesFrom(Active)` is
+ * `[Stale]`, so `resume()` can never reach a gone row. From that moment every request the bridge
+ * makes fails and every tool call it forwards fails with it, and before #165 it carried on making
+ * them.
  *
- * **`stale` is the opposite and is asserted here, not assumed.** A stale session "still holds what
- * it claimed and is active again on its next request", so a bridge that ended on it would be ending
- * a session about to recover.
+ * **The feed cannot carry this news, and that is why these tests look the way they do.** The first
+ * attempt at #165 watched for a `session.gone` naming this session in the feed. It can never
+ * arrive: core writes the event, flips the status and deletes the tokens in one `DB::transaction`,
+ * and `Http\Middleware\EnsureAgentSession` refuses a gone session outright -- `GET events` sits
+ * behind it. So the feed read is a 401 from the instant the event exists, and a test faking a 200
+ * with that event in it asserts against a response the service cannot produce for the session the
+ * event is about.
+ *
+ * What does reach the client is the renewal endpoint, which takes the **installation** credential
+ * rather than the session token and so still answers: core's `SessionRenewController` returns `409`
+ * for exactly and only the gone case. Two things lead there -- a tool call refused with 401, and a
+ * heartbeat refused with 401 -- and both are exercised here.
  *
  * @command  vendor/bin/pest --compact tests/Feature/SessionGoneTest.php
  */
@@ -23,6 +32,7 @@ use App\Support\Credentials\Credential;
 use App\Support\FleetFollower;
 use App\Support\PendingEvents;
 use App\Support\Session;
+use App\Support\SessionHasGone;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
@@ -31,7 +41,6 @@ use Illuminate\Support\Facades\Http;
 const GONE_SERVICE = 'https://gone.example.test';
 const GONE_INSTALLATION = 'rcouncil_1|GONE-INSTALLATION';
 const GONE_SESSION = 21;
-const GONE_OTHER_SESSION = 34;
 
 beforeEach(function (): void {
     Http::preventStrayRequests();
@@ -58,29 +67,7 @@ function goneSink(): PendingEvents
 }
 
 /**
- * One feed event in the shape `Support\FleetFeed::describe()` serializes.
- *
- * A presence event's `actor.session_id` is the session it is **about**: `Support\SessionPresence`
- * records it against that session, and the sweep contributes no session id anywhere.
- *
- * @param  array<string, mixed>  $meta  The event's `meta`.
- * @return array<string, mixed> The event.
- */
-function goneEvent(int $id, string $type, int $actor, array $meta = []): array
-{
-    return [
-        'id' => $id,
-        'type' => $type,
-        'body' => 'the sweep decided something',
-        'meta' => ['installation_id' => 9, ...$meta],
-        'created_at' => '2026-09-24T09:00:00+00:00',
-        'actor' => ['session_id' => $actor, 'github_login' => 'somedev', 'coordinator_direct' => false],
-        'performed_by' => null,
-    ];
-}
-
-/**
- * A stream carrying `$messages` protocol messages, which is what gives the loop passes to work in.
+ * A stream carrying `$messages` protocol messages.
  *
  * @return resource
  */
@@ -95,39 +82,55 @@ function goneStream(int $messages = 1)
 }
 
 /**
- * Fake a service whose feed answers the given pages in order.
+ * A stream that gives the loop one pass and forwards nothing.
  *
- * @param  list<list<array<string, mixed>>>  $pages  A page per feed read.
- * @param  list<string>  $abilities  What the session may do.
+ * **A blank line rather than an empty file, and the difference is the whole test.** `run()` returns
+ * at `feof` *before* `periodic()`, so an empty stream never reaches the periodic work at all. One
+ * newline is read, trimmed to an empty line and skipped, so the loop arrives at `periodic()` having
+ * forwarded nothing -- which is what an idle bridge looks like.
+ *
+ * @return resource
  */
-function goneService(array $pages, array $abilities = ['tasks:create'], int $expiresIn = 3600): void
+function goneIdleStream()
 {
-    $feed = Http::sequence();
+    $stream = tmpfile();
 
-    foreach ($pages as $index => $events) {
-        $feed->push(['events' => $events, 'cursor' => 200 + $index], 200);
-    }
+    fwrite($stream, "\n");
+    rewind($stream);
 
-    $feed->whenEmpty(Http::response(['events' => [], 'cursor' => 999], 200));
+    return $stream;
+}
 
+/**
+ * Fake the service as it behaves for a session in a given state.
+ *
+ * **Modelled on what core answers, not on what is convenient to assert.** Once a session has gone,
+ * everything taking its token answers 401 (`EnsureAgentSession`), and only the renewal endpoint
+ * still answers, with 409 (`SessionRenewController`).
+ *
+ * @param  int  $renewStatus  What the renewal answers. 409 is core's gone case.
+ * @param  int  $sessionTokenStatus  What endpoints taking the session token answer. 401 once gone.
+ * @param  int  $expiresIn  How long the first token lasts.
+ */
+function goneService(int $renewStatus = 200, int $sessionTokenStatus = 200, int $expiresIn = 3600): void
+{
     Http::fake([
         '*/api/sessions/'.GONE_SESSION.'/renew' => Http::response(
-            ['token' => 'rcouncil_2|NEW', 'expires_in' => 3600, 'abilities' => $abilities], 200
+            ['token' => 'rcouncil_2|NEW', 'expires_in' => 3600, 'abilities' => ['tasks:create']],
+            $renewStatus
         ),
         '*/api/sessions' => Http::response([
             'session_id' => GONE_SESSION,
             'token' => 'rcouncil_2|FIRST',
             'expires_in' => $expiresIn,
             'feed_cursor' => 1,
-            'abilities' => $abilities,
+            'abilities' => ['tasks:create'],
         ], 201),
-        // **One `Http::fake()` call, and the feed stub is the sequence itself.** Successive calls
-        // append stubs and the FIRST match wins, so a catch-all registered here and a sequence
-        // registered afterwards means the sequence never runs -- measured: every page came back
-        // empty and the tests failed on a diagnostic that was never produced.
-        '*/api/events*' => $feed,
-        '*/api/agent/heartbeat' => Http::response(['ok' => true], 200),
-        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200),
+        '*/api/events*' => Http::response(['events' => [], 'cursor' => 999], $sessionTokenStatus),
+        '*/api/agent/heartbeat' => Http::response(['ok' => true], $sessionTokenStatus),
+        '*/api/mcp' => $sessionTokenStatus === 200
+            ? Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200)
+            : Http::response('', $sessionTokenStatus),
     ]);
 }
 
@@ -141,11 +144,13 @@ function goneSession(): Session
 }
 
 /**
- * A follower that reads the feed on every tick.
+ * How many renewals were attempted.
  */
-function goneFollower(Session $session): FleetFollower
+function goneRenewals(): int
 {
-    return new FleetFollower($session, GONE_SERVICE, goneSink(), 0);
+    return Http::recorded(
+        fn (Request $request): bool => str_ends_with($request->url(), '/renew')
+    )->count();
 }
 
 /**
@@ -158,159 +163,168 @@ function goneForwarded(): int
     )->count();
 }
 
-it('reports its own session being marked gone, and says what caused it', function (): void {
-    goneService([[goneEvent(1, 'session.gone', GONE_SESSION)]]);
+it('tells a 409 from an ordinary renewal failure', function (): void {
+    // The distinction the whole change rests on. A 500 is "try again in a moment"; a 409 is "there
+    // is nothing to try". `Session::renew()` collapsed both into one message.
+    goneService(renewStatus: 409);
+
+    $session = goneSession();
+
+    expect(fn () => $session->renew())->toThrow(SessionHasGone::class);
+});
+
+it('does not mistake an ordinary renewal failure for the session being gone', function (): void {
+    // The negative control for the test above. Without it, a `renew()` that threw `SessionHasGone`
+    // on every failure would pass just as well -- and a bridge would end itself over a bad minute.
+    goneService(renewStatus: 500);
+
+    $session = goneSession();
+
+    expect(fn () => $session->renew())->not->toThrow(SessionHasGone::class);
+});
+
+it('reports a refused heartbeat rather than swallowing it', function (): void {
+    // A 401 does not throw in this client, so the old `catch (Throwable)` never saw one and the
+    // caller could not tell a delivered heartbeat from a rejected one.
+    goneService(sessionTokenStatus: 401);
+
+    expect(goneSession()->heartbeat())->toBeFalse();
+});
+
+it('treats a heartbeat that could not be sent as saying nothing', function (): void {
+    // An unsent heartbeat is not evidence about the session, and reading it as one would end a
+    // bridge over a dropped connection.
+    Http::fake([
+        '*/api/sessions' => Http::response([
+            'session_id' => GONE_SESSION, 'token' => 'rcouncil_2|FIRST',
+            'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => [],
+        ], 201),
+        '*/api/agent/heartbeat' => fn (): never => throw new ConnectionException('offline'),
+    ]);
+
+    expect(goneSession()->heartbeat())->toBeTrue();
+});
+
+it('ends when a tool call is refused and the renewal says the session has gone', function (): void {
+    // The busy bridge's path: a forwarded message 401s, the existing 401 backstop renews, and the
+    // renewal answers 409.
+    goneService(renewStatus: 409, sessionTokenStatus: 401);
 
     $said = [];
     $session = goneSession();
+    $bridge = new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS);
 
-    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, goneFollower($session))
-        ->run(goneStream(), tmpfile(), function (string $message) use (&$said): void {
-            $said[] = $message;
-        });
+    $bridge->run(goneStream(), tmpfile(), function (string $message) use (&$said): void {
+        $said[] = $message;
+    });
 
     $all = implode("\n", $said);
 
-    // The cause is the fleet's decision. Before this, the only thing an operator heard was
-    // `Bridge::forward()`'s 401 backstop saying the installation may have been revoked -- which
-    // sends them to look at their enrollment, the one thing that is fine.
     expect($all)->toContain('marked this session gone')
         ->and($all)->toContain('claims and locks have been released')
-        ->and($all)->not->toContain('installation may have been revoked')
-        ->and($all)->not->toContain('credential');
-});
+        // The message it replaces named a status code rather than a cause.
+        ->and($all)->not->toContain('HTTP 409')
+        // And not the one that would send an operator to inspect their enrollment.
+        ->and($all)->not->toContain('installation may have been revoked');
 
-it('stops the loop, so a later pass forwards nothing', function (): void {
-    // **Stopping is not observable within one `run()`, which is why this runs it twice.** A
-    // seekable stream hands `fread` every message at once, so they are all forwarded before
-    // `periodic()` is reached -- an assertion on that count is true whether or not the loop stops.
-    // What `stop()` actually buys is that `while (! $this->stopping)` refuses the next pass, and
-    // the second `run()` below is where that shows.
-    goneService([[goneEvent(1, 'session.gone', GONE_SESSION)]]);
-
-    $session = goneSession();
-    $bridge = new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, goneFollower($session));
-
-    $bridge->run(goneStream(), tmpfile(), fn (string $m): null => null);
-
-    expect(goneForwarded())->toBe(1);
-
-    // The same bridge, a fresh message, and a feed that would say nothing new. A bridge that had
-    // not stopped forwards it.
+    // Stopped: a second pass on the same bridge forwards nothing, because `stop()` set `$stopping`
+    // and `while (! $this->stopping)` refuses the next pass.
     $bridge->run(goneStream(), tmpfile(), fn (string $m): null => null);
 
     expect(goneForwarded())->toBe(1);
 });
 
-it('does not renew a session the fleet has discarded', function (): void {
-    // **The token has to be inside the renewal window, or this proves nothing.** With an hour
-    // left the renewal condition is false anyway and the assertion holds whether or not the early
-    // return exists -- measured: deleting the return passed this test before `expiresIn` was
-    // passed here.
-    goneService(
-        pages: [[goneEvent(1, 'session.gone', GONE_SESSION)]],
-        expiresIn: Bridge::RENEW_WITHIN_SECONDS - 1,
-    );
-
-    $session = goneSession();
-
-    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, goneFollower($session))
-        ->run(goneStream(), tmpfile(), fn (string $m): null => null);
-
-    expect(Http::recorded(
-        fn (Request $request): bool => str_ends_with($request->url(), '/renew')
-    )->count())->toBe(0);
-});
-
-it('ignores a session.gone that names another session', function (): void {
-    // The negative control. Another session going gone is ordinary fleet news, and a bridge that
-    // ended on it would end whenever anybody else's agent was swept.
-    goneService([[goneEvent(1, 'session.gone', GONE_OTHER_SESSION)]]);
+it('ends an idle bridge too, from a refused heartbeat', function (): void {
+    // **The path that matters for a bridge nobody is talking to.** It makes no tool calls, and its
+    // token may be an hour from the renewal window, so without this it would sit failing quietly
+    // until the token aged out. A heartbeat interval of 0 makes the first pass due, which is what
+    // that parameter exists for.
+    goneService(renewStatus: 409, sessionTokenStatus: 401);
 
     $said = [];
     $session = goneSession();
-    $follower = goneFollower($session);
 
-    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, $follower)
-        ->run(goneStream(), tmpfile(), function (string $message) use (&$said): void {
+    new Bridge($session, GONE_SERVICE, 0)
+        ->run(goneIdleStream(), tmpfile(), function (string $message) use (&$said): void {
             $said[] = $message;
         });
 
-    expect($follower->sessionHasGone())->toBeFalse()
-        ->and(implode("\n", $said))->not->toContain('marked this session gone');
+    // **Nothing was forwarded, which is what makes this the heartbeat's path and not the tool
+    // call's.** With a message in the stream this test passed with the heartbeat-to-renewal link
+    // deleted, because the 401 on that forwarded call reached the same renewal by another road.
+    expect(goneForwarded())->toBe(0)
+        ->and(implode("\n", $said))->toContain('marked this session gone')
+        ->and(goneRenewals())->toBeGreaterThan(0);
 });
 
-it('does not end on its own session.stale, which is recoverable', function (): void {
-    // Asserted rather than assumed, because the two arrive by the same path and differ only in
-    // their type string. A bridge that ended on `stale` would end a session about to recover on its
-    // next request.
-    goneService([[goneEvent(1, 'session.stale', GONE_SESSION, ['quiet_since' => '2026-09-24T08:55:00+00:00'])]]);
+it('does not end a bridge whose heartbeat was refused but whose renewal succeeded', function (): void {
+    // The negative control for the heartbeat path, and the reason a refusal only *asks* a question
+    // rather than answering one. A token revoked and reissued is refused once and renews fine;
+    // ending there would kill a session that is still alive.
+    goneService(renewStatus: 200, sessionTokenStatus: 401);
 
     $said = [];
     $session = goneSession();
-    $follower = goneFollower($session);
+    $bridge = new Bridge($session, GONE_SERVICE, 0);
 
-    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, $follower)
-        ->run(goneStream(), tmpfile(), function (string $message) use (&$said): void {
-            $said[] = $message;
-        });
+    $bridge->run(goneStream(), tmpfile(), fn (string $m): null => null);
 
-    expect($follower->sessionHasGone())->toBeFalse()
+    expect(goneRenewals())->toBeGreaterThan(0);
+
+    $bridge->run(goneStream(), tmpfile(), function (string $message) use (&$said): void {
+        $said[] = $message;
+    });
+
+    // Not stopped: the second pass still ran.
+    expect(goneForwarded())->toBeGreaterThan(1)
         ->and(implode("\n", $said))->not->toContain('marked this session gone');
-});
-
-it('still delivers the gone event to the agent, rather than only acting on it', function (): void {
-    // #158 made this reach the sink; ending the bridge must not take it away. The agent's own
-    // record of why its session stopped is the sink entry, not the stderr line.
-    goneService([[goneEvent(1, 'session.gone', GONE_SESSION)]]);
-
-    $session = goneSession();
-
-    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, goneFollower($session))
-        ->run(goneStream(), tmpfile(), fn (string $m): null => null);
-
-    $waiting = goneSink()->peek();
-
-    expect($waiting)->toHaveCount(1)
-        ->and($waiting[0]['type'] ?? null)->toBe('session.gone');
 });
 
 it('writes nothing to stdout while ending', function (): void {
-    goneService([[goneEvent(1, 'session.gone', GONE_SESSION)]]);
+    goneService(renewStatus: 409, sessionTokenStatus: 401);
 
     $session = goneSession();
     $out = tmpfile();
 
-    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, goneFollower($session))
+    new Bridge($session, GONE_SERVICE, 0)
         ->run(goneStream(), $out, fn (string $m): null => null);
 
     rewind($out);
 
-    // Exactly the one protocol reply the forwarded message earned. A harness parses this stream, so
-    // the shutdown notice would be a malformed message rather than a visible error.
-    expect((string) stream_get_contents($out))->toBe('{"jsonrpc":"2.0","id":1,"result":{}}'."\n");
+    // Nothing at all: the message was refused, so there was no protocol reply to write, and the
+    // shutdown notice went to the diagnostic. A harness parses this stream.
+    expect((string) stream_get_contents($out))->toBeEmpty();
 });
 
 it('ends a session the service has already discarded without a second error', function (): void {
-    // `McpCommand`'s `finally` ends the session whatever stopped the loop, and the service will
-    // refuse that call for a session it has dropped. `Session::end()` swallows it deliberately;
-    // this asserts that rather than assuming it, because a second failure on the way out is exactly
-    // what an operator does not need after being told the first one.
-    goneService([[goneEvent(1, 'session.gone', GONE_SESSION)]]);
+    // `McpCommand`'s `finally` ends the session whatever stopped the loop. `Session::end()` swallows
+    // a failure deliberately; asserted rather than assumed, because a second failure on the way out
+    // is exactly what an operator does not need after being told the first one.
+    goneService();
 
     $session = goneSession();
 
     expect($session->id())->toBe(GONE_SESSION);
 
-    // **A refusal that actually throws.** A 404 response is not a `Throwable` in Laravel's HTTP
-    // client unless `->throw()` is called, so faking one exercises no `catch` at all -- measured:
-    // making `Session::end()` rethrow instead of swallowing passed this test before this line
-    // raised a connection failure instead.
+    // A refusal that actually throws. A 404 response is not a `Throwable` in this client unless
+    // `->throw()` is called, so faking one exercises no `catch` at all.
     Http::fake(['*/api/sessions/'.GONE_SESSION => fn (): never => throw new ConnectionException('the fleet dropped this session')]);
 
     $session->end();
 
-    // It did not throw -- reaching this line is that assertion -- and it finished the job anyway:
-    // the session is forgotten locally, so nothing afterwards tries to act as it.
     expect($session->id())->toBeNull();
+});
+
+it('leaves an ordinary run ordinary, with a follower attached', function (): void {
+    // The gone path is reached with no follower at all, which is how the tests above are written.
+    // This is the other half: a live session with a follower still forwards and does not renew.
+    goneService();
+
+    $session = goneSession();
+
+    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+        ->run(goneStream(), tmpfile(), fn (string $m): null => null);
+
+    expect(goneForwarded())->toBe(1)
+        ->and(goneRenewals())->toBe(0);
 });

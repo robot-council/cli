@@ -101,17 +101,6 @@ final class FleetFollower
     private const array OWN_PRESENCE = ['session.stale', 'session.gone'];
 
     /**
-     * Whether the sweep has marked this session gone.
-     *
-     * **One way, and never cleared.** `gone` is final in `robot-council/core`: the session's tokens
-     * are refused, its claims are released and its locks are dropped, and there is no event that
-     * undoes it. `stale` is the recoverable one and deliberately does not set this -- a session that
-     * is merely stale "still holds what it claimed and is active again on its next request", so a
-     * bridge that ended on it would end a session about to recover.
-     */
-    private bool $gone = false;
-
-    /**
      * Where the feed has been read to.
      */
     private ?int $cursor;
@@ -170,18 +159,6 @@ final class FleetFollower
      * @param  callable(string):void  $diagnostic  Where anything that is not a protocol message goes.
      * @return bool Whether this session's role changed and its token should be renewed now.
      */
-    /**
-     * Whether the fleet has marked this session gone, as far as the feed has said.
-     *
-     * Asked by the bridge after each tick rather than answered through `tick()`'s return, which
-     * already carries the role-change signal. Two unrelated booleans through one return value would
-     * be a worse contract than one method each.
-     */
-    public function sessionHasGone(): bool
-    {
-        return $this->gone;
-    }
-
     public function tick(callable $diagnostic): bool
     {
         if ($this->cursor === null || time() < $this->nextPoll) {
@@ -211,15 +188,6 @@ final class FleetFollower
         $roleChanged = false;
 
         foreach ($page['events'] as $event) {
-            // **Decided before the role branch below, because `gone` is terminal and a role is not.**
-            // A page can carry both, and the role branch stops reading the page where it finds one --
-            // so checking after it would defer the one fact that makes everything else moot to the
-            // next tick. Nothing is lost either way, since the cursor rewinds; this is about not
-            // spending a poll interval acting on a session the fleet has already discarded.
-            if ($this->type($event) === 'session.gone' && $this->actor($event) === $this->session->id()) {
-                $this->gone = true;
-            }
-
             // **Its own role, which `concerns()` filters out with everything else this session did.**
             // That filter is right for the sink -- an agent does not need to be told what it just
             // did -- and wrong here: a role is decided by an administrator rather than by this
