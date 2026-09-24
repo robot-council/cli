@@ -145,8 +145,14 @@ least the issue it closes; many also link blockers, follow-ups, and design-decis
   line. Pick one, not both.
 - **Cross-repo close:** backticked owner/repo path, linked to the GitHub URL:
   `` Closes [`owner/repo#N`](https://github.com/owner/repo/issues/N). ``
-- **Multiple closes:** one `Closes` line per issue, or `Closes #N1, #N2, #N3.` when the issues
-  are tightly grouped.
+- **Multiple closes:** the keyword is repeated before **every** reference — `Closes #N1.
+  Closes #N2.`, or `Closes #N1, closes #N2.` on one line. **`Closes #N1, #N2.` closes only
+  `#N1`**, because the keyword pairs with the reference adjacent to it and the parser reads no
+  further; `#N2` is an ordinary mention. Measured on `robot-council/core#252`, as a
+  before-and-after on one body with nothing else changed: with `Closes #240, #241.` the
+  `closingIssuesReferences` field held one node, `#240`; rewritten to `Closes #240. Closes #241.`
+  it held both. The first read is not an absence read off a broken query — `#240` came back, which
+  is the control that the field and the query work.
 - `Resolves #N` is accepted as a synonym but `Closes` is the dominant form — prefer it.
 
 **Cross-references** — issues the PR relates to but does not close:
@@ -227,8 +233,80 @@ keyword-reference pair in the plain text, same-line and cross-line alike:
   perl -0777 -ne '$n += length; while (/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:[\w.-]+\/[\w.-]+#\d+|#\d+|https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+)/gi) { ($m = $&) =~ s/\s+/ /g; print "$m\n"; $h++ } END { printf "scanned %d bytes, %d keyword-reference pairs\n", $n, $h }'
 ```
 
-Every printed pair should be an issue this PR means to close. `scanned 0 bytes` is a failed read,
-not a clean result.
+Every printed pair should be an issue this PR means to close, and `scanned 0 bytes` is a failed read
+rather than a clean result.
+
+**Make it fail rather than print.** A scan you have to read is one you can merge past, and that has
+happened: on `robot-council/core#82` the scan printed `1 fixed: #83` beside the intended
+`Closes #75`, from the sentence *"Truncation is filed rather than **fixed: #83**"* — a body saying
+the issue was **not** fixed — and the merge closed #83. The output was correct and was not acted on.
+So pass the issues the PR means to close and let the check exit non-zero on anything else.
+
+**And it has to refuse in BOTH directions**, which for a long time it did not. A check that
+rejects a number it did not expect says nothing about a number it expected and did not get — so the
+comma form above passes it: with `intended="240 241"` and a body reading `Closes #240, #241.`, the
+scan finds `240`, finds it in `intended`, and exits 0 while `#241` is not linked at all. That
+failure is silent in the field too, and surfaces days later as an issue still open after the pull
+request that met it merged. Scan to a file, then compare the two sets:
+
+```bash
+intended="75"          # space-separated, the issues this PR should close
+{ git log --format=%B origin/main..HEAD; gh api repos/robot-council/core/pulls/<N> --jq '.title, .body'; } > scan.txt
+test -s scan.txt || { echo "EMPTY READ — not a clean result"; exit 9; }
+perl -0777 -ne 'while (/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)/gi) { print "$1\n" }' \
+  < scan.txt | sort -u > found.txt
+
+bad=0
+while read -r n; do
+  case " $intended " in *" $n "*) ;; *) echo "UNINTENDED CLOSE: #$n"; bad=1 ;; esac
+done < found.txt
+for n in $intended; do
+  grep -qx "$n" found.txt || { echo "INTENDED BUT NOT CLOSING: #$n"; bad=1; }
+done
+[ "$bad" -eq 0 ] || { echo "refusing to merge"; exit 9; }
+```
+
+Reading from a file rather than a pipe is what makes the loops' findings reach `$bad` at all: a
+`while` on the right of a `|` runs in a subshell, so a variable it sets is discarded and an `exit`
+inside it leaves only the pipeline's status.
+
+**Then confirm the same answer through GitHub**, because the scan and GitHub are two readers of the
+same text and only one of them decides:
+
+```bash
+gh api graphql -f query='{repository(owner:"robot-council",name:"core"){pullRequest(number:<N>){closingIssuesReferences(first:20){nodes{number}}}}}' \
+  --jq '[.data.repository.pullRequest.closingIssuesReferences.nodes[].number] | sort | join(" ")'
+```
+
+That field reports what the **body** declares, so it is not a substitute for the scan — the plain-text
+path reads the commit messages and the title, which the field never sees. Two readers, both checked.
+
+**Run it on every pull request, and read the PR body — not just the commits.** Both halves of that
+sentence were paid for on the same day, months after the check above was written.
+
+On `robot-council/cli#2`, a one-line README change, the body opened
+*"Closes #1's first housekeeping item, and the last acceptance criterion of …"*. GitHub parses
+`Closes #1` and ignores the possessive that follows, so merging closed the repository's **epic**.
+Two things let it through:
+
+- **The PR was treated as too small to check.** It changed one sentence in a README. The check is
+  cheapest exactly there, and a trivial diff is no evidence about what its body says.
+- **A weakened variant was run in its place** — `git log origin/main..HEAD` alone, without the
+  `gh api …/pulls/<N> --jq '.title, .body'` half. That commit range contained **no closing keyword
+  at all**; the `Closes #1` existed only in the body. A squash merge composes its commit message
+  from the PR title and body, so the body is what GitHub reads. Scanning commits is scanning the
+  wrong text.
+
+**The possessive is the shape to watch**, because it reads as ordinary prose. Written with a real
+number, each of these closes the issue outright: `Closes #<N>'s first item`, `fixes #<N>'s
+regression`, `resolves #<N>'s open question`. Write `the first item of #<N>` instead, or reword so
+no keyword precedes the reference.
+
+**Those examples carry `#<N>` rather than a number for a reason.** Spelled with real ones, they
+would close those issues from this very file's own pull request -- and they did, on the first
+attempt at this change: the check flagged `#1`, `#4` and `#9` in the body of the pull request that
+adds this paragraph. A document about a trap is written in the trap's own syntax, which makes it the
+likeliest place to fall in. The same applies to the commit message, which a squash merge also reads.
 
 ## Bullets, headings, tables
 
