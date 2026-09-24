@@ -425,15 +425,17 @@ In `.claude/settings.json`, at project or user level:
 
 `~/bin/robot-council-stop-hook` works too: a `command` with no `args` array runs through a shell, and
 a probe writing `printf '%s' ~` to a file produced the home directory. That was measured for Claude
-Code only. **Codex was not measured**, and an unexpanded `~` is a directory that does not exist
-rather than an error anyone sees, so write the path out in full unless you are going to check.
+Code. For Cursor on macOS the same shell behavior was measured below, though not with `~` leading the
+command word itself. **Codex was not measured**, and an unexpanded `~` is a directory that does not
+exist rather than an error anyone sees, so write the path out in full unless you are going to check.
 
-**Cursor was exercised, and the question did not arise there.** On Windows the entry has to point at
-a `.cmd` rather than at a bash script, so the path was absolute and a `~` never appeared; Cursor's
-execution log names the mechanism `windows_temp_file`, which tells you it writes a temporary script
-but not whether a shell would have expanded anything in it. Whether a Cursor `command` is
-shell-interpreted is therefore **still open**, on Windows and on macOS alike. The Cursor section
-below records what was run instead of inferring from it.
+**Cursor's `command` runs through `/bin/bash` on macOS**, measured 2026-09-24 with the same probe
+and recorded in the Cursor section below: `~` expanded to the home directory, and an environment
+variable prefixed onto `command` reached the script. **On Windows it is still open.** There the entry has to
+point at a `.cmd` rather than at a bash script, so the run there used an absolute path and no `~`
+ever appeared; Cursor's execution log names the mechanism `windows_temp_file`, which tells you it
+writes a temporary script but not whether a shell would have expanded anything in it. Do not carry
+the macOS answer across.
 
 **Verified 2026-09-22**, on Claude Code 2.1.236 and macOS 26.6.2. Three runs of
 `claude -p 'Say the single word READY and stop.'` in a throwaway project, differing only in whether
@@ -668,13 +670,72 @@ the entry points at a two-line `.cmd` that invokes Git Bash on the hook:
 "C:\Program Files\Git\bin\bash.exe" "%USERPROFILE%\bin\robot-council-stop-hook"
 ```
 
-stdin passes through the shim untouched. **Whether Cursor would have interpreted a shell line
-directly is still unmeasured**, and the shim is deliberately the arrangement that does not depend on
-the answer.
+stdin passes through the shim untouched. **Whether Cursor on Windows would have interpreted a shell
+line directly is still unmeasured**, and the shim is deliberately the arrangement that does not
+depend on the answer. The macOS answer, below, is not evidence for Windows: the mechanism there is a
+temporary script, and what interprets that script was not observed.
 
 **The two environment variables reach the hook by being written into the script**, which is what the
-section above recommends and what was run here. A `stop` entry has no `env` key, and prefixing them
-onto `command` was not tried -- it would depend on the same unmeasured shell question.
+section above recommends and what was run on Windows. A `stop` entry has no `env` key. Prefixing
+them onto `command` works on macOS (measured below), but the recommendation stays with the script:
+it is the one arrangement that works on every harness and platform this README covers, and the
+Windows answer is not known.
+
+**Verified 2026-09-24: on macOS a `stop` hook's `command` is shell-interpreted.** Cursor 3.17.19 on
+macOS 26.6.2, driving the editor's own agent with one turn of `Say the single word READY and stop.`
+in a throwaway workspace whose `.cursor/hooks.json` held four `stop` entries (`<dir>` stands for an
+absolute path with no spaces):
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "stop": [
+      { "command": "<dir>/probe-control.sh" },
+      { "command": "printf '%s' ~ > <dir>/out/tilde.out" },
+      { "command": "FOO=bar <dir>/probe-env.sh" },
+      { "command": "<dir>/probe-argv.sh ~ '$HOME' \"two words\"" }
+    ]
+  }
+}
+```
+
+`probe-env.sh` records `FOO=${FOO-} set=${FOO+yes}`, which tells an unset variable from an empty one;
+`probe-argv.sh` records `$#` and each argument in brackets. Before Cursor ran them, the argument
+probe was run both through `sh -c` and as a whitespace-split exec, so that the two possible answers
+were known to look different:
+
+| probe | through `sh -c` | whitespace-split, no shell | Cursor's `stop` |
+| --- | --- | --- | --- |
+| `argv.out` | `argc=3` `[/Users/<you>]` `[$HOME]` `[two words]` | `argc=4` `[~]` `[$HOME]` `["two]` `[words"]` | `argc=3` `[/Users/<you>]` `[$HOME]` `[two words]` |
+| `tilde.out` | not run | not run | `/Users/<you>` |
+| `env.out` | `FOO=bar set=yes` | not run | `FOO=bar set=yes` |
+
+`tilde.out` existing at all means `>` was honored as a redirect: without a shell, `>` and the path
+would have reached `printf` as arguments and no file would have been written. `cursor.hooks.*.log`
+recorded `Found 4 hook(s) to execute for step: stop` and four `exit code: 0`, and the control wrote
+its timestamp once.
+
+A second editor turn, in a new chat, named the interpreter and took the baseline for `FOO`. Its
+`stop` entries were the control, `probe-env.sh` with **no** prefix, and
+
+```json
+{ "command": "echo \"zero=$0 comm=$(ps -o comm= -p $$) sub=$(echo ok)\" > <dir>/out/shell.out; echo seq=ok >> <dir>/out/shell.out" }
+```
+
+which wrote
+
+```
+zero=/bin/bash comm=/bin/bash sub=ok
+seq=ok
+```
+
+against `zero=sh comm=sh sub=ok` and `seq=ok` from the same line under `sh -c`. The unprefixed
+`probe-env.sh` wrote `FOO= set=`, so the `bar` in the first turn came from the prefix and not from
+Cursor's own environment. **So on macOS Cursor hands a `stop` `command` to `/bin/bash`**: `~`
+expands, quotes are removed, single quotes suppress `$`, command substitution and `;` work, and a
+`VAR=value` prefix reaches the script. The log names no mechanism on macOS, where Windows names
+`windows_temp_file`.
 
 **`hooks.json` is picked up without restarting Cursor.** Measured: the file was written at
 17:45:36 UTC and `cursor.hooks.*.log` recorded `Reloading hooks configuration...` at 17:45:37.777Z
@@ -703,8 +764,9 @@ anywhere reporting it. The script here names the executable absolutely. Check th
 before trusting a quiet run.
 
 Cursor 3.17.19 is installed on the machine this was written on, and **`cursor agent` is a headless
-runner directly comparable to `claude -p`**: `-p/--print` with `--output-format text | json |
-stream-json`, which is what the Claude Code measurements above were taken with.
+runner shaped like `claude -p`**: `-p/--print` with `--output-format text | json | stream-json`,
+which is what the Claude Code measurements above were taken with. The shape is where the
+resemblance ends for this hook, because `-p` does not run `stop` at all (below).
 
 **`agent` is routed by the `cursor` launcher script, not by the Cursor binary, and invoking the
 binary directly fails silently.** On macOS `/usr/local/bin/cursor` is a 142-line shell script whose
@@ -724,18 +786,44 @@ So **call `cursor-agent` directly** rather than through `cursor agent`, and inst
 launcher whose presence decides what the same command line means. Invoking it installs
 `cursor-agent` from `cursor.com/install` on first use; here that produced 2026.09.18-9a7762b in
 `~/.local/bin`, which is not on the default `PATH`. `cursor agent status` then reported **`Not logged
-in`**, and `cursor agent login` is a browser flow, so nothing was run.
+in`**, and `cursor agent login` is a browser flow, so nothing was run on 2026-09-22. The runs dated
+2026-09-24 below followed a browser login, made with the full path because `~/.local/bin` was still
+not on `PATH`.
 
 This is corrected from an earlier reading of "no headless binary", which came from looking for a
 `cursor-agent` on `PATH` and reading the top of `cursor --help`. The `Subcommands` block naming
 `agent` is at the bottom of that same output. A narrower question than the one that mattered,
 answered in the reassuring direction.
 
-**Whether `cursor agent -p` runs `stop` hooks at all is still unmeasured**, and on Windows it cannot
-be measured at all: `cursor-agent` is not installable there. `cursor.com/install` is a bash script
-whose `uname -s` case accepts `Linux*` and `Darwin*` and exits 1 on anything else, and it mentions
+**Under `cursor-agent -p`, no `stop` hook wrote its marker.** Measured 2026-09-24 with
+`cursor-agent` 2026.09.18-9a7762b on macOS 26.6.2, logged in, running `cursor-agent -p --trust 'Say
+the single word READY and stop.'` in a throwaway workspace. Three runs, each exiting 0 and printing
+`READY`:
+
+| run | project `.cursor/hooks.json` | markers written |
+| --- | --- | --- |
+| 1 | the four `stop` probes; the workspace not a git repository | none |
+| 2 | the same, after `git init` | none |
+| 3 | one marker command under each of `sessionStart`, `beforeSubmitPrompt`, `afterAgentResponse`, `stop` | `sessionStart` only |
+
+Run 3's `sessionStart` line is the control, and only run 3 has it: it shows the project config was
+read and a hook does execute under `-p`, so the silence from `stop` is not a config that never
+loaded. `beforeSubmitPrompt` and `afterAgentResponse` were silent too, so `-p` skips more of the
+agent loop than `stop` alone. What the markers cannot tell apart is a hook never started from one
+started and killed as the process exited; no `cursor-agent` hook log was found to settle it. Either
+way **`-p` did not exercise this hook**, and the measurement above drove the editor. Interactive
+`cursor-agent`, without `-p`, was not tried.
+
+The three recording probes above, moved under `sessionStart`, produced files byte-for-byte identical
+to the editor's `stop` results in a fourth headless run -- `~` expanded, `FOO=bar` reached the
+script, `argc=3`. That is the CLI's hook runner on another step, recorded as corroboration rather
+than as the `stop` measurement.
+
+On Windows none of this can be measured headless: `cursor-agent` is not installable there.
+`cursor.com/install` is a bash script whose `uname -s` case accepts `Linux*` and `Darwin*` and exits
+1 on anything else, and it mentions
 Windows nowhere. The runs recorded below drove the **editor's** agent instead, which is a different
-question with a different answer and is labelled as such.
+question with a different answer and is labeled as such.
 
 **And the Windows launcher does not route `agent` at all**, which the paragraph above predicts and
 which is worth having measured directly rather than inferred twice over. `cursor.cmd` on Windows is
