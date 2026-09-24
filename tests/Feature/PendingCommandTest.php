@@ -16,6 +16,8 @@ declare(strict_types=1);
  *
  * @command  vendor/bin/pest --compact tests/Feature/PendingCommandTest.php
  */
+
+use App\Support\Bridge;
 use App\Support\PendingEvents;
 use Illuminate\Support\Facades\Artisan;
 
@@ -55,8 +57,6 @@ beforeEach(function (): void {
 });
 
 afterEach(function (): void {
-    pendingSink()->forget();
-
     if (is_dir($this->stateDirectory)) {
         array_map(unlink(...), glob($this->stateDirectory.'/robot-council/pending/*') ?: []);
         @rmdir($this->stateDirectory.'/robot-council/pending');
@@ -159,7 +159,6 @@ it('tells one project from another', function (): void {
     expect(Artisan::call('pending', ['--project' => 'probe']))->toBe(0)
         ->and(pendingSink(project: 'other-checkout')->isEmpty())->toBeFalse();
 
-    pendingSink(project: 'other-checkout')->forget();
 });
 
 it('refuses without a service, rather than reading some other sink', function (): void {
@@ -238,17 +237,115 @@ it('treats a corrupt sink as an empty one', function (): void {
         ->and(Artisan::call('pending', ['--project' => 'probe']))->toBe(0);
 });
 
-it('forgets the sink entirely, which is what ending a session does', function (): void {
+it('drops the fleet events a session leaves behind, which is what ending one does', function (): void {
     $sink = pendingSink();
 
     $sink->add([waitingEvent()]);
 
     expect($sink->path())->toBeFile();
 
-    $sink->forget();
+    $sink->clearFleetEvents();
 
     // Unread events name tasks and locks THIS session held, so leaving them for the next one would
     // hand it somebody else's work to react to.
-    expect($sink->path())->not->toBeFile()
-        ->and($sink->drain())->toBeEmpty();
+    expect($sink->drain())->toBeEmpty();
+});
+
+it('keeps what the bridge wrote about the ending, which the next session is the reader of', function (): void {
+    $sink = pendingSink();
+
+    $sink->add([
+        waitingEvent(),
+        ['type' => Bridge::SESSION_ENDED, 'body' => 'the fleet ended it'],
+    ]);
+
+    $sink->clearFleetEvents();
+
+    // **The one entry in the sink written FOR the reader that comes after.** Clearing it would
+    // leave an agent starting over with nothing anywhere saying why, which is #188 exactly.
+    $waiting = $sink->drain();
+
+    expect($waiting)->toHaveCount(1)
+        ->and($waiting[0]['type'])->toBe('bridge.session-ended');
+});
+
+it('clears a fleet event that merely mentions the prefix, rather than anything containing it', function (): void {
+    // The negative control for the filter, and only the TYPE can supply it: the predicate reads
+    // `type` and nothing else, so a fixture carrying the prefix in its body behaves identically
+    // under `str_starts_with` and `str_contains` and proves nothing. Both of these would be kept
+    // by a `str_contains`, and a fleet event kept across a session boundary is the defect the
+    // clearing exists to prevent.
+    $sink = pendingSink();
+
+    $sink->add([
+        ['type' => 'not-a-bridge.notice', 'body' => 'the prefix, one character in'],
+        ['type' => 'task.claimed.bridge.echo', 'body' => 'the prefix, in the middle'],
+    ]);
+
+    $sink->clearFleetEvents();
+
+    expect($sink->drain())->toBeEmpty();
+});
+
+it('renders what the bridge wrote without attributing it to a session', function (): void {
+    // **The fallback for a missing actor is `from an unnamed session`**, which would tell a reader
+    // the fleet delivered this -- something it structurally cannot do for a session about itself
+    // (#175), arriving through the one door the `bridge.` prefix was chosen to close.
+    pendingSink()->add([[
+        'type' => Bridge::SESSION_ENDED,
+        'body' => 'The fleet ended this session.',
+        'created_at' => '2026-09-24T18:00:00+00:00',
+    ]]);
+
+    expect(Artisan::call('pending', ['--project' => 'probe']))->toBe(0)
+        ->and(Artisan::output())
+        ->toContain('[bridge.session-ended] The fleet ended this session. at 2026-09-24T18:00:00+00:00')
+        ->not->toContain('unnamed session');
+});
+
+it('still names who said a fleet event, which is what makes its content weighable', function (): void {
+    // The negative control for the line above. Dropping attribution everywhere would pass that
+    // test and remove the provenance #14 threat model turns on: event bodies are other agents
+    // words, reaching something with shell access.
+    pendingSink()->add([waitingEvent()]);
+
+    expect(Artisan::call('pending', ['--project' => 'probe']))->toBe(0)
+        ->and(Artisan::output())->toContain('from otherdev');
+});
+
+it('keeps attribution on a fleet event whose type merely contains the prefix', function (): void {
+    // The negative control the renderer was missing, and the mutation it guards against is the
+    // expensive one: a `str_contains` here STRIPS provenance from a genuine fleet event, and who
+    // said it is what makes event content weighable by something with shell access.
+    pendingSink()->add([[
+        'type' => 'not-a-bridge.notice',
+        'body' => 'from the fleet, prefix one character in',
+        'actor' => ['github_login' => 'otherdev'],
+    ]]);
+
+    expect(Artisan::call('pending', ['--project' => 'probe']))->toBe(0)
+        ->and(Artisan::output())->toContain('from otherdev');
+});
+
+it('replaces an earlier notice of the same type rather than stacking another', function (): void {
+    $sink = pendingSink();
+
+    $sink->leaveNotice(Bridge::SESSION_ENDED, 'the first ending');
+    $sink->leaveNotice(Bridge::SESSION_ENDED, 'the second ending');
+
+    $waiting = $sink->drain();
+
+    expect($waiting)->toHaveCount(1)
+        ->and($waiting[0]['body'])->toBe('the second ending');
+});
+
+it('leaves a notice of a different type alone, so replacement is per type and not a wipe', function (): void {
+    // The negative control: replacing everything local would pass the test above and silently
+    // destroy any second kind of notice the bridge ever learns to write.
+    $sink = pendingSink();
+
+    $sink->leaveNotice(Bridge::SESSION_ENDED, 'the ending');
+    $sink->leaveNotice(PendingEvents::LOCAL_PREFIX.'something-else', 'a different notice');
+
+    expect($sink->drain())->toHaveCount(2);
 });

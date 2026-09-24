@@ -17,8 +17,10 @@ declare(strict_types=1);
  * @command  vendor/bin/pest --compact tests/Feature/McpCommandTest.php
  */
 
+use App\Support\Bridge;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
+use App\Support\PendingEvents;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
@@ -33,13 +35,33 @@ beforeEach(function (): void {
     // harness on a developer's machine and inside none on CI.
     putenv('ROBOT_COUNCIL_HARNESS=claude');
 
+    // A directory this test owns. The command clears a sink on the way out, and a suite that
+    // reaches into a developer's real `~/.local/state` to do it is a suite nobody runs twice.
+    $this->stateDirectory = sys_get_temp_dir().'/rc-mcp-'.bin2hex(random_bytes(6));
+
+    putenv('XDG_STATE_HOME='.$this->stateDirectory);
+
     // An unmatched URL must fail loudly rather than reach the network.
     Http::preventStrayRequests();
 });
 
 afterEach(function (): void {
+    array_map(unlink(...), glob($this->stateDirectory.'/robot-council/pending/*') ?: []);
+    @rmdir($this->stateDirectory.'/robot-council/pending');
+    @rmdir($this->stateDirectory.'/robot-council');
+    @rmdir($this->stateDirectory);
+
+    putenv('XDG_STATE_HOME');
     putenv('ROBOT_COUNCIL_HARNESS');
 });
+
+/**
+ * The sink the command opens for the identity these tests join under.
+ */
+function bridgeSink(): PendingEvents
+{
+    return new PendingEvents(MCP_SERVICE, 'claude', 'probe');
+}
 
 /**
  * A credential store already holding an enrollment for the service under test.
@@ -277,4 +299,39 @@ it('describes the fleet at the join, not at launch', function (): void {
 
         // **Still on stderr, never on stdout**, the property #122 measured byte for byte
         ->and(Artisan::output())->toBeEmpty();
+});
+
+it('clears the fleet events of the session it ends, and keeps what the bridge wrote', function (): void {
+    // **The shutdown nothing else covers.** Every other test of the record drives `Bridge` and
+    // calls the clearing by hand; this drives the command, whose `finally` is the only production
+    // caller. Move that call before the loop, drop it, or make it remove the file, and only this
+    // test notices.
+    bridgeEnrolled();
+    bridgeService();
+
+    bridgeSink()->add([
+        ['type' => 'directive', 'body' => 'a task this session was told about'],
+        ['type' => Bridge::SESSION_ENDED, 'body' => 'why the previous bridge stopped'],
+    ]);
+
+    expect(Artisan::call('mcp', ['--service' => MCP_SERVICE, '--project' => 'probe', '--auto-join' => true]))->toBe(0);
+
+    $waiting = bridgeSink()->peek();
+
+    // The directive named work THIS session held, so the next one must not react to it. The
+    // bridge record is the one thing in the sink written FOR the session that comes after.
+    expect($waiting)->toHaveCount(1)
+        ->and($waiting[0]['type'])->toBe('bridge.session-ended');
+});
+
+it('leaves the sink alone when nobody joined, because it opened none', function (): void {
+    // The control. A bridge nobody asked to join holds no sink, so it has nothing to clear -- and
+    // clearing one anyway would throw away a record the PREVIOUS bridge left for this agent.
+    bridgeEnrolled();
+    bridgeService();
+
+    bridgeSink()->add([['type' => Bridge::SESSION_ENDED, 'body' => 'from the bridge before this one']]);
+
+    expect(Artisan::call('mcp', ['--service' => MCP_SERVICE, '--project' => 'probe']))->toBe(0)
+        ->and(bridgeSink()->peek())->toHaveCount(1);
 });

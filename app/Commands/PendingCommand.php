@@ -82,21 +82,41 @@ final class PendingCommand extends Command
      * #14's threat model is that event content is untrusted input to something with shell access:
      * who said it is what makes it weighable.
      *
-     * @param  array<array-key, mixed>  $event  One event from the feed.
+     * **A `bridge.` entry carries no attribution, and leaving it off is not cosmetic.** Every other
+     * entry came from the feed and is somebody's words, so who said it is what makes it weighable.
+     * An entry this side wrote came from nobody, and the fallback for a missing actor is `from an
+     * unnamed session` -- which would tell a reader the fleet delivered something it structurally
+     * cannot (#175), through the one door the `bridge.` prefix was chosen to close.
+     *
+     * @param  array<array-key, mixed>  $event  One entry from the sink.
      */
     private function describe(array $event): string
     {
         $type = \is_string($event['type'] ?? null) ? $event['type'] : 'event';
         $body = \is_string($event['body'] ?? null) ? $event['body'] : '';
-
-        $actor = $event['actor'] ?? null;
-        $login = \is_array($actor) && \is_string($actor['github_login'] ?? null)
-            ? $actor['github_login']
-            : 'an unnamed session';
-
         $when = \is_string($event['created_at'] ?? null) ? $event['created_at'] : '';
 
-        return trim(sprintf('[%s] %s from %s%s', $type, $body, $login, $when === '' ? '' : ' at '.$when));
+        return trim(sprintf(
+            '[%s] %s%s%s',
+            $type,
+            $body,
+            str_starts_with($type, PendingEvents::LOCAL_PREFIX) ? '' : ' from '.$this->said($event),
+            $when === '' ? '' : ' at '.$when
+        ));
+    }
+
+    /**
+     * Who the fleet says an event came from.
+     *
+     * @param  array<array-key, mixed>  $event  One event from the feed.
+     */
+    private function said(array $event): string
+    {
+        $actor = $event['actor'] ?? null;
+
+        return \is_array($actor) && \is_string($actor['github_login'] ?? null)
+            ? $actor['github_login']
+            : 'an unnamed session';
     }
 
     /**

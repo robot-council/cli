@@ -117,7 +117,12 @@ function followed(array $events, array $abilities = []): array
     $session->start();
 
     $sink = sinkFor();
-    $sink->forget();
+
+    // Removed rather than cleared: `clearFleetEvents()` deliberately KEEPS a `bridge.` entry, so
+    // it cannot promise this helper the empty sink its callers count each result against.
+    if (is_file($sink->path())) {
+        unlink($sink->path());
+    }
 
     new FleetFollower($session, FOLLOW_SERVICE, $sink)->tick(function (string $m): void {});
 
@@ -137,8 +142,6 @@ beforeEach(function (): void {
 });
 
 afterEach(function (): void {
-    sinkFor()->forget();
-
     if (is_dir($this->stateDirectory)) {
         // Removed rather than left: a suite that leaves a directory per test in the system
         // temporary directory is a suite that fills a disk over a month of runs.
