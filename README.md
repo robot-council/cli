@@ -41,11 +41,18 @@ It creates a Laravel application in the current directory, requires `robot-counc
 
 ## Getting a machine onto a fleet
 
+**Before anything else: the developer's GitHub account has to be on the fleet's allowlist.** The service checks it on the enrollment page *and* on the approve and deny routes, so somebody who is not on it cannot approve their own enrollment, or anybody else's. An administrator adds them to `ROBOT_COUNCIL_DEVELOPERS` and redeploys; until that has happened, everything below stops at a code nobody can approve.
+
+**Run this yourself, in your own terminal.** It is half a browser task, so handing it to an agent leaves the agent blocked on a code only a person can approve.
+
 ```bash
-robot-council enroll --service=https://your-fleet.example.com
+robot-council enroll \
+  --service=https://your-fleet.example.com \
+  --harness=claude \
+  --machine-label=your-machine
 ```
 
-It prints a code and a URL. A developer signed in to that fleet opens the URL, enters the code, and approves; enrollment finishes on its own. Then wire a harness to the bridge, below.
+It prints a code and a URL, and waits. An allowlisted developer signed in to that fleet opens the URL, enters the code, and approves; enrollment finishes on its own. Then wire a harness to the bridge, below.
 
 **Enroll once per harness, not once per machine.** A credential belongs to one harness, so a machine running both Claude Code and Cursor enrolls twice:
 
@@ -54,7 +61,11 @@ robot-council enroll --service=https://your-fleet.example.com --harness=claude
 robot-council enroll --service=https://your-fleet.example.com --harness=cursor
 ```
 
-Re-enrolling a harness **replaces** that harness's credential and leaves the others alone. Worktrees do not need one each: several checkouts under one harness share its credential and are told apart by `--project`.
+Re-enrolling a harness **replaces** that harness's credential and leaves the others alone. Worktrees do not need one each: several checkouts under one harness share its credential and are told apart by the repository and work location each session reports, which are read from the checkout (see [joining the fleet](#joining-the-fleet)).
+
+**Pass `--machine-label`, and pass the same one for every harness on the machine.** It is how a person tells sessions apart on the dashboard, so it should be the name you would say out loud -- `josh-office`, `josh-home`. Omitted, it is derived from `gethostname()` with a trailing `.local` removed and every character outside `[A-Za-z0-9._-]` **silently dropped**, which is the case worth avoiding: a machine called `Josh's MacBook Pro.local` enrolls as `JoshsMacBookPro`, which is plausible enough that nobody questions it and is not what anyone would have chosen. Two harnesses given different labels appear as two machines. The bound is 64 characters.
+
+**On macOS, this needs `v0.4.0` or later.** Before it, `security` prompted on the terminal for the keychain password, ignored what the command piped to it, and the write timed out after fifteen seconds -- so enrolling from an interactive shell could not store a credential at all, and the only path that worked was one with no controlling terminal. [#207](https://github.com/robot-council/cli/issues/207) has the measurement; `robot-council --version` says which you have.
 
 `robot-council enroll --help` lists the other options.
 
@@ -120,6 +131,14 @@ Pass `--project` as well where one harness works several checkouts, so the fleet
 
 **Launching the bridge does not join the fleet** ([#127](https://github.com/robot-council/cli/issues/127)). Opening an editor is not a decision to join, so the bridge comes up with no session and no credential read. It answers the harness's handshake itself and lists one tool, `join`, which an agent calls when the operator asks it to, or when its instructions say the checkout works with the fleet. Joining reads the credential, starts the session, and tells the harness the tool list changed, so the fleet's tools are callable in the same turn.
 
+**There is no `robot-council join` command, and that is the part to say out loud.** `join` is an MCP tool, so nothing is typed at a shell: in a session with the bridge wired up, you ask the agent, and the agent calls the tool. All of these work, because the agent maps what you said onto the tool's arguments:
+
+```
+join the fleet
+join the fleet as coordinator
+join the fleet for owner/name, work location primary
+```
+
 `join` takes three optional arguments:
 
 | argument | meaning |
@@ -128,18 +147,36 @@ Pass `--project` as well where one harness works several checkouts, so the fleet
 | `repository` | `owner/name`, when the checkout cannot say or says wrong. Read from the checkout otherwise. |
 | `work_location` | which working copy this is. Read from the checkout otherwise. |
 
+**Both are read from the checkout, so usually you name neither.** `repository` comes from `git remote get-url origin` and resolves only for GitHub hosts; `work_location` is a linked worktree's own name, or `primary` in a main checkout. From a worktree at `robot-council-cli-a` whose `origin` is this repository, a bare `join the fleet` reports `robot-council/cli` and `robot-council-cli-a` without being told either.
+
+Name them when the default is wrong, which is three cases and no others:
+
+- **The checkout cannot say.** No `origin`, a remote that is not GitHub, or a git that hangs leaves `repository` null. The session still joins; it just cannot say where it is.
+- **The checkout says something true but unhelpful**, such as a fork, where the work is tracked under the upstream name.
+- **The directory name is not the label you want.** A work location exists to be compared *across machines* -- `josh-office` and `josh-home` both running `a` of one repository -- so a checkout called `robot-council-cli-a` on one and `cli-a` on the other reads as two places and defeats the comparison.
+
+**`work_location` is lowercase.** The service takes `^(?!\.+$)[a-z0-9_.][a-z0-9._-]*$` and at most 32 characters, so `robot-council-cli-a` is accepted and `Robot-Council-A` is refused. `repository` is the more permissive of the two: `owner/name`, mixed case allowed, at most 140 characters. Either refusal happens at the service, after the session has started, so it arrives as a join that reports a problem rather than a silently wrong label.
+
 **A machine that cannot join still comes up.** With no credential, `join` answers with what is missing, in a tool result the agent can relay, where the bridge used to exit at launch with a line most harnesses bury. Calling `join` a second time is refused and leaves the session already held open.
 
 **To join every time a checkout launches**, add `--auto-join` after `mcp`, and `--role=<role>` beside it to ask for a role; that role is still only a request. The outcome of an automatic join goes to stderr, prefixed `robot-council:`.
 
 ### Claude Code
 
+**You run this yourself too.** It edits Claude Code's own configuration, which an agent would be changing underneath the process it is running in, and the change does not take effect until a restart it cannot perform on itself.
+
 ```bash
-claude mcp add robot-council \
+claude mcp add -s user robot-council \
   -e ROBOT_COUNCIL_SERVICE=https://your-fleet.example.com \
   -e ROBOT_COUNCIL_HARNESS=claude \
   -- robot-council mcp
 ```
+
+**`-s user` is what makes this once per machine.** `claude mcp add` defaults to `-s local`, which registers the server for the current project only, so the same command has to be repeated in every checkout. The three scopes are `local`, `user` and `project`; `user` is the one that matches a bridge reading one machine's credential.
+
+That works because nothing in the command above is checkout-specific: the repository and the work location are read from whichever checkout the bridge is launched in, so one configuration serves them all. A per-checkout scope is needed only for a per-checkout *flag*, which today means `--project` alone -- and that label is superseded by the two fields, as [naming a project](#the-label-is-now-two-fields-and-both-are-read-from-the-checkout) records.
+
+**Then restart Claude Code.** A running session does not pick up a newly added MCP server: every scope is read at startup, and `/mcp` reconnects servers it already knows rather than loading new ones. (`/reload-plugins`, on 2.1.246 and later, applies to servers a *plugin* provides, not to one added here.) Until the restart, the bridge is configured and absent, which looks exactly like a bridge that is broken.
 
 **Verified 2026-09-21**, on Claude Code 2.1.236 and macOS 26.6.2, against a live fleet, with three configurations differing only in that variable:
 
