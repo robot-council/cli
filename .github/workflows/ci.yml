@@ -112,12 +112,35 @@ jobs:
       - name: Run Rector (dry run)
         run: vendor/bin/rector --dry-run --no-progress-bar
 
+  generator:
+    name: generator (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor the skill documents, and a current release. The floor is what matters here:
+        # the suite is written to run under whatever Python a developer already has, so a
+        # 3.10-only construct would otherwise reach `main` and fail for them alone.
+        python: ['3.9', '3.13']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run the release generator's tests
+        run: python3 -m unittest discover -s .claude/skills/writing-release-notes -v
+
   # The one check the `main` ruleset requires. It always runs, and it passes only when every
   # job above succeeded, so a failed, cancelled, or skipped job all block the merge.
   ci-passed:
     name: ci-passed
     if: always()
-    needs: [tests, phpstan, pint, rector]
+    needs: [tests, phpstan, pint, rector, generator]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -127,6 +150,7 @@ jobs:
           PHPSTAN: ${{ needs.phpstan.result }}
           PINT: ${{ needs.pint.result }}
           RECTOR: ${{ needs.rector.result }}
+          GENERATOR: ${{ needs.generator.result }}
         run: |
-          echo "tests=$TESTS phpstan=$PHPSTAN pint=$PINT rector=$RECTOR"
-          [ "$TESTS" = success ] && [ "$PHPSTAN" = success ] && [ "$PINT" = success ] && [ "$RECTOR" = success ]
+          echo "tests=$TESTS phpstan=$PHPSTAN pint=$PINT rector=$RECTOR generator=$GENERATOR"
+          [ "$TESTS" = success ] && [ "$PHPSTAN" = success ] && [ "$PINT" = success ] && [ "$RECTOR" = success ] && [ "$GENERATOR" = success ]

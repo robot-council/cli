@@ -243,7 +243,9 @@ it('stays up when joining fails, and says why in a result the agent can relay', 
         // Still serving: a ping answered after the failure, and still unjoined
         ->and(joinReplyTo($written, 3))->not->toBeNull()
         ->and(data_get(joinReplyTo($written, 4), 'result.tools.*.name'))->toBe(['join'])
-        ->and(array_column($written, 'method'))->not->toContain('notifications/tools/list_changed')
+
+        // The one every start sends (cli#208), and none for a join that did not happen
+        ->and(array_filter($written, fn (array $m): bool => ($m['method'] ?? null) === 'notifications/tools/list_changed'))->toHaveCount(1)
         ->and(Http::recorded())->toBeEmpty();
 });
 
@@ -300,8 +302,9 @@ it('answers any other request with an error before joining, and ignores a notifi
     expect(data_get(joinReplyTo($written, 5), 'error.message'))->toContain('join')
         ->and(data_get(joinReplyTo($written, 6), 'result.prompts'))->toBe([])
 
-        // The initialize reply, the error and the prompts list: nothing for the notification
-        ->and($written)->toHaveCount(3)
+        // The initialize reply, the list-changed notice every start sends (cli#208), the error and
+        // the prompts list: nothing for the notification
+        ->and($written)->toHaveCount(4)
         ->and(Http::recorded())->toBeEmpty();
 });
 
@@ -430,4 +433,25 @@ it('answers a request whose id JSON cannot hold with an error rather than a blan
     $written = joinRun(['{"jsonrpc":"2.0","id":1e999,"method":"ping"}']);
 
     expect(data_get($written, '0.error.code'))->toBe(-32603);
+});
+
+it('tells the harness to re-read the tool list whenever it starts, before anybody joins', function (): void {
+    joinService();
+
+    // **The stranded agent of cli#194.** Cursor keeps a restarted bridge's previous tools and does
+    // not ask again, so without this an agent that had joined was offered the fleet's tools and
+    // not `join`, and every call was refused
+    $written = joinRun([JOIN_INITIALIZE, JOIN_INITIALIZED]);
+
+    expect(array_map(fn (array $m): mixed => $m['method'] ?? $m['id'] ?? null, $written))->toBe([0, 'notifications/tools/list_changed'])
+        ->and(Http::recorded())->toBeEmpty();
+});
+
+it('sends the notice only once the harness has said it finished initializing', function (): void {
+    joinService();
+
+    // A notification before `initialized` goes into a transport the harness is not reading yet
+    $written = joinRun([JOIN_INITIALIZE, JOIN_LIST]);
+
+    expect(array_column($written, 'method'))->not->toContain('notifications/tools/list_changed');
 });
