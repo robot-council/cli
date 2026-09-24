@@ -220,19 +220,27 @@ final class EnrollCommand extends Command
             return self::FAILURE;
         }
 
-        $granted = $credentialBody['granted_abilities'] ?? [];
-
         $this->components->info('This machine is enrolled.');
         // The store names itself. `UserFileStore` names its path, which is a deliberate trade:
         // a developer needs to know where their credential is, and an agent that wanted it could
         // find the default location anyway.
         $this->line(sprintf('  Credential stored in %s.', $store->describe()));
 
-        if (\is_array($granted) && $granted !== []) {
-            $abilities = array_map(fn (mixed $ability): string => \is_string($ability) ? $ability : '', $granted);
-
-            $this->line(sprintf('  Sessions started here will carry: %s.', implode(', ', array_filter($abilities))));
-        }
+        // **Nothing is said here about what a session will carry, and the silence is the answer.**
+        // This used to print the response's `granted_abilities` as "Sessions started here will
+        // carry: ...". `robot-council/core#222` made that false rather than merely redundant: a
+        // session starts on the `build` role whatever its installation was granted, and becomes a
+        // coordinator only where an administrator decides. So the list named abilities no session
+        // would hold, at a moment when no session exists yet.
+        //
+        // The honest replacement would be the `build` preset -- which lives in the SERVICE, in
+        // `Access\Role`, and copying it here would drift the first time core changed it. What a
+        // session actually holds is returned by `POST {prefix}/api/sessions`, for that session, at
+        // the moment there is one. That is where the question is answered.
+        //
+        // The key is still read off the wire by nothing: a deployed service that sends it is
+        // tolerated exactly as one that does not, which `it treats a response carrying
+        // granted_abilities identically` pins.
 
         return self::SUCCESS;
     }

@@ -72,6 +72,10 @@ function fakeService(int $pending = 0, ?array $tokenOverride = null): void
     $exchanges[] = Http::response($tokenOverride ?? [
         'token' => CREDENTIAL,
         'abilities' => ['sessions:start'],
+        // Kept although nothing reads it, and kept deliberately: a deployed service still sends
+        // this key, so a fixture without it would run every test in this file against a response
+        // shape no service produces. `it treats a response carrying granted_abilities identically`
+        // is what makes it evidence rather than decoration.
         'granted_abilities' => ['tasks:create', 'tasks:claim', 'events:post'],
         'expires_in' => 2592000,
     ], 201);
@@ -106,6 +110,65 @@ it('prints the user code and where to approve it, and nothing else of substance'
 
     expect($output)->toContain('HFTGPSTW')
         ->toContain(SERVICE.'/robot-council/enroll');
+});
+
+it('treats a response carrying granted_abilities identically to one without it', function (): void {
+    // The key decides nothing since `robot-council/core#222`, and `robot-council/core#239` removes
+    // it from the response. That removal must not be a compatibility event for this client, which
+    // is a claim about two runs rather than about one -- so both are run and their output compared,
+    // byte for byte.
+    $credential = [
+        'token' => CREDENTIAL,
+        'abilities' => ['sessions:start'],
+        'expires_in' => 2592000,
+    ];
+
+    // **One `Http::fake()` with a two-response sequence, and neither run is selected by a captured
+    // flag.** Two things forced this shape, both measured here:
+    //
+    // - `Http::fake()` MERGES its stubs into the ones already registered, so calling `fakeService()`
+    //   a second time leaves the first call's sequence in place and matching -- and a sequence with
+    //   nothing left in it raises rather than falling through. The second run exited 1 against an
+    //   unchanged command.
+    // - The first fix was a `$carriesTheKey` flag captured by reference, and **Rector deleted it**:
+    //   it dropped the `use (&$carriesTheKey)` and folded `if ($carriesTheKey)` away as always true,
+    //   so both runs sent the key and this test compared a run against itself. It still passed. The
+    //   gate reported `369 passed` either way, which is the whole reason the shape matters.
+    Http::fake([
+        '*/api/device/code' => Http::response([
+            'device_code' => 'a-device-code',
+            'user_code' => 'HFTGPSTW',
+            'verification_uri' => SERVICE.'/robot-council/enroll',
+            'expires_in' => 600,
+            'interval' => 5,
+        ], 201),
+        '*/api/device/token' => Http::sequence()
+            ->push($credential + ['granted_abilities' => ['tasks:create', 'tasks:claim', 'events:post']], 201)
+            ->push($credential, 201),
+    ]);
+
+    $run = function (): string {
+        recordingStore();
+
+        expect(Artisan::call('enroll', ['--service' => SERVICE, '--harness' => 'claude']))->toBe(0);
+
+        return Artisan::output();
+    };
+
+    // In sequence order: the first run is served the key, the second is not.
+    $with = $run();
+    $without = $run();
+
+    expect($with)->toBe($without);
+
+    // The control. Without it, a command that printed nothing at all -- or a fake that never
+    // answered -- would satisfy the comparison above by producing two empty strings.
+    expect($with)->toContain('This machine is enrolled.');
+
+    // And the abilities themselves are absent, which the comparison alone does not say: a command
+    // that printed the list in BOTH runs, from a hard-coded copy, would compare equal.
+    expect($with)->not->toContain('tasks:create')
+        ->not->toContain('will carry');
 });
 
 it('never puts the credential on stdout or stderr', function (): void {
