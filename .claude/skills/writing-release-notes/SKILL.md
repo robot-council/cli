@@ -8,8 +8,8 @@ description: >-
   `## Maintenance and tooling`) with one bullet per change formatted as
   `- <PR title> [#N](…/pull/N)` — using the API PR title (never a merge or squash commit
   subject), no `by @author`, inline code preserved. Covers the routing cascade and the bundled
-  generator, what a tag of this repository promises and to whom (a release marker rather than a
-  Composer constraint, kept to semantic versioning anyway), cutting a release (the `CHANGELOG.md` pull
+  generator, what a tag of this repository promises and to whom (a Composer constraint that
+  Packagist resolves, so below 1.0 a breaking change bumps the minor), cutting a release (the `CHANGELOG.md` pull
   request, then the tag and the GitHub Release), and the retroactive-tag footer. Activate whenever drafting,
   rewriting, or critiquing a GitHub Release title or body, generating release notes, or cutting
   a tag for this repo.
