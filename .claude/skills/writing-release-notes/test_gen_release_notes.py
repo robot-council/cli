@@ -90,6 +90,114 @@ class Routing(unittest.TestCase):
         self.assertEqual(g.bucket("s", self.TITLE, paths=paths, other_lines=10), "maint")
         self.assertEqual(g.bucket("s", self.TITLE, paths=paths, test_lines=20, other_lines=10), "maint")
 
+    def test_the_linked_issues_type_routes_a_change_the_verbs_miss(self):
+        """#166. `FIX_VERBS` matches a title *opening* with `Fix|Resolve|Repair|...`, and almost no
+        title here opens that way, because `writing-pull-requests` sanctions leading with the
+        symptom or the outcome. Measured for #162 over `v0.2.0..main`: 19 bullets in What's new
+        against 1 in What's fixed, roughly a dozen of the 19 being fixes.
+        """
+        source = ["app/Support/FleetFollower.php"]
+
+        # #158's real title and shape: a fix whose title opens with a verb the list does not know.
+        fix = "Tell a session the sweep marked it stale or gone"
+
+        self.assertEqual(g.bucket("s", fix, paths=source, other_lines=10), "new")
+        self.assertEqual(
+            g.bucket("s", fix, paths=source, other_lines=10, issue_types=("Bug",)), "fix")
+
+        self.assertEqual(
+            g.bucket("s", "Report the fleet's roles on the dashboard", paths=source,
+                     other_lines=10, issue_types=("Feature",)),
+            "new")
+
+    def test_the_type_is_read_after_the_maintenance_path_rule_not_before_the_verbs(self):
+        """The placement is the whole of the correctness, and it is not the obvious one.
+
+        `#154` is typed `Bug` and is confined to `.claude/`. Rule 5 routes it to Maintenance,
+        which is right -- a change to a skill file is maintenance whatever the ticket it closes
+        is typed. A type rule placed above rule 4 would take it first and call it a fix.
+        """
+        self.assertEqual(
+            g.bucket("s", "Take the pull-request skill from `robot-council/core` verbatim",
+                     paths=[".claude/skills/writing-pull-requests/SKILL.md"],
+                     issue_types=("Bug",)),
+            "maint")
+
+        # And a category-bearing label on the linked issue still wins, because rule 2 is above
+        # the type. `LABEL_SEC` is empty in this repository, so `build` is the one to assert on:
+        # a `documentation` or `build` ticket is maintenance whatever its type says.
+        self.assertEqual(
+            g.bucket("s", "Add a release-cascade rule", labels=["build"],
+                     paths=["app/Support/Thing.php"], other_lines=10,
+                     issue_types=("Feature",)),
+            "maint")
+
+    def test_task_is_not_consulted(self):
+        """`Task` predicted `fix` six times out of six on the v0.3.0 range, and that is an artifact.
+
+        `writing-issues` assigns `Task` to a research spike, a decision fork, a follow-up cleanup
+        or an epic -- never to a bug. A rule built on it breaks the first time somebody types one
+        correctly, and it breaks toward the direction #162's criteria forbid.
+        """
+        self.assertEqual(
+            g.bucket("s", "Tell a session the sweep marked it stale or gone",
+                     paths=["app/Support/FleetFollower.php"], other_lines=10,
+                     issue_types=("Task",)),
+            "new")
+
+    def test_an_untyped_issue_routes_exactly_as_before(self):
+        """14 of the 25 in that range carried no type, so this is the majority path."""
+        for title in ("Tell a session the sweep marked it stale or gone",
+                      "Fix the provider name",
+                      self.TITLE):
+            for paths in (["app/Support/FleetFollower.php"], [".claude/rules/worktrees.md"]):
+                self.assertEqual(
+                    g.bucket("s", title, paths=paths, other_lines=10),
+                    g.bucket("s", title, paths=paths, other_lines=10, issue_types=()),
+                    f"{title} / {paths} changed when an empty type tuple was passed")
+
+    def test_a_feature_and_a_bug_together_route_to_whats_new(self):
+        """A pull request can close several issues of differing types, and the buckets fail
+        asymmetrically: a fix under What's new is visible and merely mislabelled, while a feature
+        under What's fixed understates the release. Only the second is forbidden, so the mixed
+        case takes the safe direction.
+        """
+        source = ["app/Support/FleetFollower.php"]
+        title = "Tell a session the sweep marked it stale or gone"
+
+        self.assertEqual(
+            g.bucket("s", title, paths=source, other_lines=10, issue_types=("Bug", "Feature")),
+            "new")
+        self.assertEqual(
+            g.bucket("s", title, paths=source, other_lines=10, issue_types=("Feature", "Bug")),
+            "new")
+
+    def test_a_feature_titled_like_a_fix_does_not_reach_whats_fixed(self):
+        """#121, named in #162's criteria as the shape most likely to be caught by a wrong rule:
+        a **feature** whose title opens with `Say`. A widened `FIX_VERBS` was rejected for exactly
+        this, and the type rule must not reintroduce it.
+        """
+        title = "Say when nothing on the fleet can reach a waiting agent"
+        source = ["app/Support/FleetDelivery.php"]
+
+        self.assertEqual(g.bucket("s", title, paths=source, other_lines=10), "new")
+        self.assertEqual(
+            g.bucket("s", title, paths=source, other_lines=10, issue_types=("Feature",)), "new")
+
+        # Typed `Bug`, a human said it was a fix, and the rule does not argue with them.
+        self.assertEqual(
+            g.bucket("s", title, paths=source, other_lines=10, issue_types=("Bug",)), "fix")
+
+    def test_the_type_is_case_insensitive(self):
+        """GitHub returns `Bug` and `Feature`; nothing should depend on that casing."""
+        source = ["app/Support/FleetFollower.php"]
+        title = "Tell a session the sweep marked it stale or gone"
+
+        for spelling in ("Bug", "bug", "BUG"):
+            self.assertEqual(
+                g.bucket("s", title, paths=source, other_lines=10, issue_types=(spelling,)),
+                "fix", spelling)
+
     def test_published_surface_still_wins(self):
         self.assertEqual(g.bucket("s", self.TITLE, paths=["CLAUDE.md", "config/commands.php"]), "new")
 
