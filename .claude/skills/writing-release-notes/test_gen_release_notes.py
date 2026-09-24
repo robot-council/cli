@@ -146,15 +146,29 @@ class Routing(unittest.TestCase):
             "new")
 
     def test_an_untyped_issue_routes_exactly_as_before(self):
-        """14 of the 25 in that range carried no type, so this is the majority path."""
-        for title in ("Tell a session the sweep marked it stale or gone",
-                      "Fix the provider name",
-                      self.TITLE):
-            for paths in (["app/Support/FleetFollower.php"], [".claude/rules/worktrees.md"]):
-                self.assertEqual(
-                    g.bucket("s", title, paths=paths, other_lines=10),
-                    g.bucket("s", title, paths=paths, other_lines=10, issue_types=()),
-                    f"{title} / {paths} changed when an empty type tuple was passed")
+        """14 of the 25 in that range carried no type, so this is the majority path.
+
+        **Asserted against the expected bucket, not against `bucket()` called twice.** The first
+        version of this test compared `bucket(...)` with `bucket(..., issue_types=())`, and `()`
+        is the parameter's default -- so the two calls were byte-identical and it asserted
+        `f(x) == f(x)`, which holds for every implementation including one that routed everything
+        to Maintenance.
+        """
+        source = ["app/Support/FleetFollower.php"]
+        rules = [".claude/rules/worktrees.md"]
+
+        # (title, paths, the bucket this reached before the type rule existed)
+        for title, paths, expected in (
+            ("Tell a session the sweep marked it stale or gone", source, "new"),
+            ("Fix the provider name", source, "fix"),
+            (self.TITLE, source, "maint"),
+            ("Tell a session the sweep marked it stale or gone", rules, "maint"),
+            ("Fix the provider name", rules, "fix"),
+        ):
+            self.assertEqual(
+                g.bucket("s", title, paths=paths, other_lines=10, issue_types=()),
+                expected,
+                f"{title} / {paths}")
 
     def test_a_feature_and_a_bug_together_route_to_whats_new(self):
         """A pull request can close several issues of differing types, and the buckets fail
