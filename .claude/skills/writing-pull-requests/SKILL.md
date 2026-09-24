@@ -1,7 +1,7 @@
 ---
 name: writing-pull-requests
 description: >-
-  Pull-request title and body conventions for `robot-council/core`. The title is
+  Pull-request title and body conventions for this repository. The title is
   imperative verb-first, has no Conventional-Commit prefix and no internal-process references
   (batch or merge-order hints), with correct acronym casing and inline-code handles — it renders
   verbatim into GitHub Release notes. The body: a one-paragraph lede opening with `Closes #N.`,
@@ -19,10 +19,21 @@ description: >-
 
 # Writing Pull Requests
 
-This skill captures the house style for PR descriptions in `robot-council/core`. The
-audience is another engineer reviewing the change — explain the *why* before the *what*,
-prefer specifics over generalities, and bound scope explicitly. There is no PR template in
-`.github/`; this skill is the skeleton.
+This skill captures the house style for PR descriptions. The audience is another engineer
+reviewing the change — explain the *why* before the *what*, prefer specifics over generalities,
+and bound scope explicitly. There is no PR template in `.github/`; this skill is the skeleton.
+
+**It is one shared document, carried identically by `robot-council/core` and `robot-council/cli`,
+so it names no repository of its own.** The `gh` recipes take `{owner}` and `{repo}` from the
+checkout, link templates are written with `<owner>`/`<repo>` placeholders, and the worked example
+says which repository its files come from. A recipe that named a fixed repository would act on
+*that* one from either tree, and the assignee recipe below is a **write** — so parameterizing them
+is a correctness property, not tidiness. Where the two repositories genuinely differ, such as the
+CI jobs, this file states the contract and sends you to the tree you are in.
+
+Some illustrative identifiers elsewhere are still the package's — its dependency handles under
+`## Inline code markup`, for instance. They are examples of what to backtick rather than paths to
+open, and they are left as they are.
 
 ## Output format
 
@@ -45,16 +56,23 @@ holds for `gh pr edit <n> --body-file`.
   is.** Never present a PR as ready while its branch still needs work.
 - **Every pull request runs the same checks.** `.github/workflows/ci.yml` runs on every pull
   request, with no path filters:
-  - `tests` — `vendor/bin/pest --ci` on `ubuntu-latest` and `windows-latest` × PHP 8.5 and 8.4 ×
-    Laravel 13 × `prefer-lowest` and `prefer-stable`, with `fail-fast: false`, so every
-    cell reports.
-  - `phpstan` — PHPStan on PHP 8.5.
+  - `tests` — `vendor/bin/pest --ci` across a matrix of operating systems and PHP versions, with
+    `fail-fast: false`, so every cell reports. **The cells differ between the two repositories** —
+    the package resolves dependencies fresh at `prefer-lowest` and `prefer-stable` because it
+    commits no lockfile, while the application installs from a committed one — so read
+    `.github/workflows/ci.yml` in the tree you are in rather than assuming a shape.
+  - `phpstan` — PHPStan, run through `composer analyse`.
   - `pint` — `vendor/bin/pint --test`, which fails on a style problem and fixes nothing. Run
     `vendor/bin/pint --dirty` before pushing.
   - `rector` — `vendor/bin/rector --dry-run`, which fails when Rector would change a file. Run
     `composer refactor` before pushing, and review its changes.
-  - `ci-passed` — succeeds only when all four succeeded. It is the check the `main` ruleset
-    requires, alongside a pull request and a branch that is up to date with `main`.
+  - `ci-passed` — the single check the `main` ruleset requires, alongside a pull request and a
+    branch that is up to date with `main`. **It gates every other job in that tree's `ci.yml`, and
+    the two repositories do not have the same set.** Measured: the application's `needs` is
+    `[tests, phpstan, pint, rector]`, the package's is
+    `[tests, phpstan, pint, rector, postgres, mysql, stylesheet]`. So the four above are the common
+    subset, not the gate — read `needs:` in the tree you are in before saying what a green check
+    covers.
 - **A PR's checks describe its current head only.** After a push, or after syncing with `main`
   per [`sync-pr-branch`](../../rules/sync-pr-branch.md), read `ci-passed` again on the new head
   rather than trusting an earlier green.
@@ -64,8 +82,14 @@ holds for `gh pr edit <n> --body-file`.
 **Every PR carries an assignee, and it is the developer responsible for landing it.** Not a reviewer, and not a nicety — it is the only place a reader can see who owns a branch that is open and quiet.
 
 ```bash
-gh api -X POST repos/robot-council/core/issues/<pr-number> -f 'assignees[]=<login>'
+gh api -X POST 'repos/{owner}/{repo}/issues/<pr-number>' -f 'assignees[]=<login>'
 ```
+
+**`{owner}` and `{repo}` are literal, and `gh` fills them from the checkout you run in.** Written that way the recipe follows the tree rather than a name baked into it, which matters most here because this one is a **write**: a fixed repository name followed from the wrong tree assigns somebody to *that* repository's issue carrying the same number, and the call returns an ordinary success because the number exists in both trackers. Nothing in the result says which repository was touched.
+
+**The bound worth knowing:** `gh` resolves the placeholders from its notion of the *current* repository, which `GH_REPO` and `gh repo set-default` both move — measured, `GH_REPO=robot-council/core` redirects them from inside this checkout. So the recipe follows the checkout; it is not a guarantee that no other repository can be reached. Read the response's `repository_url` when it matters.
+
+**Keep the quotes, and not for the reason that looks obvious.** PowerShell parses an unquoted `{…}` as a script block and splits the argument into five, and an unquoted `<N>` is a redirection in `bash`. Both measured on Windows, where this repository's agents use either shell. **`bash` does not brace-expand `{owner}`** — that needs a comma or a range — so an agent reasoning only from the `bash` tag on the fence concludes the quotes are ornamental and drops them, and the recipe then breaks for whoever runs it in the other shell.
 
 The PR number works on the `issues` endpoint — GitHub treats pull requests as issues for labels, assignees and comments. **That endpoint replaces the assignee list; the sibling `…/issues/{n}/assignees` adds to it.** The two diverge only when a request omits somebody already assigned, so a hand-over written against the wrong one silently produces two assignees — the mechanics are in [`github-api-budget`](../../rules/github-api-budget.md).
 
@@ -111,11 +135,11 @@ inventory, in order of appearance:
 - **`## The bug`** — fix PRs only; explains the root cause before the fix.
 - **`## Approach`** — used when a resolution path was chosen over alternatives, or when
   reviewers need to see the design rationale. Link the issue-comment URL where the decision was
-  made (`[#N (comment)](https://github.com/robot-council/core/issues/N#issuecomment-…)`).
+  made (`[#N (comment)](https://github.com/<owner>/<repo>/issues/N#issuecomment-…)`).
 - **`## Commits`** — used when the PR's structure maps cleanly to its commit list. One line per
   commit: `` - `<short-sha>` <conventional-commit-subject> ``.
 - **`## Files`** / **`## Files changed`** — itemized list of files with a one-line reason each:
-  `` - **edit** [`src/RobotCouncil.php`](https://github.com/robot-council/core/blob/<branch>/src/RobotCouncil.php) — <reason>. ``
+  `` - **edit** [`<path>`](https://github.com/<owner>/<repo>/blob/<branch>/<path>) — <reason>. ``
   (or `**add**`, `**delete**`, `**move**`). Pre-line a one-shot
   `git diff main..HEAD --stat → N files changed, X insertions(+), Y deletions(-).` summary
   when useful.
@@ -229,7 +253,7 @@ read the field with `gh pr view <N> --json closingIssuesReferences`, then list e
 keyword-reference pair in the plain text, same-line and cross-line alike:
 
 ```bash
-{ git log --format=%B origin/main..HEAD; gh api repos/robot-council/core/pulls/<N> --jq '.title, .body'; } |
+{ git log --format=%B origin/main..HEAD; gh api 'repos/{owner}/{repo}/pulls/<N>' --jq '.title, .body'; } |
   perl -0777 -ne '$n += length; while (/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:[\w.-]+\/[\w.-]+#\d+|#\d+|https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+)/gi) { ($m = $&) =~ s/\s+/ /g; print "$m\n"; $h++ } END { printf "scanned %d bytes, %d keyword-reference pairs\n", $n, $h }'
 ```
 
@@ -251,7 +275,7 @@ request that met it merged. Scan to a file, then compare the two sets:
 
 ```bash
 intended="75"          # space-separated, the issues this PR should close
-{ git log --format=%B origin/main..HEAD; gh api repos/robot-council/core/pulls/<N> --jq '.title, .body'; } > scan.txt
+{ git log --format=%B origin/main..HEAD; gh api 'repos/{owner}/{repo}/pulls/<N>' --jq '.title, .body'; } > scan.txt
 test -s scan.txt || { echo "EMPTY READ — not a clean result"; exit 9; }
 perl -0777 -ne 'while (/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)/gi) { print "$1\n" }' \
   < scan.txt | sort -u > found.txt
@@ -274,9 +298,15 @@ inside it leaves only the pipeline's status.
 same text and only one of them decides:
 
 ```bash
-gh api graphql -f query='{repository(owner:"robot-council",name:"core"){pullRequest(number:<N>){closingIssuesReferences(first:20){nodes{number}}}}}' \
+gh api graphql -F owner='{owner}' -F repo='{repo}' -F pr=<N> \
+  -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){closingIssuesReferences(first:20){nodes{number}}}}}' \
   --jq '[.data.repository.pullRequest.closingIssuesReferences.nodes[].number] | sort | join(" ")'
 ```
+
+**The placeholders go in `-F` values, never inside the query string.** `gh` substitutes `{owner}`
+and `{repo}` in `-F` arguments, and does **not** substitute them inside `-f query=…` — a query with
+them written inline fails with `Could not resolve to a Repository with the name '{owner}/{repo}'`.
+Both measured. That is why this recipe takes variables where the REST ones take a path.
 
 That field reports what the **body** declares, so it is not a substitute for the scan — the plain-text
 path reads the commit messages and the title, which the field never sees. Two readers, both checked.
@@ -327,7 +357,7 @@ likeliest place to fall in. The same applies to the commit message, which a squa
 Backtick anything a developer would type, paste, or grep for:
 
 - File paths — almost always linked, and the URL is the **absolute branch URL**, never a
-  relative path: `` [`src/RobotCouncil.php`](https://github.com/robot-council/core/blob/<branch>/src/RobotCouncil.php) ``.
+  relative path: `` [`<path>`](https://github.com/<owner>/<repo>/blob/<branch>/<path>) ``.
   Use `/blob/<branch>/…` for files (`/tree/<branch>/…` for directories), with `<branch>` set to
   the PR's head branch — **even for files already on `main`**. The displayed text stays the bare
   backticked path; only the target is absolute. Vendor file refs include line numbers, e.g.
@@ -360,7 +390,8 @@ Every PR ends with a `## Test plan` GitHub task list. Conventions:
 - Nest sub-checks with 2-space-indented `-` bullets directly under the parent checkbox.
 - Include a regression / no-regression item when the change touches shared surface.
 - Include a deferred `[ ]` item for anything the author cannot verify locally — for example a
-  behavior only the `windows-latest` or `prefer-lowest` cells exercise.
+  behavior only a CI cell exercises, such as another operating system or, in the package, a
+  `prefer-lowest` resolution.
 
 ## Tone and voice
 
@@ -379,8 +410,9 @@ Every PR ends with a `## Test plan` GitHub task list. Conventions:
 
 ## Example shape
 
-A compact fix-PR demonstrating the core conventions. Illustrative only: `members()` and the test
-file are invented to show the shape.
+A compact fix-PR demonstrating the conventions. **The files are `robot-council/core`'s**, said
+plainly because this document is shared and the other repository has no `src/`: read it for the
+shape, not for paths to look for. `members()` and the test file are invented.
 
 `````markdown
 ````
