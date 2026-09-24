@@ -6,7 +6,7 @@ Branch work happens in one of **two long-lived worktrees, called slots**. Each i
 
 Two sessions on one working copy collide by construction. A branch checkout in one swaps the files under the other. A `composer install` in one swaps the binaries under the other's run. One session's `git stash` gets popped by the other, and a stray file from one ends up in the other's commit. Both write the same `build/phpstan/`, `.phpunit.cache/`, and `build/report.junit.xml`. Nothing reports the collision; the other session's next result just describes a tree it did not set up. So work is isolated per tree.
 
-The unit is a long-lived slot rather than a fresh worktree because a fresh one is not free, even here where bootstrapping is a single `composer install`:
+The unit is a long-lived slot rather than a fresh worktree because a fresh one is not free, even where bootstrapping is little more than `composer install`:
 
 - **It re-opens every bootstrap failure mode this file documents**, and those are the expensive part. A `vendor/` symlinked from another tree silently loads the donor's code and `tests/Pest.php`. A directory name starting with a digit kills every test before it runs. Each detour costs far more than the install it was trying to skip.
 - **It changes the session's working-directory string**, which is part of the cached prompt prefix, so a never-before-seen path starts every session cold. A fixed set of paths lets that prefix recur. This is secondary: the cache TTL is an hour, so it pays within a working day, not across days.
@@ -20,22 +20,37 @@ Three trees, all **siblings** of each other:
 | Tree | Path (relative to the primary) | Role |
 | --- | --- | --- |
 | Primary | *the main clone itself* | Reference checkout. **Holds the `main` branch**, current with `origin/main`. Not a work surface. |
-| Slot A | `../robot-council-cli-a` | Ticket work. Take this one first. |
-| Slot B | `../robot-council-cli-b` | A second concurrent session, or a second ticket. |
+| Slot A | `../<primary>-a` | Ticket work. Take this one first. |
+| Slot B | `../<primary>-b` | A second concurrent session, or a second ticket. |
 
-There is no local-CI slot. CI here is the single GitHub Actions workflow, and nothing local checks branches in and out of a tree of its own.
+There is no local-CI slot. CI is the single GitHub Actions workflow, and nothing local checks branches in and out of a tree of its own.
+
+### Per repository
+
+This file is shared, byte for byte, by `robot-council/core` and `robot-council/cli`. Everything that differs between them lives in this table, and the rest of the file refers to it rather than naming either repository's values.
+
+| | `robot-council/core` | `robot-council/cli` |
+| --- | --- | --- |
+| `<primary>`, the primary's directory name | `robot-council` | `robot-council-cli` |
+| Slots | `../robot-council-a`, `../robot-council-b` | `../robot-council-cli-a`, `../robot-council-cli-b` |
+| `composer.lock` | **gitignored**: copy the primary's into the slot before `composer install` | committed: `composer install` alone |
+| npm | `npm ci` in every slot, whatever the ticket touches | none |
+| First-party namespace in `vendor/composer/autoload_static.php` | `RobotCouncil\` | `App\` |
+| Smoke test after provisioning | `npm run check` exits `0` | `./robot-council about` exits `0` |
+| `delete_branch_on_merge` (read 2026-09-24) | `true`, which contradicts this rule (see *Never delete the remote branch*) | `false` |
 
 **They are siblings, not nested under `.claude/worktrees/`, for three reasons.** They sit outside the repository, so no ignore rule has to hold for them. A `grep -r` from the primary cannot descend into them. And a process's working directory attributes it to one tree: the separator-anchored allow-list in [`long-running-commands`](long-running-commands.md) claims every nested tree's processes from the primary, and needs an explicit exclusion to stop doing so, while a sibling never matches.
 
-**But the primary's path is a string prefix of both slots' paths**, so the anchor is load-bearing. Measured 2026-09-24 by feeding each tree's path to both forms of the `case`, with the primary's own path as the control:
+**But the primary's path is a string prefix of both slots' paths**, and `core`'s is a prefix of every sibling repository's too, so the anchor is load-bearing. Measured 2026-09-24 by feeding each path to both forms of the `case`, with the primary's own path as the control:
 
-| Path | `"$MY_TREE"\|"$MY_TREE"/*)` | `"$MY_TREE"*)` |
-| --- | --- | --- |
-| `robot-council-cli` | claimed | claimed |
-| `robot-council-cli-a` | skipped | **claimed** |
-| `robot-council-cli-b` | skipped | **claimed** |
+| `MY_TREE` | Path tested | `"$MY_TREE"\|"$MY_TREE"/*)` | `"$MY_TREE"*)` |
+| --- | --- | --- | --- |
+| `robot-council-cli` | `robot-council-cli` | claimed | claimed |
+| `robot-council-cli` | `robot-council-cli-a`, `-b` | skipped | **claimed** |
+| `robot-council` | `robot-council` | claimed | claimed |
+| `robot-council` | `robot-council-a`, `robot-council-cli`, `robot-council-cli-a`, `robot-council-app` | skipped | **claimed** |
 
-A casually written bare-prefix match from the primary claims two other sessions' processes, and the failure is killing someone else's run. Anchor on the separator, always.
+A casually written bare-prefix match claims other sessions' processes, in this repository's slots and, from `core`, in other repositories entirely. The failure is killing someone else's run. Anchor on the separator, always.
 
 **No directory or file name under `tests/` may start with a digit.** Pest 5.2.1 builds each test file's class name from its path relative to the project root (`TestCaseFactory::evaluate()`): it prefixes `P\`, strips every character that is not a letter or digit, and turns separators into namespace separators. A segment that starts with a digit is not a valid PHP identifier, so the file dies with `InvalidTestClassName` (`would create the namespace [P\Tests\9999Probe]`, or `would create the class […]` for a file) before any test runs. Control, calling that `evaluate()` directly: `tests/9999Probe/FooTest.php` is rejected, and `tests/t9999Probe/FooTest.php` passes. Pest takes the project root from where `vendor/` really lives, so the tree's own directory name is not in that relative path, and a worktree named `123-fix` is fine as long as `vendor/` belongs to the tree (see provisioning).
 
@@ -58,7 +73,7 @@ git worktree list
 
 So a slot showing `(detached HEAD)` with a clean tree is **free**, and a slot on a branch is **held**, either by you earlier or by another session right now. Take **A** first and **B** second. If both are held and you hold neither, there are two live sessions. Do not evict one; take an ephemeral worktree. **A rebase or bisect in progress also shows `(detached HEAD)`**, so a detached slot with a `rebase-merge/`, `rebase-apply/`, or `BISECT_LOG` under `git -C "$SLOT" rev-parse --git-dir` is held, not free.
 
-In the commands below, `$SLOT` is the slot's **absolute** path. A relative `../robot-council-cli-a` resolves against whatever the cwd happens to be, and the cwd is not reliable (see the hazards section). Each block is **one fail-closed chain**, so a failed guard stops the command that follows it rather than printing a warning above it.
+In the commands below, `$SLOT` is the slot's **absolute** path. A relative `../<primary>-a` resolves against whatever the cwd happens to be, and the cwd is not reliable (see the hazards section). Each block is **one fail-closed chain**, so a failed guard stops the command that follows it rather than printing a warning above it.
 
 **Claim a slot by branching from `origin/main`**, never from whatever the slot happens to be sitting on:
 
@@ -68,7 +83,8 @@ cd "$SLOT" &&
   test -z "$(git status --porcelain)" &&      # nothing a previous ticket left behind
   git fetch origin &&
   git switch --no-track -c <branch> origin/main &&
-  composer install                            # the refresh gate below; a no-op when vendor/ is current
+  composer install &&                         # the refresh gate below, including core's lock step
+  { [ ! -e package-lock.json ] || npm ci; }   # core only
 ```
 
 **`--no-track` is load-bearing.** Without it the new branch tracks `origin/main` (the default `branch.autoSetupMerge`). Under the default `push.default=simple`, a bare `git push` then refuses because the names differ, a bare `git pull` merges `main`, and `git status` reports the branch against `main`. Publish with `git push -u origin <branch>`.
@@ -100,7 +116,7 @@ Three things go wrong when the release is skipped, and all three are silent:
 ```bash
 git -C "$SLOT" log -1 --format='%h %cr %s'     # last commit, and how long ago
 git -C "$SLOT" status --porcelain              # uncommitted work in flight
-gh api "repos/robot-council/cli/pulls?state=all&head=robot-council:$(git -C "$SLOT" branch --show-current)" \
+gh api "repos/robot-council/<core|cli>/pulls?state=all&head=robot-council:$(git -C "$SLOT" branch --show-current)" \
   --jq '.[] | "#\(.number) \(.state) \(.updated_at)"'
 ```
 
@@ -108,7 +124,7 @@ The pull-request lookup is REST rather than `gh pr list`, which is GraphQL-backe
 
 Then run the separator-anchored process sweep from [`long-running-commands`](long-running-commands.md) with that slot as `MY_TREE`. None of this proves the slot is abandoned: a session can be alive and idle, thinking rather than running anything. So a held slot you did not claim is **never reclaimed on inference.** Take the other slot or an ephemeral worktree, and put what you found in front of the user, who knows which sessions are open. If the user frees it, release it as above; a committed branch survives the detach, and uncommitted work is copied aside or committed as WIP on its branch first.
 
-**Never delete the remote branch.** Pull-request bodies link files by absolute head-branch URL (`/blob/<branch>/<path>`, per [`writing-pull-requests`](../skills/writing-pull-requests/SKILL.md)), so a deleted head branch breaks every file link in its own pull request. `delete_branch_on_merge` is `false` on `robot-council/cli` (read 2026-09-24), and merges carry no `--delete-branch`. The local branch may be deleted once its pull request has merged. The slot itself is never torn down.
+**Never delete the remote branch.** Pull-request bodies link files by absolute head-branch URL (`/blob/<branch>/<path>`, per [`writing-pull-requests`](../skills/writing-pull-requests/SKILL.md)), so a deleted head branch breaks every file link in its own pull request. So `delete_branch_on_merge` should be `false` and merges carry no `--delete-branch`. It is `false` on `cli` and `true` on `core` (the per-repository table), so on `core` GitHub deletes the head branch at merge regardless of this rule until the setting changes. The local branch may be deleted once its pull request has merged. The slot itself is never torn down.
 
 **`git branch --merged` cannot confirm that a squash-merged branch landed.** A squash merge writes a new commit on `main`, so the branch's own commits are never ancestors of it, and `--merged` omits the branch even when every byte of it is on `main` (observed in a `core` session on 2026-09-24, reading `0` for such a branch). Confirm by content instead: the files the branch touched must match `origin/main`.
 
@@ -124,9 +140,15 @@ A non-empty diff does not prove the branch did *not* land, since `main` may have
 
 This is the risk the slot model **introduces**, and it is worse than the one it removes. A fresh worktree fails *loudly*: no `vendor/`, hard error, you notice. A stale slot fails *silently*: the tests run, they pass, and they pass against the wrong dependency versions. In `UAMS-Web/uams-statamic`, a checkout's `vendor/` sat at Pest 4.7.5 while `composer.lock` pinned 5.0.1, and nothing said so.
 
-**So whenever a slot's base moves, run `composer install` before any check whose result you intend to trust.** The base moves when you claim the slot from a newer `origin/main`, or when you sync a branch per [`sync-pr-branch`](sync-pr-branch.md). `composer.lock` is committed here, so `composer install` reconciles `vendor/` to exactly the lock, and it prints `Nothing to install, update or remove` when the slot was already right. There is no reason to reason about whether it is needed; just run it. The primary needs the same gate whenever it pulls `main`.
+**So whenever a slot's base moves, run `composer install` before any check whose result you intend to trust.** The base moves when you claim the slot from a newer `origin/main`, or when you sync a branch per [`sync-pr-branch`](sync-pr-branch.md). `composer install` reconciles `vendor/` to exactly the lock, and it prints `Nothing to install, update or remove` when the slot was already right. There is no reason to reason about whether it is needed; just run it. In `core`, `npm ci` follows it every time, for the same reason and whatever the ticket touches: a slot is set up completely rather than for the ticket in hand, so the next ticket never inherits a half-built tree. `npm ci` rather than `npm install`, because `install` reconciles against `package.json` and can leave `package-lock.json` modified, while `ci` installs exactly the lock. The primary needs the same gate whenever it pulls `main`.
 
-**The gate depends on the committed lock, and that is where this repository differs from `robot-council/core`.** Here, two trees on one commit resolve to identical `vendor/` contents. In a repository that gitignores `composer.lock`, as `core` does, two long-lived slots installed on different days silently hold different dependency versions, and "same commit" does not cover it. A port of this rule to such a repository has to copy one tree's lock into the other before `composer install`, per [`measurement-parity`](measurement-parity.md).
+**Which lock it reconciles to is where the two repositories differ.** In `cli` the lock is committed, so two trees on one commit resolve to identical `vendor/` contents. In `core` the lock is gitignored, so each slot keeps whatever it resolved on the day it was installed, two slots installed on different days silently hold different dependency versions, and "same commit" does not cover it. So in `core`, copy the primary's lock into the slot first, and the primary is the one tree whose lock moves (by `composer update`):
+
+```bash
+cp "<primary>/composer.lock" "$SLOT/composer.lock" && cd "$SLOT" && composer install
+```
+
+A branch that changes `composer.json` is the exception: its slot runs `composer update` for the packages it changed, and its lock is no longer the primary's until the branch merges and the primary updates. Comparing two trees' results needs the same lock on both, per [`measurement-parity`](measurement-parity.md).
 
 **`composer install` compares versions, not bytes.** A `vendor/` file edited in place, for instance while debugging a dependency, survives it. The fix is `composer reinstall <package>`, and the check is `shasum -a 256` against a known-good tree, per [`measurement-parity`](measurement-parity.md).
 
@@ -134,19 +156,21 @@ This is the risk the slot model **introduces**, and it is worse than the one it 
 
 ## Provisioning a slot (one time, and once only)
 
-Both slots were provisioned on macOS on 2026-09-24, and `./robot-council about` exited `0` in each. To re-provision one:
+All four slots were provisioned on macOS on 2026-09-24, and each passed its smoke test from the per-repository table. To provision or re-provision one, from the primary (`$SLOT` is the absolute path of the new tree):
 
 ```bash
-git fetch origin
-git worktree add --detach ../robot-council-cli-a origin/main   # at rest: `main` belongs to the primary
-cd ../robot-council-cli-a
-composer install
-./robot-council about                                         # smoke test
+git fetch origin &&
+  git worktree add --detach "$SLOT" origin/main &&            # at rest: `main` belongs to the primary
+  { [ ! -e composer.lock ] || git ls-files --error-unmatch composer.lock >/dev/null 2>&1 ||
+    cp composer.lock "$SLOT/composer.lock"; } &&              # core only: an untracked lock is copied
+  cd "$SLOT" &&
+  composer install &&
+  { [ ! -e package-lock.json ] || npm ci; }                     # core only
 ```
 
-Everything `composer install` writes is gitignored, so none of it can ride a commit; a clean `git status` afterward confirms it. There is no `.env` to copy.
+Then run the smoke test from the table. Everything `composer install` writes is gitignored, so none of it can ride a commit; a clean `git status` afterward confirms it. There is no `.env` to copy.
 
-**Never symlink `vendor/` from another tree to skip `composer install`.** PHP resolves `__DIR__` through the link. Composer's `autoload_static.php` builds the `App\` paths from `__DIR__`, so the application's classes and `tests/TestCase.php` load from the **donor's** tree, and Pest takes the donor as its root and boots the donor's `tests/Pest.php` (read from source, not executed here). Your test files run against somebody else's code and bootstrap. It cuts both ways: a regression passes, and a fix appears not to work. The telltale sign is a change you just made having no effect.
+**Never symlink `vendor/` from another tree to skip `composer install`.** PHP resolves `__DIR__` through the link. Composer's `autoload_static.php` builds the first-party paths (the namespace in the table) from `__DIR__`, so the first-party classes and `tests/TestCase.php` load from the **donor's** tree, and Pest takes the donor as its root and boots the donor's `tests/Pest.php` (read from source, not executed here). Your test files run against somebody else's code and bootstrap. It cuts both ways: a regression passes, and a fix appears not to work. The telltale sign is a change you just made having no effect.
 
 ## Ephemeral worktrees
 
@@ -164,7 +188,7 @@ For those, the `EnterWorktree` tool creates a tree under `.claude/worktrees/<nam
 
 ## Committing and pushing needs nothing extra
 
-This repository has no git hooks: `core.hooksPath` is unset and the hooks directory holds only git's samples (read 2026-09-24). A commit or push therefore runs no tests, Pint, or PHPStan, and even an un-bootstrapped tree can branch, commit, and push. The gate is `ci-passed` on the pull request.
+Neither repository has git hooks: in both, `core.hooksPath` is unset and the hooks directory holds only git's samples (read 2026-09-24). A commit or push therefore runs no tests, Pint, or PHPStan, and even an un-bootstrapped tree can branch, commit, and push. The gate is `ci-passed` on the pull request.
 
 ## File-tool and shell-cwd hazards
 
@@ -174,10 +198,10 @@ These matter **more** with long-lived slots, not less: every slot is always pres
 - **The Bash cwd can silently revert between calls**, sometimes with a `Shell cwd was reset to …` notice and sometimes with none. A backgrounded command inherits whatever the cwd is at launch. The result is a false green from the wrong tree, or an in-place shell edit (`sed -i`, `cat >`) that rewrites the other tree's copy of the file while the one you meant to edit stays untouched and green. Put an explicit `cd` in every command, and make long runs show where they ran:
 
   ```bash
-  cd ../robot-council-cli-a && echo "CWD=$(pwd) HEAD=$(git rev-parse --short HEAD)" && <the real command>
+  cd "$SLOT" && echo "CWD=$(pwd) HEAD=$(git rev-parse --short HEAD)" && <the real command>
   ```
 
-  The guard matters more with slots than with per-ticket trees, because slots do not differ by name. `robot-council-cli-a` and `robot-council-cli-b` look alike, and the stale cwd is as likely to point at the other slot as at the primary. So the right question is "which tree did it land in?", not "did it land on `main`?". Prefer the file tools with absolute paths for edits. If work lands in the wrong tree, `cp` the files to where they belong, then restore the wrong tree's copy (see the next item for when that is safe).
+  The guard matters more with slots than with per-ticket trees, because slots do not differ by name. `<primary>-a` and `<primary>-b` look alike, and the stale cwd is as likely to point at the other slot as at the primary. So the right question is "which tree did it land in?", not "did it land on `main`?". Prefer the file tools with absolute paths for edits. If work lands in the wrong tree, `cp` the files to where they belong, then restore the wrong tree's copy (see the next item for when that is safe).
 - **`git checkout -- <file>` discards all uncommitted work on that file**, not just your last change. Use it only where the file should match `HEAD`. To undo a temporary edit on a file that also holds uncommitted work you want, such as reverting a fix for a negative control, apply the inverse edit or `cp` the file aside first. If you lose work anyway, rebuild it from the session transcript's `Read` and `Edit` results plus `HEAD`, then re-verify before trusting it.
 - **The stash stack belongs to the repository, not the worktree.** Verified on git 2.39.5: a stash pushed in a linked worktree shows up as `stash@{0}` in the primary. Two mistakes chain into losing someone else's work. First, `git stash push -- <paths>` naming any untracked path fails (`error: pathspec … did not match any file(s) known to git`, exit 1) and stashes **nothing**. Then the paired bare `pop` applies whatever entry another session pushed. Prefer a WIP commit, or `cp` the file aside. If you must stash, run `git stash push -u -m "<unique-tag>"`, take the SHA from `git stash list --format='%H %gs'`, and `git stash apply <sha>`. Never use a bare `pop`. **Recovery**, because a popped stash commit is unreachable, not gone:
 
