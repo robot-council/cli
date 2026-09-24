@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Commands\McpReaderCommand;
 use Illuminate\Console\Scheduling\ScheduleFinishCommand;
 use Illuminate\Console\Scheduling\ScheduleListCommand;
 use Illuminate\Console\Scheduling\ScheduleRunCommand;
@@ -66,6 +67,7 @@ return [
     */
 
     'hidden' => [
+        McpReaderCommand::class,
         SummaryCommand::class,
         DumpCompletionCommand::class,
         HelpCommand::class,

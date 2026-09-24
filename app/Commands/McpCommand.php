@@ -14,6 +14,7 @@ use App\Support\FleetFollower;
 use App\Support\MachineIdentity;
 use App\Support\PendingEvents;
 use App\Support\Session;
+use App\Support\StdinReader;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Http\Client\Factory;
@@ -133,8 +134,22 @@ final class McpCommand extends Command
             $this->diagnostic($delivery);
         }
 
+        // **The bridge reads a socket, not stdin.** A child does the blocking read, because
+        // `stream_select()` does not honor its timeout on a Windows pipe and the loop would then
+        // only turn over when the harness sends a frame -- so an idle agent would get no heartbeat,
+        // no renewal and no directives, which is the agent all three exist for (#131).
         try {
-            $bridge->run(STDIN, STDOUT, $this->diagnostic(...));
+            $reader = new StdinReader;
+        } catch (RuntimeException $runtimeException) {
+            $this->diagnostic($runtimeException->getMessage());
+
+            $session->end();
+
+            return self::FAILURE;
+        }
+
+        try {
+            $bridge->run($reader->stream(), STDOUT, $this->diagnostic(...));
         } catch (Throwable $throwable) {
             // **Nothing may escape to the renderer.** `Illuminate\Console\Application` sets
             // `setCatchExceptions(false)`, so an uncaught throwable reaches the kernel's own
@@ -147,6 +162,10 @@ final class McpCommand extends Command
 
             return self::FAILURE;
         } finally {
+            // Before the session ends, because the child holds the harness's stdin and would
+            // otherwise outlive the bridge that started it.
+            $reader->stop();
+
             // The session must not outlive the harness. Ending it releases its tasks and locks now
             // rather than leaving them held until the presence sweep notices.
             $session->end();
