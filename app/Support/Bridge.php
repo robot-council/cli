@@ -444,7 +444,7 @@ final class Bridge
             // **Nothing reaches a fleet that has ended this session either.** `run()` splits every
             // line already in the buffer before it looks at `stopping` again, so without this each
             // one costs a refused call and a refused renewal against a session whose tokens are
-            // already deleted. The harness receives no reply either way, which is #221.
+            // already deleted. The harness receives no reply either way, which is #226.
             return;
         }
 
