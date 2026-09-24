@@ -67,6 +67,24 @@ final class FleetFollower
      */
     private const array COORDINATOR_HEARS = [
         'session.stale', 'session.gone', 'session.resumed',
+
+        // **Who may direct, and who was refused when they asked** (#148). #115 decided a
+        // coordinating session hears about the other sessions on the reasoning that "the role
+        // which needs to watch is the role which needs to direct", and a role is more squarely
+        // that than a lock being acquired, which was already on this list.
+        //
+        // Two things a coordinator could not see: another session promoted to `coordinator`, so
+        // that two direct work while neither knows of the other; and a session refused a role,
+        // recorded against the asking session, so a coordinator watches it behave as though a
+        // request were still pending.
+        //
+        // **Narration's exemption does not extend to them.** These carry no free text --
+        // `Support\RoleRequests` writes role names from a backed enum plus `how` -- so the
+        // reasoning above for keeping narration out does not apply. And the service already
+        // serves both to every session: `Support\FleetFeed::visibleWithin()` restricts narration
+        // alone, so they were being discarded here rather than withheld there.
+        'session.role_changed', 'session.role_requested',
+
         'task.created', 'task.claimed', 'task.started', 'task.blocked',
         'task.completed', 'task.failed', 'task.released', 'task.reassigned', 'task.cancelled',
         'lock.acquired', 'lock.released', 'lock.taken_over', 'lock.force_released',
