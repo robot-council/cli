@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Support;
 
 use RuntimeException;
+use stdClass;
 use Throwable;
 
 /**
@@ -57,10 +58,39 @@ final class Bridge
     public const int READ_BYTES = 65536;
 
     /**
+     * The capability that makes Claude Code treat this server as a channel.
+     *
+     * Declared by the bridge rather than by the service, because the notice originates here: the
+     * bridge is what follows the feed, and the service's MCP endpoint cannot write to this stdio
+     * (cli#62).
+     */
+    public const string CHANNEL_CAPABILITY = 'claude/channel';
+
+    /**
+     * What the agent is told a channel notice means.
+     *
+     * **Trusted where the notice is not, and that asymmetry is why the notice carries no events.**
+     * Measured for cli#117: a woken turn treats channel content as external data and declines an
+     * instruction inside it, while server instructions arrive through configuration the operator
+     * chose. So the notice only says that something is waiting, and this says what to do about it.
+     * Ending the turn is the whole of it, because the stop hook delivers the events at the turn
+     * boundary through the path an agent already acts on.
+     *
+     * **Conditional on having nothing else in progress.** A notice can arrive while the agent is
+     * working, and an unconditional "end the turn" would abandon a task halfway for news the stop
+     * hook delivers at that task's natural end anyway.
+     */
+    public const string CHANNEL_INSTRUCTIONS = 'A channel notice from this server says only that new Robot Council fleet events '
+        .'are waiting for this session. The events themselves are delivered by the stop hook when the current turn ends. '
+        .'If a notice arrives while nothing else is in progress, end the turn without other work; if you are in the middle '
+        .'of a task, carry on with it, and the events arrive when it ends.';
+
+    /**
      * @param  Session  $session  The started session this bridge forwards through.
      * @param  string  $service  The service's base URL.
      * @param  int  $heartbeatSeconds  How long to wait between heartbeats.
      * @param  int  $renewRetrySeconds  How long a refused renewal waits before another is tried.
+     * @param  bool  $channel  Whether to act as a Claude Code channel (cli#62).
      *
      * Both intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -68,6 +98,10 @@ final class Bridge
      * through a real minute -- or, for the retry, half a real one. Passing 0 makes the next pass
      * due, which is what the tests do. Nothing in this application passes anything but the
      * defaults.
+     *
+     * `$channel` is off unless the caller turns it on, because it is one harness's extension: only
+     * Claude Code reads `claude/channel`, and how another harness's client treats an unknown server
+     * notification has not been measured.
      */
     public function __construct(
         private readonly Session $session,
@@ -78,6 +112,7 @@ final class Bridge
         // follower forwards tool calls exactly as it did before one existed (cli#60).
         private readonly ?FleetFollower $follower = null,
         private readonly int $renewRetrySeconds = self::RENEW_RETRY_SECONDS,
+        private readonly bool $channel = false,
     ) {}
 
     /**
@@ -117,6 +152,33 @@ final class Bridge
      * Whether a signal has asked the loop to stop.
      */
     private bool $stopping = false;
+
+    /**
+     * The ids of `initialize` requests still waiting for their result, keyed by their JSON form.
+     *
+     * JSON-RPC allows a string or a number, and `1` and `"1"` are different ids, so the key keeps
+     * the type rather than letting PHP's array keys fold them together.
+     *
+     * @var array<string, true>
+     */
+    private array $initializing = [];
+
+    /**
+     * Whether the harness has said it finished initializing, after which a notice may be sent.
+     *
+     * A notification written before `notifications/initialized` goes into a transport the harness
+     * is not yet reading, which is indistinguishable from a channel that never registered.
+     */
+    private bool $initialized = false;
+
+    /**
+     * Events left in the sink that no notice has announced yet.
+     *
+     * **Kept rather than dropped while the harness is still initializing.** The first pass of the
+     * loop forwards `initialize` and then reads the feed before the harness can have answered with
+     * `notifications/initialized`, so a batch written then would otherwise never be announced.
+     */
+    private int $unannounced = 0;
 
     /**
      * Ask the loop to finish after the message it is handling.
@@ -188,7 +250,7 @@ final class Bridge
                 }
             }
 
-            $this->periodic($diagnostic);
+            $this->periodic($out, $diagnostic);
         }
     }
 
@@ -201,6 +263,8 @@ final class Bridge
      */
     private function forward(string $message, $out, callable $diagnostic): void
     {
+        $initializing = $this->observe($message);
+
         try {
             $response = $this->post($message);
 
@@ -231,6 +295,13 @@ final class Bridge
             // To stderr, never to stdout: a harness parsing stdout would read a diagnostic as a
             // malformed protocol message rather than as an error
             $diagnostic($throwable->getMessage());
+        } finally {
+            // **Whatever became of the request, its id stops being an `initialize`.** A result
+            // that was relayed has already cleared it; one that failed, or was not a protocol
+            // message, would otherwise leave it waiting for a later response that reuses the id.
+            if ($initializing !== null) {
+                unset($this->initializing[$initializing]);
+            }
         }
     }
 
@@ -267,8 +338,152 @@ final class Bridge
             return;
         }
 
-        // The only thing this class ever writes to `$out`
-        fwrite($out, $trimmed."\n");
+        // One of the two things this class writes to `$out`; the other is `announce()`
+        fwrite($out, $this->declareChannel($trimmed)."\n");
+    }
+
+    /**
+     * Note what the harness sent that the channel depends on.
+     *
+     * @param  string  $message  One JSON-RPC message, as the harness wrote it.
+     * @return string|null The key an `initialize` request was recorded under, or null.
+     */
+    private function observe(string $message): ?string
+    {
+        // Both methods this looks for contain the word, and a tool call can run to hundreds of
+        // kilobytes, so the rest are not decoded a second time for nothing
+        if (! $this->channel || ! str_contains($message, 'initialize')) {
+            return null;
+        }
+
+        $decoded = json_decode($message, true);
+
+        if (! \is_array($decoded)) {
+            return null;
+        }
+
+        $method = $decoded['method'] ?? null;
+
+        if ($method === 'notifications/initialized') {
+            $this->initialized = true;
+        }
+
+        if ($method !== 'initialize' || ! isset($decoded['id'])) {
+            return null;
+        }
+
+        $key = (string) json_encode($decoded['id']);
+
+        $this->initializing[$key] = true;
+
+        return $key;
+    }
+
+    /**
+     * Add the channel capability and its instructions to an `initialize` result, and leave anything
+     * else exactly as the service sent it.
+     *
+     * **Decoded as objects, never as arrays.** The service's capabilities hold empty objects such as
+     * `"tools":{}`, and an associative decode turns those into empty arrays that re-encode as `[]` --
+     * a different value, in the one message a harness reads to decide what this server can do.
+     *
+     * **Only when there is a follower.** A notice announces what the follower left in the sink, so a
+     * bridge without one would declare a channel that can never send anything.
+     *
+     * **The service's bytes when the rewrite cannot be encoded**, rather than no answer at all: a
+     * harness that never receives its `initialize` result does not start the server, and a channel
+     * is not worth that. The round trip otherwise changes only how some numbers are spelled.
+     *
+     * @param  string  $response  One protocol message, already known to parse.
+     * @return string The message to write.
+     */
+    private function declareChannel(string $response): string
+    {
+        if (! $this->channel || ! $this->follower instanceof FleetFollower || $this->initializing === []) {
+            return $response;
+        }
+
+        $decoded = json_decode($response);
+
+        if (! $decoded instanceof stdClass || ! isset($decoded->id)) {
+            return $response;
+        }
+
+        $key = (string) json_encode($decoded->id);
+
+        if (! isset($this->initializing[$key])) {
+            return $response;
+        }
+
+        unset($this->initializing[$key]);
+
+        $result = $decoded->result ?? null;
+
+        // An error, or a result with no capabilities to add to: relayed untouched
+        if (! $result instanceof stdClass || ! ($result->capabilities ?? null) instanceof stdClass) {
+            return $response;
+        }
+
+        $capabilities = $result->capabilities;
+
+        $experimental = $capabilities->experimental ?? null;
+
+        if (! $experimental instanceof stdClass) {
+            $experimental = new stdClass;
+        }
+
+        $experimental->{self::CHANNEL_CAPABILITY} = new stdClass;
+        $capabilities->experimental = $experimental;
+
+        // Added to what the service says rather than replacing it
+        $existing = $result->instructions ?? null;
+
+        $result->instructions = \is_string($existing) && trim($existing) !== ''
+            ? $existing."\n\n".self::CHANNEL_INSTRUCTIONS
+            : self::CHANNEL_INSTRUCTIONS;
+
+        $encoded = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+
+        return $encoded === false ? $response : $encoded;
+    }
+
+    /**
+     * Tell the harness that the follower has left new events in the sink.
+     *
+     * **Never the events.** The sink stays the one record of what was sent and the stop hook the
+     * one path that delivers it, so a notice is only a reason for an idle agent to have a turn to
+     * end (cli#62). A harness that never enabled channels drops the notification silently, as the
+     * channels reference documents, and loses nothing, because the sink was written either way.
+     *
+     * **It says "new", not how many are waiting.** `new` in the meta is how many this notice
+     * covers; what the sink holds is not the bridge's to know, since the stop hook drains it.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function announce($out): void
+    {
+        if (! $this->channel) {
+            return;
+        }
+
+        $this->unannounced += $this->follower?->delivered() ?? 0;
+
+        if ($this->unannounced === 0 || ! $this->initialized) {
+            return;
+        }
+
+        fwrite($out, json_encode([
+            'jsonrpc' => '2.0',
+            'method' => 'notifications/claude/channel',
+            'params' => [
+                'content' => 'New fleet events are waiting for this session.',
+
+                // Keys must be identifiers and values strings, per the channels reference
+                'meta' => ['new' => (string) $this->unannounced],
+            ],
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)."\n");
+
+        $this->unannounced = 0;
     }
 
     /**
@@ -291,11 +506,12 @@ final class Bridge
     }
 
     /**
-     * Heartbeat and renew, on their own schedules.
+     * Heartbeat, follow the feed, and renew, on their own schedules.
      *
+     * @param  resource  $out  Where protocol messages go, for a channel notice.
      * @param  callable(string):void  $diagnostic  Where anything else goes.
      */
-    private function periodic(callable $diagnostic): void
+    private function periodic($out, callable $diagnostic): void
     {
         // **A refused heartbeat is how an IDLE bridge learns anything at all.** Every endpoint
         // taking the session token answers 401 once the fleet has ended a session, and an idle
@@ -324,6 +540,8 @@ final class Bridge
         if ($this->follower?->tick($diagnostic) === true) {
             $this->roleChanged = true;
         }
+
+        $this->announce($out);
 
         // **The feed's 401 asks the same question the heartbeat's does**, and the renewal below is
         // what answers it. Without this a bridge whose session had been ended learned nothing from
