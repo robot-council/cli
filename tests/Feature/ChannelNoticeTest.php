@@ -48,15 +48,19 @@ function channelInput(array $lines)
 /**
  * Fake the service: a session, a feed page, and an MCP endpoint that answers by method.
  *
+ * **One call per test.** `Http::fake()` merges stubs and the first match wins, so a second call
+ * cannot replace a route this one registered; pass `$feed` instead.
+ *
  * @param  list<array<string, mixed>>  $events  The feed page's events.
  * @param  string  $initializeResult  The `result` the service gives `initialize`, as JSON.
+ * @param  mixed  $feed  A response for the feed route that replaces the page built from `$events`.
  */
-function channelService(array $events = [], string $initializeResult = '{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"robot-council","version":"1.0.0"}}'): void
+function channelService(array $events = [], string $initializeResult = '{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"robot-council","version":"1.0.0"}}', mixed $feed = null): void
 {
     Http::fake([
         '*/api/sessions' => Http::response(['session_id' => 7, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => []], 201),
         '*/api/sessions/7/heartbeat' => Http::response([], 204),
-        '*/api/events*' => Http::response(['events' => $events, 'cursor' => 99], 200),
+        '*/api/events*' => $feed ?? Http::response(['events' => $events, 'cursor' => 99], 200),
         '*/api/mcp' => function (Request $request) use ($initializeResult) {
             $message = json_decode($request->body(), true);
             $method = \is_array($message) ? ($message['method'] ?? null) : null;
@@ -98,9 +102,11 @@ function channelDirective(int $id): array
  *
  * @param  list<string>  $lines  What the harness sends.
  * @param  bool  $withFollower  Whether the bridge follows the feed.
+ * @param  bool  $channel  Whether the bridge acts as a channel, which only a Claude Code bridge does.
+ * @param  resource|null  $in  Input to read instead of `$lines`, for one that arrives over time.
  * @return list<array<array-key, mixed>> What the bridge wrote.
  */
-function channelRun(array $lines, bool $withFollower = true): array
+function channelRun(array $lines, bool $withFollower = true, bool $channel = true, $in = null): array
 {
     $session = new Session(app(Factory::class), CHANNEL_SERVICE, new Credential(CHANNEL_INSTALLATION));
     $session->start();
@@ -111,8 +117,8 @@ function channelRun(array $lines, bool $withFollower = true): array
 
     $out = tmpfile();
 
-    new Bridge($session, CHANNEL_SERVICE, follower: $follower)
-        ->run(channelInput($lines), $out, fn (string $m): null => null);
+    new Bridge($session, CHANNEL_SERVICE, follower: $follower, channel: $channel)
+        ->run($in ?? channelInput($lines), $out, fn (string $m): null => null);
 
     rewind($out);
 
@@ -169,7 +175,10 @@ beforeEach(function (): void {
 afterEach(function (): void {
     putenv('XDG_STATE_HOME');
 
-    File::deleteDirectory(channelStateHome());
+    // A directory usually, and a regular file after the test that makes the sink unwritable
+    is_file(channelStateHome())
+        ? File::delete(channelStateHome())
+        : File::deleteDirectory(channelStateHome());
 });
 
 it('declares the channel capability and its instructions in the initialize result it relays', function (): void {
@@ -189,7 +198,7 @@ it("keeps the service's empty objects as objects, which an array decode would tu
     $session = new Session(app(Factory::class), CHANNEL_SERVICE, new Credential(CHANNEL_INSTALLATION));
     $session->start();
 
-    new Bridge($session, CHANNEL_SERVICE, follower: new FleetFollower($session, CHANNEL_SERVICE, new PendingEvents(CHANNEL_SERVICE, 'claude', 'channel-probe'), 0))
+    new Bridge($session, CHANNEL_SERVICE, follower: new FleetFollower($session, CHANNEL_SERVICE, new PendingEvents(CHANNEL_SERVICE, 'claude', 'channel-probe'), 0), channel: true)
         ->run(channelInput([CHANNEL_INITIALIZE]), $out, fn (string $m): null => null);
 
     rewind($out);
@@ -231,25 +240,17 @@ it('leaves every response other than the initialize result untouched', function 
         ->and(data_get($list, '0.result'))->toBe(['tools' => []]);
 });
 
-it('announces the events the follower left, as a count, once the harness has initialized', function (): void {
+it('announces new events the follower left, once the harness has initialized', function (): void {
     channelService([channelDirective(11), channelDirective(12)]);
 
     $notices = channelNotices(channelRun([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED]));
 
     expect($notices)->toHaveCount(1)
-        ->and(data_get($notices, '0.params.content'))->toBe('2 fleet events are waiting for this session.')
-        ->and(data_get($notices, '0.params.meta'))->toBe(['events' => '2'])
+        ->and(data_get($notices, '0.params.content'))->toBe('New fleet events are waiting for this session.')
+        ->and(data_get($notices, '0.params.meta'))->toBe(['new' => '2'])
 
         // A count and nothing else: the directive's text reaches the agent through the stop hook
         ->and(json_encode($notices[0]))->not->toContain('hold new migrations');
-});
-
-it('says one event in the singular', function (): void {
-    channelService([channelDirective(11)]);
-
-    $notices = channelNotices(channelRun([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED]));
-
-    expect(data_get($notices, '0.params.content'))->toBe('1 fleet event is waiting for this session.');
 });
 
 it('announces nothing before the harness has said it finished initializing', function (): void {
@@ -297,3 +298,99 @@ it('counts only what the last tick wrote, so one batch is announced once', funct
     expect($first)->toBe(1)
         ->and($follower->delivered())->toBe(0);
 });
+
+it('is not a channel for any harness but Claude Code, so another client sees the service unchanged', function (): void {
+    channelService([channelDirective(11)]);
+
+    $written = channelRun([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED], channel: false);
+
+    expect(data_get($written, '0.result.capabilities'))->not->toHaveKey('experimental')
+        ->and(data_get($written, '0.result'))->not->toHaveKey('instructions')
+        ->and(channelNotices($written))->toBeEmpty();
+});
+
+it('keeps a string id a string, and declares the channel on it', function (): void {
+    channelService();
+
+    [$result] = channelRun(['{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{"protocolVersion":"2025-11-25"}}']);
+
+    expect($result['id'])->toBe('init-1')
+        ->and(data_get($result, 'result.capabilities.experimental'))->toHaveKey(Bridge::CHANNEL_CAPABILITY);
+});
+
+it('relays an error answer to initialize untouched', function (): void {
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => []], 201),
+        '*/api/events*' => Http::response(['events' => [], 'cursor' => 99], 200),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"Unsupported protocol version"}}', 200),
+    ]);
+
+    [$result] = channelRun([CHANNEL_INITIALIZE]);
+
+    expect($result)->toBe(['jsonrpc' => '2.0', 'id' => 0, 'error' => ['code' => -32602, 'message' => 'Unsupported protocol version']]);
+});
+
+it('replaces an experimental entry that is not an object, which laravel/mcp sends as [] when empty', function (): void {
+    channelService(initializeResult: '{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"experimental":[]}}');
+
+    [$result] = channelRun([CHANNEL_INITIALIZE]);
+
+    expect(data_get($result, 'result.capabilities.experimental'))->toBe([Bridge::CHANNEL_CAPABILITY => []]);
+});
+
+it('sets the instructions when the service gives null for them', function (): void {
+    channelService(initializeResult: '{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"instructions":null}');
+
+    [$result] = channelRun([CHANNEL_INITIALIZE]);
+
+    expect(data_get($result, 'result.instructions'))->toBe(Bridge::CHANNEL_INSTRUCTIONS);
+});
+
+it("relays the service's own bytes when the rewrite cannot be encoded, rather than no answer", function (): void {
+    // `1e999` decodes to INF, which json_encode refuses
+    channelService(initializeResult: '{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"limit":1e999}');
+
+    $written = channelRun([CHANNEL_INITIALIZE]);
+
+    expect($written)->toHaveCount(1)
+        ->and(data_get($written, '0.id'))->toBe(0);
+});
+
+it('announces nothing when the sink could not be written, because the stop hook would find nothing', function (): void {
+    channelService([channelDirective(11)]);
+
+    // A regular file where the state directory should be, so the sink cannot be created under it
+    File::ensureDirectoryExists(\dirname(channelStateHome()));
+    file_put_contents(channelStateHome(), 'not a directory');
+
+    expect(channelNotices(channelRun([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED])))->toBeEmpty();
+});
+
+it('announces a batch that arrived before the harness finished initializing, once it has', function (): void {
+    // One batch on the first read and nothing after, so a later read cannot re-deliver it and hide
+    // a count that was dropped rather than kept
+    channelService(feed: Http::sequence()
+        ->push(['events' => [channelDirective(11)], 'cursor' => 11], 200)
+        ->whenEmpty(Http::response(['events' => [], 'cursor' => 11], 200)));
+
+    // `initialize` now and `initialized` a moment later, so the first feed read falls between them:
+    // the order a real harness produces, which one stream read all at once cannot
+    $feeder = proc_open(
+        [\PHP_BINARY, '-r', 'echo $argv[1], "\n"; fflush(STDOUT); usleep(700000); echo $argv[2], "\n";', CHANNEL_INITIALIZE, CHANNEL_INITIALIZED],
+        [1 => ['pipe', 'w']],
+        $pipes
+    );
+
+    // A feeder that never started would read as a bridge that announced nothing
+    expect($feeder)->toBeResource();
+
+    if (! \is_resource($feeder)) {
+        return;
+    }
+
+    $notices = channelNotices(channelRun([], in: $pipes[1]));
+
+    proc_close($feeder);
+
+    expect($notices)->toHaveCount(1);
+})->skipOnWindows();

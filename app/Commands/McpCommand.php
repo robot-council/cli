@@ -106,7 +106,11 @@ final class McpCommand extends Command
             $session,
             $service,
             Bridge::HEARTBEAT_SECONDS,
-            new FleetFollower($session, $service, $pending)
+            new FleetFollower($session, $service, $pending),
+
+            // **Claude Code only**, the one harness that reads `claude/channel`. A session started
+            // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
+            channel: $harness === 'claude',
         );
 
         $this->listenForSignals($bridge);
