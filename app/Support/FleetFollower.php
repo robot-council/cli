@@ -20,7 +20,8 @@ use Throwable;
  * would start a second session, which the fleet would list as an extra agent.
  *
  * **What it does not do is wake anybody.** It makes the news available at a turn boundary; the
- * harness's stop hook is what hands it to the agent (cli#61).
+ * harness's stop hook is what hands it to the agent (cli#61). Where the harness supports a channel,
+ * the bridge announces each batch so that an idle agent has a turn to end (cli#62).
  */
 final class FleetFollower
 {
@@ -139,6 +140,15 @@ final class FleetFollower
     private int $refusals = 0;
 
     /**
+     * How many events the last tick left in the sink.
+     *
+     * **Per tick, like `$refused`**, so a caller asking after every tick is told about each batch
+     * once. A tick that sat out the poll interval, found nothing, or failed to write answers zero:
+     * only events actually waiting for the stop hook are worth waking an agent for (cli#62).
+     */
+    private int $delivered = 0;
+
+    /**
      * The tasks this session is holding, as far as the feed has said.
      *
      * **Derived from the feed rather than looked up**, because `task.reassigned` and `task.cancelled`
@@ -188,6 +198,14 @@ final class FleetFollower
     }
 
     /**
+     * How many events the last tick left in the sink, which is what a channel notice announces.
+     */
+    public function delivered(): int
+    {
+        return $this->delivered;
+    }
+
+    /**
      * Read the feed if it is due, and leave anything that concerns this session.
      *
      * **Never throws and never writes to stdout.** A bridge whose follower failed must go on
@@ -213,6 +231,7 @@ final class FleetFollower
         // #169: three renewals where one was owed, and the mutation that should have caught it
         // could not, because the flag was already sticky for the window under test.
         $this->refused = false;
+        $this->delivered = 0;
 
         if ($this->cursor === null || time() < $this->nextPoll) {
             return false;
@@ -312,6 +331,10 @@ final class FleetFollower
 
         try {
             $this->pending->add($concerning);
+
+            // Counted only once written: a notice for events the stop hook will not find would wake
+            // an agent to an empty sink
+            $this->delivered = \count($concerning);
         } catch (Throwable $throwable) {
             $diagnostic($throwable->getMessage());
         }
