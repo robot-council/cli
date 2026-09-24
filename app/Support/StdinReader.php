@@ -5,9 +5,7 @@ declare(strict_types=1);
 namespace App\Support;
 
 use App\Commands\McpReaderCommand;
-use Illuminate\Support\Facades\Process;
 use RuntimeException;
-use Throwable;
 
 /**
  * Reads stdin in a child process and hands the lines back over a socket.
@@ -50,11 +48,6 @@ final class StdinReader
      * How long to wait for the child to connect back, in seconds.
      */
     public const int ACCEPT_TIMEOUT_SECONDS = 10;
-
-    /**
-     * How long to spend killing the child before giving up on it.
-     */
-    public const int KILL_TIMEOUT_SECONDS = 5;
 
     /**
      * The connected socket the bridge reads, once the child has named its token.
@@ -108,7 +101,13 @@ final class StdinReader
             ],
             $pipes,
             null,
-            [self::PORT => (string) $this->portOf($listener), self::TOKEN => $token] + $this->environment()
+            [self::PORT => (string) $this->portOf($listener), self::TOKEN => $token] + $this->environment(),
+            // **Bypass the shell, because otherwise Windows wraps this in `cmd.exe`** and
+            // `proc_terminate()` then kills the wrapper while the real process keeps running --
+            // holding the harness's stdin, and making `proc_close()` block forever waiting for it.
+            // Measured twice here, for 600 and 400 seconds. Without the wrapper, `proc_terminate()`
+            // ends the child and `proc_close()` returns at once. Ignored off Windows.
+            ['bypass_shell' => true]
         );
 
         if (! \is_resource($process)) {
@@ -156,8 +155,7 @@ final class StdinReader
     /**
      * The child's process id, for a diagnostic or a test that needs to look at it.
      *
-     * On Windows this is the intermediate shell `proc_open` starts, not the PHP process beneath
-     * it; both carry the same command line, which is what matters for anything reading one.
+     * The reader itself, not a shell wrapping it, because it is started with `bypass_shell`.
      */
     public function pid(): ?int
     {
@@ -185,23 +183,10 @@ final class StdinReader
             return;
         }
 
-        // Read before terminating, while the handle still reports one.
-        $pid = $this->pid();
-
         proc_terminate($this->process);
 
-        // **On Windows `proc_terminate()` kills the shell `proc_open` started, not the PHP process
-        // beneath it.** The child then survives, and `proc_close()` blocks forever waiting for it:
-        // measured here, a run sat for 600 seconds and left the reader orphaned and still holding
-        // the harness's stdin. Killing the tree is what actually ends it.
-        if (\PHP_OS_FAMILY === 'Windows' && $pid !== null) {
-            try {
-                Process::timeout(self::KILL_TIMEOUT_SECONDS)->run(['taskkill', '/T', '/F', '/PID', (string) $pid]);
-            } catch (Throwable) {
-                // The bridge is stopping either way, and there is nothing better to try.
-            }
-        }
-
+        // Returns at once, because the child above is the real process rather than a shell wrapping
+        // one. That is the whole reason `bypass_shell` is passed when it is started.
         proc_close($this->process);
     }
 
