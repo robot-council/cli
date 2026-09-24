@@ -167,6 +167,22 @@ final class FleetFollower
             // and it is the one thing about itself the bridge has to act on.
             if ($this->actor($event) === $this->session->id() && $this->noteOwnRole($event, $diagnostic)) {
                 $roleChanged = true;
+
+                // **And nothing below it in this page is decided here.** Those events happened
+                // after the role did, so deciding them against abilities this session is about to
+                // stop having would discard them *permanently* -- the cursor moves past the whole
+                // page either way, and the feed serves strictly what is after it. A page holds up
+                // to 200 events (`FleetFeed::MAX_PAGE` in `robot-council/core`, and this client
+                // sends no `limit`), so on a busy fleet that is a page-worth of exactly what the
+                // promotion was granted for. Rewinding the cursor to this event hands the rest back
+                // on the next tick, by which time the bridge has renewed.
+                $id = $event['id'] ?? null;
+
+                if (\is_int($id)) {
+                    $this->cursor = $id;
+
+                    break;
+                }
             }
 
             // **Decided before the held set is updated, and the order is the whole of it.** A
@@ -216,10 +232,17 @@ final class FleetFollower
         $type = $this->type($event);
 
         if ($type === 'session.role_changed') {
+            // **Neutral about the direction, because this client cannot order the roles.** The
+            // service owns that list, and a demotion is as likely as a promotion -- an imposed one
+            // is core's named path for an emergency. "Renewing so it can act on it" was true of a
+            // promotion and precisely backwards for the narrowing case it matters most in.
+            $how = $this->metaString($event, 'how');
+
             $diagnostic(sprintf(
-                'This session is now in the `%s` role, from `%s`. Renewing so it can act on it.',
+                'This session is now in the `%s` role, from `%s`%s. Refreshing what it may do.',
                 $this->metaString($event, 'to') ?? 'unknown',
-                $this->metaString($event, 'from') ?? 'unknown'
+                $this->metaString($event, 'from') ?? 'unknown',
+                $how === null ? '' : ', '.$how.' by an administrator'
             ));
 
             return true;

@@ -60,12 +60,14 @@ final class Bridge
      * @param  Session  $session  The started session this bridge forwards through.
      * @param  string  $service  The service's base URL.
      * @param  int  $heartbeatSeconds  How long to wait between heartbeats.
+     * @param  int  $renewRetrySeconds  How long a refused renewal waits before another is tried.
      *
-     * The interval is a parameter rather than only a constant because otherwise nothing can show
-     * that an idle bridge heartbeats at all: the schedule is read from `time()` inside a loop that
-     * blocks on `stream_select`, so a test cannot advance the clock from outside it and would have
-     * to sit through a real minute. Passing 0 makes the first pass due, which is what the tests do.
-     * Nothing in this application passes anything but the default.
+     * Both intervals are parameters rather than only constants because otherwise nothing can show
+     * what they do: the schedule is read from `time()` inside a loop that blocks on
+     * `stream_select`, so a test cannot advance the clock from outside it and would have to sit
+     * through a real minute -- or, for the retry, half a real one. Passing 0 makes the next pass
+     * due, which is what the tests do. Nothing in this application passes anything but the
+     * defaults.
      */
     public function __construct(
         private readonly Session $session,
@@ -75,6 +77,7 @@ final class Bridge
         // Optional, because the loop's own guarantees must not depend on it: a bridge with no
         // follower forwards tool calls exactly as it did before one existed (cli#60).
         private readonly ?FleetFollower $follower = null,
+        private readonly int $renewRetrySeconds = self::RENEW_RETRY_SECONDS,
     ) {}
 
     /**
@@ -83,9 +86,22 @@ final class Bridge
     private int $nextHeartbeat = 0;
 
     /**
-     * The earliest a renewal may be attempted again after one failed.
+     * The earliest a renewal may be attempted again.
      */
     private int $nextRenewAttempt = 0;
+
+    /**
+     * Whether a role change is still waiting for a renewal to carry it.
+     *
+     * **Latched rather than acted on once, and the asymmetry with the expiry trigger is the whole
+     * reason it exists.** `Session::expiringWithin()` re-derives itself from the token on every
+     * pass, so a renewal the backoff refuses is merely postponed and the next pass after the wait
+     * fires it again. A role change is a single event the follower's cursor has already moved past
+     * before the renewal is even attempted, so the same refusal would DROP it -- one 502 and the
+     * session goes back to answering `allows()` from the abilities it held before the administrator
+     * decided, for up to the renewal window, which is the defect this whole path exists to close.
+     */
+    private bool $roleChanged = false;
 
     /**
      * Whether a signal has asked the loop to stop.
@@ -278,11 +294,26 @@ final class Bridge
         // it was handed at start -- so a promoted session keeps discarding the events it was
         // promoted to hear, for up to the renewal window, while the service would let it act. The
         // follower says when that has happened and the renewal below stops waiting (#129).
-        $roleChanged = (bool) $this->follower?->tick($diagnostic);
+        if ($this->follower?->tick($diagnostic) === true) {
+            $this->roleChanged = true;
+        }
 
-        if (($roleChanged || $this->session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
+        if (($this->roleChanged || $this->session->expiringWithin(self::RENEW_WITHIN_SECONDS)) && time() >= $this->nextRenewAttempt) {
             try {
                 $this->session->renew();
+
+                // Carried no further: what this session believes it may do now matches what the
+                // service minted for it.
+                $this->roleChanged = false;
+
+                // **A floor after a SUCCESS, not only after a failure.** `FleetFollower::read()`
+                // keeps the previous cursor when a page's own is not an int, so a service answering
+                // one that is not re-serves the same page every poll -- and a role change in it
+                // would renew on every pass for as long as that lasted, six a minute against the
+                // sixty a minute `core` allows an installation. The expiry trigger cannot do this,
+                // because a successful renewal moves the expiry an hour out; this one has no such
+                // self-limit, so it is given one.
+                $this->nextRenewAttempt = time() + $this->renewRetrySeconds;
             } catch (Throwable $failure) {
                 // **Backed off, because a failed renewal does not move the expiry.** Without this,
                 // `expiringWithin()` stays true and the loop retries on every pass -- measured at
@@ -290,7 +321,10 @@ final class Bridge
                 // cross `core`'s own 60-a-minute limit and lock the installation out of starting
                 // sessions at all. The same reasoning the 401 backstop already applies, which this
                 // path had not.
-                $this->nextRenewAttempt = time() + self::RENEW_RETRY_SECONDS;
+                //
+                // The role change stays latched across this, so the wait delays it rather than
+                // cancelling it.
+                $this->nextRenewAttempt = time() + $this->renewRetrySeconds;
 
                 $diagnostic($failure->getMessage());
             }
