@@ -211,7 +211,7 @@ it('ignores a lease taken from somebody else', function (): void {
         ->toBeEmpty();
 });
 
-it('hands this session its own stale and gone, which the sweep decided rather than it', function (): void {
+it('hands this session its own stale, which the sweep decided rather than it', function (): void {
     // **The shape `robot-council/core` actually serializes**, which is what the version of this test
     // before #147 got wrong. `Support\SessionPresence` records a presence event against the session
     // it is ABOUT, so `Support\FleetFeed::describe()` puts that session's id in `actor.session_id`
@@ -219,12 +219,16 @@ it('hands this session its own stale and gone, which the sweep decided rather th
     // service produces, so it exercised the fixture rather than the service, and its sibling
     // asserted the event was discarded under a title saying it was delivered.
     //
-    // A `stale` session is recoverable and a `gone` one is not: core refuses its tokens, releases
-    // its claims and drops its locks. Both are what the agent holding those claims has to hear.
+    // A `stale` session is recoverable, and the agent holding its claims has to hear it.
+    //
+    // **No `gone` in this fixture, and not by omission (#175).** A feed page carrying this
+    // session's own `session.gone` is a response the service cannot send: the event is written in
+    // the transaction that deletes the session's tokens, behind middleware that refuses a gone
+    // session. The earlier version of this test asserted delivery against exactly that page.
+    // `SessionGoneTest` covers how a gone session is actually learned, from the renewal's `409`.
     expect(array_column(followed([
         feedEvent('session.stale', actor: MINE),
-        feedEvent('session.gone', actor: MINE),
-    ]), 'type'))->toBe(['session.stale', 'session.gone']);
+    ]), 'type'))->toBe(['session.stale']);
 });
 
 it('still discards everything this session genuinely authored', function (): void {
@@ -308,15 +312,18 @@ it('does not hand a coordinator its own events back, except its own presence', f
     // The own-actor exclusion is the second thing `concerns()` checks and the coordinator branch is
     // the last, so a branch that answered between them would be invisible to every other test here.
     //
-    // **`session.gone` moved out of this assertion in #147 and that is the change, not a
+    // **Its own presence moved out of this assertion in #147 and that is the change, not a
     // relaxation.** A coordinator was being told about every other session going stale while never
     // being told about itself, because a presence event names the session it is about and the
     // discard read that as authorship. What a coordinator still does not get back is what it did.
+    //
+    // `session.stale` rather than `session.gone`, which this test used until #175: a session's own
+    // `gone` is a feed page the service cannot serve it, so asserting on one tested a fixture.
     expect(array_column(followed([
         feedEvent('task.created', actor: MINE),
         feedEvent('narration', actor: MINE),
-        feedEvent('session.gone', actor: MINE),
-    ], ['coordinator:direct']), 'type'))->toBe(['session.gone']);
+        feedEvent('session.stale', actor: MINE),
+    ], ['coordinator:direct']), 'type'))->toBe(['session.stale']);
 });
 
 it("hands a coordinator another session's role change and refusal", function (): void {

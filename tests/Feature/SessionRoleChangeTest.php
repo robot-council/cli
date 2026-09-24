@@ -297,7 +297,7 @@ it('ignores a role change that names another session', function (): void {
         ->and($said)->toBeEmpty();
 });
 
-it('reports a refusal, and does not renew for it', function (): void {
+it('reports a denial, and does not renew for it', function (): void {
     // Core records a refusal against the REQUEST rather than as a role change, with
     // `['refused' => …, 'stays' => …]` where a request carries `['from' => …, 'to' => …]` -- read
     // from `Support\RoleRequests::deny()` on its `main`. The `refused` key is what tells a denial
@@ -313,11 +313,18 @@ it('reports a refusal, and does not renew for it', function (): void {
 
     // The message is this branch's ONLY effect -- it returns false and nothing else happens -- so
     // which role went in which slot is the whole of what there is to get right. Reversed, it tells
-    // an operator their session was refused the role it actually kept.
+    // an operator their session was denied the role it actually kept.
+    //
+    // **"denied" is asserted, and "refused" is asserted absent** (#204). The administration page's
+    // button says `Deny`, and the two words named one decision two ways on either side of it. The
+    // absence is what stops the old wording coming back, and it discriminates because the event's
+    // own `refused` key is still read here -- so a message built from the key rather than written
+    // would fail this.
     expect($changed)->toBeFalse()
         ->and($said)->toHaveCount(1)
-        ->and($said[0])->toContain('for the `coordinator` role was refused')
-        ->and($said[0])->toContain('stays `build`');
+        ->and($said[0])->toContain('for the `coordinator` role was denied by an administrator')
+        ->and($said[0])->toContain('stays `build`')
+        ->and($said[0])->not->toContain('refused');
 });
 
 it('says nothing about a request this session made itself', function (): void {
@@ -641,6 +648,6 @@ it('writes nothing to stdout on any of the paths that say something', function (
     expect(implode("\n", $said))
         ->toContain('now in the `coordinator` role')
         ->toContain('could not be renewed')
-        ->toContain('for the `ci` role was refused')
+        ->toContain('for the `ci` role was denied by an administrator')
         ->toContain('now in the `build` role');
 });
