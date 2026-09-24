@@ -44,9 +44,15 @@ return [
     | services the application utilizes. This can be overridden using
     | the global command line "--env" option when calling commands.
     |
+    | Production, because this application is installed through Composer rather than built into
+    | a PHAR, so nothing else ever sets it. Laravel Zero adds its development commands -- `test`,
+    | `app:build`, `make:command` and the rest -- in any other environment, and an installed copy
+    | then offered commands that crash or write into `vendor/` (#241). A contributor reaches them
+    | with `--env=development`.
+    |
     */
 
-    'env' => 'development',
+    'env' => 'production',
 
     /*
     |--------------------------------------------------------------------------
