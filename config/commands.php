@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Commands\HomeCommand;
 use App\Commands\McpReaderCommand;
 use Illuminate\Console\Scheduling\ScheduleFinishCommand;
 use Illuminate\Console\Scheduling\ScheduleListCommand;
@@ -25,7 +26,7 @@ return [
     |
     */
 
-    'default' => SummaryCommand::class,
+    'default' => HomeCommand::class,
 
     /*
     |--------------------------------------------------------------------------
@@ -52,7 +53,8 @@ return [
     */
 
     'add' => [
-        //
+        // No longer the default, which is what used to register it, and still what `list` should be.
+        SummaryCommand::class,
     ],
 
     /*
@@ -67,6 +69,7 @@ return [
     */
 
     'hidden' => [
+        HomeCommand::class,
         McpReaderCommand::class,
         SummaryCommand::class,
         DumpCompletionCommand::class,
