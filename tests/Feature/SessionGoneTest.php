@@ -330,7 +330,7 @@ it('writes only the reply to the refused call to stdout while ending', function 
 
     expect($replies)->toHaveCount(1)
         ->and($replies[0]['id'])->toBe(1)
-        ->and($replies[0]['error']['code'])->toBe(-32002);
+        ->and(goneError($replies[0])['code'])->toBe(-32002);
 });
 
 it('ends a session the service has already discarded without a second error', function (): void {
@@ -774,9 +774,40 @@ function goneReplies($out): array
 {
     rewind($out);
 
-    $lines = array_filter(explode("\n", (string) stream_get_contents($out)), static fn (string $line): bool => $line !== '');
+    $replies = [];
 
-    return array_values(array_map(static fn (string $line): array => json_decode($line, true, 512, JSON_THROW_ON_ERROR), $lines));
+    foreach (explode("\n", (string) stream_get_contents($out)) as $line) {
+        if ($line === '') {
+            continue;
+        }
+
+        $reply = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+
+        if (! is_array($reply)) {
+            throw new RuntimeException('The bridge wrote a line that is not a JSON-RPC message: '.$line);
+        }
+
+        $replies[] = $reply;
+    }
+
+    return $replies;
+}
+
+/**
+ * The error a reply carries, which it must.
+ *
+ * @param  array<array-key, mixed>  $reply  One decoded reply.
+ * @return array{code: int, message: string}
+ */
+function goneError(array $reply): array
+{
+    $error = $reply['error'] ?? null;
+
+    if (! is_array($error) || ! is_int($error['code'] ?? null) || ! is_string($error['message'] ?? null)) {
+        throw new RuntimeException('The reply is not a JSON-RPC error: '.json_encode($reply));
+    }
+
+    return ['code' => $error['code'], 'message' => $error['message']];
 }
 
 it('answers every call read after the fleet ended the session with why, one per id', function (): void {
@@ -798,8 +829,8 @@ it('answers every call read after the fleet ended the session with why, one per 
 
     foreach ($replies as $reply) {
         // The same sentence the next turn reads from the sink, not the pre-join refusal's words.
-        expect($reply['error']['code'])->toBe(-32002)
-            ->and($reply['error']['message'])->toBe($record)
+        expect(goneError($reply)['code'])->toBe(-32002)
+            ->and(goneError($reply)['message'])->toBe($record)
             ->toContain('The fleet ended session '.GONE_SESSION)
             ->not->toContain('has not joined');
     }
@@ -838,7 +869,7 @@ it('still gives an ordinary reply to a call the fleet answered before the ending
     expect($replies)->toHaveCount(2)
         ->and($replies[0])->toBe(['jsonrpc' => '2.0', 'id' => 1, 'result' => ['content' => []]])
         ->and($replies[1]['id'])->toBe(2)
-        ->and($replies[1]['error']['message'])->toContain('The fleet ended session '.GONE_SESSION);
+        ->and(goneError($replies[1])['message'])->toContain('The fleet ended session '.GONE_SESSION);
 });
 
 it('answers no notification read after the ending, nor a request whose id MCP forbids', function (): void {
@@ -883,7 +914,7 @@ it('answers a call still waiting in the pipe when the ending was found, not only
     $replies = goneReplies($out);
 
     expect(array_column($replies, 'id'))->toBe([1, 2])
-        ->and($replies[1]['error']['message'])->toContain('The fleet ended session '.GONE_SESSION)
+        ->and(goneError($replies[1])['message'])->toContain('The fleet ended session '.GONE_SESSION)
 
         // Answered here, not sent to a fleet that has already ended the session.
         ->and(goneForwarded())->toBe(1);
@@ -904,7 +935,7 @@ it('answers `join` after the ending with why, not with the session it held stayi
     $join = goneReplies($out)[1];
 
     expect($join['id'])->toBe(2)
-        ->and($join['error']['message'])->toContain('The fleet ended session '.GONE_SESSION)
+        ->and(goneError($join)['message'])->toContain('The fleet ended session '.GONE_SESSION)
         ->and(json_encode($join, JSON_THROW_ON_ERROR))->not->toContain('stays open');
 });
 
