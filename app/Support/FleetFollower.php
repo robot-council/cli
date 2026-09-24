@@ -73,6 +73,16 @@ final class FleetFollower
     ];
 
     /**
+     * The presence types that name a session rather than being caused by it.
+     *
+     * **`session.resumed` is deliberately absent.** A session resumes by contacting the service, so
+     * it IS the actor there, and hearing about its own resumption would be telling an agent what it
+     * just did. Only the sweep writes `session.stale` and `session.gone`, and the sweep is not a
+     * session.
+     */
+    private const array OWN_PRESENCE = ['session.stale', 'session.gone'];
+
+    /**
      * Where the feed has been read to.
      */
     private ?int $cursor;
@@ -351,11 +361,31 @@ final class FleetFollower
      */
     private function concerns(array $event): bool
     {
+        $type = $this->type($event);
+
+        // **This session's own presence, decided BEFORE the discard below rather than after it,
+        // and that order is the whole fix** (#147).
+        //
+        // `robot-council/core` records a presence event against the session it is **about**, not
+        // against the actor that decided it: `Support\SessionPresence` passes the session itself to
+        // `FleetEvents::record()`, `Support\FleetFeed::describe()` serializes that column as
+        // `actor.session_id`, and the sweep contributes no session id anywhere. So "authored by
+        // this session" and "about this session" are one field, and the discard below reads it as
+        // the first.
+        //
+        // Placed after that discard, this branch was **unreachable**: every input that satisfies it
+        // had already returned false, and the test that covered it asserted the unreachable outcome
+        // under a title describing the intended one. A `stale` session is recoverable and a `gone`
+        // one is not -- core refuses its tokens, releases its claims and drops its locks -- so both
+        // are exactly what the agent holding those claims has to hear.
+        if (\in_array($type, self::OWN_PRESENCE, true)
+            && $this->actor($event) === $this->session->id()) {
+            return true;
+        }
+
         if ($this->actor($event) === $this->session->id()) {
             return false;
         }
-
-        $type = $this->type($event);
 
         if (\in_array($type, self::ALWAYS, true)) {
             return true;
@@ -379,12 +409,6 @@ final class FleetFollower
         // A lease this session held, taken from it.
         if (\in_array($type, ['lock.taken_over', 'lock.force_released'], true)
             && $this->metaInt($event, 'taken_from') === $this->session->id()) {
-            return true;
-        }
-
-        // This session's own presence, decided by the sweep rather than by it.
-        if (\in_array($type, ['session.stale', 'session.gone'], true)
-            && $this->sessionId($event) === $this->session->id()) {
             return true;
         }
 
@@ -436,16 +460,6 @@ final class FleetFollower
         }
 
         return \is_int($actor['session_id'] ?? null) ? $actor['session_id'] : null;
-    }
-
-    /**
-     * The session an event is about, which for a presence event is its subject.
-     *
-     * @param  array<array-key, mixed>  $event  The event.
-     */
-    private function sessionId(array $event): ?int
-    {
-        return $this->actor($event);
     }
 
     /**

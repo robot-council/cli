@@ -56,6 +56,34 @@ function feedEvent(string $type, ?int $actor = THEIRS, array $meta = [], string 
 }
 
 /**
+ * How many times `followed()` has been called in the current test.
+ *
+ * **`Http::fake()` MERGES its stubs into the ones already registered**, so a second `followed()` in
+ * one test leaves the first call's events stub matching first -- and returns the FIRST
+ * call's events under the second call's name. Measured twice: here while building #147, where it
+ * returned a plausible wrong answer, and in `EnrollCommandTest` while building #146, where the same
+ * merge left an exhausted `Http::sequence` matching and the run exited 1. The loud failure is the
+ * lucky one; this makes the quiet one loud as well.
+ *
+ * A counter reset in `beforeEach` rather than a key taken from the test's name: `test()->name()` is
+ * `@internal` to PHPUnit and untyped through Pest's proxy, so PHPStan refuses it at `max`.
+ *
+ * @param  bool  $reset  Whether to zero the count rather than increment it.
+ * @return int The number of calls so far in this test, after this one.
+ */
+function followedCalls(bool $reset = false): int
+{
+    /** @var int $count */
+    static $count = 0;
+
+    if ($reset) {
+        return $count = 0;
+    }
+
+    return ++$count;
+}
+
+/**
  * Run one tick of a follower over a feed page, and hand back what it left in the sink.
  *
  * @param  list<array<string, mixed>>  $events  The page the service answers with.
@@ -64,6 +92,13 @@ function feedEvent(string $type, ?int $actor = THEIRS, array $meta = [], string 
  */
 function followed(array $events, array $abilities = []): array
 {
+    if (followedCalls() > 1) {
+        throw new RuntimeException(
+            'followed() was called twice in one test. Http::fake() merges stubs, so this call would '.
+            "be served the first call's events. Pass every event to a single call instead."
+        );
+    }
+
     Http::fake([
         // **`abilities` is what the deployment actually returns**, and this fake omitted it until
         // cli#116. Harmless while nothing read the field; not harmless once a gate depends on it,
@@ -91,6 +126,8 @@ function followed(array $events, array $abilities = []): array
 
 beforeEach(function (): void {
     Http::preventStrayRequests();
+
+    followedCalls(reset: true);
 
     // A directory this test owns. Without it the sink lands in the real `~/.local/state`, and a
     // test suite that writes into a developer's home is a test suite nobody runs twice.
@@ -171,13 +208,41 @@ it('ignores a lease taken from somebody else', function (): void {
         ->toBeEmpty();
 });
 
-it('leaves this session being marked gone by the sweep', function (): void {
-    expect(followed([feedEvent('session.gone', actor: MINE)]))->toBeEmpty();
+it('hands this session its own stale and gone, which the sweep decided rather than it', function (): void {
+    // **The shape `robot-council/core` actually serializes**, which is what the version of this test
+    // before #147 got wrong. `Support\SessionPresence` records a presence event against the session
+    // it is ABOUT, so `Support\FleetFeed::describe()` puts that session's id in `actor.session_id`
+    // -- the sweep contributes no id anywhere. The old fixture used `actor: null`, a shape no
+    // service produces, so it exercised the fixture rather than the service, and its sibling
+    // asserted the event was discarded under a title saying it was delivered.
+    //
+    // A `stale` session is recoverable and a `gone` one is not: core refuses its tokens, releases
+    // its claims and drops its locks. Both are what the agent holding those claims has to hear.
+    expect(array_column(followed([
+        feedEvent('session.stale', actor: MINE),
+        feedEvent('session.gone', actor: MINE),
+    ]), 'type'))->toBe(['session.stale', 'session.gone']);
+});
 
-    // The sweep is not this session, so a presence event about it carries somebody else's actor
-    // only when the service says so. What must never happen is the session's own action waking it,
-    // which the assertion above pins; a sweep-authored one is the case below.
-    expect(followed([feedEvent('session.stale', actor: null)]))->toBeEmpty();
+it('still discards everything this session genuinely authored', function (): void {
+    // The other side of the branch added by #147, and the reason it is keyed on the TYPE rather
+    // than on the actor alone: the discard it now runs ahead of is what stops an agent being told
+    // what it just did, and only the two presence types are decided by somebody else.
+    expect(followed([
+        feedEvent('task.claimed', actor: MINE),
+        feedEvent('task.completed', actor: MINE),
+        feedEvent('narration', actor: MINE),
+        feedEvent('session.resumed', actor: MINE),
+    ]))->toBeEmpty();
+});
+
+it('still discards another session being marked stale or gone, for a session with no ability', function (): void {
+    // The new branch is scoped to THIS session. Another session's presence reaches a coordinator
+    // and nobody else, which is what #116 built and what the test below pins from the other side.
+    expect(followed([
+        feedEvent('session.stale', actor: THEIRS),
+        feedEvent('session.gone', actor: THEIRS),
+    ]))->toBeEmpty();
 });
 
 it('ignores narration, which is not something to act on', function (): void {
@@ -236,13 +301,19 @@ it("hands the fleet's activity to a session holding coordinator:direct", functio
         ->and(array_column($kept, 'type'))->toBe(['session.gone', 'task.created', 'lock.acquired']);
 });
 
-it('does not hand a coordinator its own events back', function (): void {
-    // The own-actor exclusion is the first thing `concerns()` checks and the coordinator branch is
-    // the last, so a branch that answered before it would be invisible to every other test here.
-    expect(followed([
+it('does not hand a coordinator its own events back, except its own presence', function (): void {
+    // The own-actor exclusion is the second thing `concerns()` checks and the coordinator branch is
+    // the last, so a branch that answered between them would be invisible to every other test here.
+    //
+    // **`session.gone` moved out of this assertion in #147 and that is the change, not a
+    // relaxation.** A coordinator was being told about every other session going stale while never
+    // being told about itself, because a presence event names the session it is about and the
+    // discard read that as authorship. What a coordinator still does not get back is what it did.
+    expect(array_column(followed([
         feedEvent('task.created', actor: MINE),
+        feedEvent('narration', actor: MINE),
         feedEvent('session.gone', actor: MINE),
-    ], ['coordinator:direct']))->toBeEmpty();
+    ], ['coordinator:direct']), 'type'))->toBe(['session.gone']);
 });
 
 it("does not hand a coordinator another developer's narration", function (): void {
