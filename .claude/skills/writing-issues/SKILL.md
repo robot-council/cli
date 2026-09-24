@@ -60,6 +60,12 @@ inline argument (the failure is intermittent, so an inline body looks fine until
 it). The REST form keeps working when the GraphQL quota behind `gh issue` is spent (see
 [`github-api-budget`](../../rules/github-api-budget.md)):
 
+**`{owner}` and `{repo}` are literal.** `gh` fills them from the checkout, so these act on the
+repository you are in rather than one named here -- which matters because most of them are
+**writes**. Keep the quotes: PowerShell parses an unquoted `{…}` as a script block and splits the
+argument. The mechanism and its bounds are in
+[`writing-pull-requests`](../writing-pull-requests/SKILL.md).
+
 ```bash
 gh api -X POST 'repos/{owner}/{repo}/issues' -f title='…' -F body=@body.md -f 'labels[]=<existing-label>'
 gh api -X PATCH 'repos/{owner}/{repo}/issues/<n>' -F body=@body.md
@@ -321,9 +327,9 @@ Run a few searches with varied terms and **include closed issues** (a fixed or w
 means *don't* refile):
 
 ```bash
-gh api "search/issues?q=repo:robot-council/core+<symptom or feature>&per_page=100" --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
-gh api "search/issues?q=repo:robot-council/core+<affected file / class / config key>&per_page=100" --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
-gh api "search/issues?q=repo:robot-council/core+<class of problem or label>&per_page=100" --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
+gh api 'search/issues?q=repo:{owner}/{repo}+<symptom or feature>&per_page=100' --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
+gh api 'search/issues?q=repo:{owner}/{repo}+<affected file / class / config key>&per_page=100' --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
+gh api 'search/issues?q=repo:{owner}/{repo}+<class of problem or label>&per_page=100' --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
 ```
 
 **Read the `matches:` line before the rows.** `search/issues` returns one page, so a query broader than the page size is answered with a silent prefix, and the truncated output is identical in shape to a query that genuinely found everything. In `UAMS-Web/uams-statamic` (measured 2026-09-06) a broad query reported hundreds of matches while a narrow one reported single digits, and nothing but the total distinguished the truncated page from the complete one.
@@ -348,15 +354,16 @@ Two issues were filed on the strength of that line. Re-run afterwards with a wor
 # means the instrument is broken and the second line says nothing about the world.
 for q in "robot-council" "<symptom or feature>"; do
   printf '%s -> ' "$q"
-  gh api "search/issues?q=repo:robot-council/core+$q&per_page=100" --jq '"matches: \(.total_count)"'
+  gh api "search/issues?q=repo:{owner}/{repo}+$q&per_page=100" --jq '"matches: \(.total_count)"'
 done
 ```
 
 Read the control's total first. If it is `0`, or the line is missing entirely, stop — nothing below it is evidence. This is [`an-empty-result-is-not-evidence`](../../rules/an-empty-result-is-not-evidence.md) applied to the duplicate check; that rule owns the general form and the reasoning, and is not restated here.
 
 Vary the terms across the symptom, the affected file/class/config key, and the class of problem —
-one query rarely surfaces a differently-worded duplicate. For work that spans repositories, search
-the other repository too (swap the `repo:` qualifier). If anything plausibly covers the concept:
+one query rarely surfaces a differently-worded duplicate. **The `repo:` qualifier above takes
+`{owner}` and `{repo}` from the checkout**, so these search the repository you are in; for work
+that spans repositories, name the other one explicitly in a further query. If anything plausibly covers the concept:
 **link it and skip**, or add a comment / sharpen the existing issue — don't open a duplicate. Only
 file once you've confirmed nothing matches.
 

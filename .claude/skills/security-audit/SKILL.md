@@ -179,7 +179,7 @@ administrator or security manager of the repository, and a classic token needs t
 3. **Create the draft** and give the user its URL:
 
    ```bash
-   gh api -X POST 'repos/{owner}/{repo}/security-advisories' --input build/security-advisory-<short-slug>.json --jq '.html_url'
+   gh api -X POST 'repos/{owner}/{repo}/security-advisories' --input 'build/security-advisory-<short-slug>.json' --jq '.html_url'
    ```
 
    If the call fails (a permission or scope error, or a validation error), do **not** fall back to
