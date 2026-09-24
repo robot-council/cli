@@ -588,8 +588,14 @@ final class Bridge
 
             // **And to the agent, as the answer to its call** (#245). The bridge carries on, so
             // without a reply the harness waits on this id until its own timeout, which is worse
-            // than a closed connection: nothing ever closes.
-            $this->failCall($message, $out, $throwable->getMessage());
+            // than a closed connection: nothing ever closes. Guarded, because the failure may BE
+            // stdout -- a broken pipe -- and the answer then cannot be written either; letting that
+            // second failure escape would stop a loop that used to carry on.
+            try {
+                $this->failCall($message, $out, $throwable->getMessage());
+            } catch (Throwable) {
+                // Already said on stderr above; there is nowhere else to say it.
+            }
         }
     }
 
@@ -769,7 +775,16 @@ final class Bridge
             $next = clone $request;
             $next->params = $nextParams;
 
-            $following = $this->toolPage(json_decode(trim($this->exchange($session, (string) json_encode($next, JSON_UNESCAPED_SLASHES)))));
+            // **A later page that fails keeps the first**, as every other surprise here does: the
+            // session-ended news still ends the loop, but a timeout on page two must not cost the
+            // agent the tools page one already listed (#245's review).
+            try {
+                $following = $this->toolPage(json_decode(trim($this->exchange($session, (string) json_encode($next, JSON_UNESCAPED_SLASHES)))));
+            } catch (SessionHasGone $gone) {
+                throw $gone;
+            } catch (Throwable) {
+                return $first;
+            }
 
             if ($following === null) {
                 return $first;
@@ -1189,7 +1204,9 @@ final class Bridge
      */
     private function encode(array $message): string
     {
-        $encoded = json_encode($message, JSON_UNESCAPED_SLASHES);
+        // Invalid UTF-8 substituted rather than refused: a reason read from an exception may carry
+        // a stray byte, and refusing it would answer with a null id the harness cannot match.
+        $encoded = json_encode($message, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
 
         if ($encoded !== false) {
             return $encoded;
@@ -1232,7 +1249,10 @@ final class Bridge
      * Write a tool result carrying one sentence.
      *
      * **`isError` rather than a JSON-RPC error**, so the agent reads the sentence: a protocol error
-     * is the harness's to handle, and most report it as a failed call without the text.
+     * is the harness's to handle, and most report it as a failed call without the text. Used for
+     * the answers the bridge chooses to give, such as `join`'s. A call the bridge could not serve
+     * at all -- the session ended (#226), or the fleet could not be reached (#245) -- gets a
+     * JSON-RPC error instead, as #221 decided: there is no tool result to report.
      *
      * @param  resource  $out  Where protocol messages go.
      */
