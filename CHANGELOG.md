@@ -4,6 +4,41 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.0 — Roles Reach the Bridge (2026-09-24)
+
+Roles reach the bridge: a session renews when its role changes, hears when the sweep marks it stale or gone, and a coordinator now sees the whole fleet's roles.
+
+### What's new
+- Let a coordinating session hear another session's role change [#159](https://github.com/robot-council/cli/pull/159)
+- Renew when this session's role changes [#149](https://github.com/robot-council/cli/pull/149)
+- Let a session holding `coordinator:direct` hear about other sessions [#120](https://github.com/robot-council/cli/pull/120)
+- Send the repository and work location read from the checkout [#136](https://github.com/robot-council/cli/pull/136)
+- Derive the repository and work location from the checkout [#132](https://github.com/robot-council/cli/pull/132)
+- Say when nothing on the fleet can reach a waiting agent [#121](https://github.com/robot-council/cli/pull/121)
+
+### What's fixed
+- Tell a session the sweep marked it stale or gone [#158](https://github.com/robot-council/cli/pull/158)
+- Stop reading `granted_abilities` from the enrollment response [#152](https://github.com/robot-council/cli/pull/152)
+- Say which role a fleet is missing, not which ability [#144](https://github.com/robot-council/cli/pull/144)
+- Start the reader without a shell on POSIX too [#145](https://github.com/robot-council/cli/pull/145)
+- Count the session ending, and bound stopping the reader [#143](https://github.com/robot-council/cli/pull/143)
+- Read stdin in a child so the bridge ticks while an agent is idle [#138](https://github.com/robot-council/cli/pull/138)
+- Match the segment shapes core enforces, which tightened before it merged [#135](https://github.com/robot-council/cli/pull/135)
+- Align the work identity bounds with the ones core enforces [#134](https://github.com/robot-council/cli/pull/134)
+- Bind `advapi32` once per process, so a struct cannot outlive its type [#123](https://github.com/robot-council/cli/pull/123)
+- Say why a process could not be started, instead of only that it could not [#119](https://github.com/robot-council/cli/pull/119)
+- Read the legacy credential once per refusal, not twice [#110](https://github.com/robot-council/cli/pull/110)
+- Answer a multi-key credential read in one `powershell.exe` invocation [#109](https://github.com/robot-council/cli/pull/109)
+- Report the installed version, not `unreleased` [#107](https://github.com/robot-council/cli/pull/107)
+
+### Maintenance and tooling
+- Take the pull-request skill from `robot-council/core` verbatim [#154](https://github.com/robot-council/cli/pull/154)
+- Say that delivery needs somebody to hold `coordinator:direct` [#114](https://github.com/robot-council/cli/pull/114)
+- Execute the message `adopt()` gives when the cleanup cannot be checked [#108](https://github.com/robot-council/cli/pull/108)
+- Let the mutation script run to completion [#106](https://github.com/robot-council/cli/pull/106)
+- Require a batch to key each entry by the key it answers for [#105](https://github.com/robot-council/cli/pull/105)
+- Document the published install, and what a pre-release flag does not do [#102](https://github.com/robot-council/cli/pull/102)
+
 ## v0.2.0 — The Fleet Follower and the Stop-Hook Handoff (2026-09-22)
 
 The bridge now follows the fleet feed, keeps what concerns this session in a sink, and every supported harness has a documented stop hook that hands those events to the agent at a turn boundary.
