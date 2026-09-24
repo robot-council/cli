@@ -112,8 +112,6 @@ jobs:
       - name: Run Rector (dry run)
         run: vendor/bin/rector --dry-run --no-progress-bar
 
-  # The one check the `main` ruleset requires. It always runs, and it passes only when every
-  # job above succeeded, so a failed, cancelled, or skipped job all block the merge.
   generator:
     name: generator (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
@@ -137,6 +135,8 @@ jobs:
       - name: Run the release generator's tests
         run: python3 -m unittest discover -s .claude/skills/writing-release-notes -v
 
+  # The one check the `main` ruleset requires. It always runs, and it passes only when every
+  # job above succeeded, so a failed, cancelled, or skipped job all block the merge.
   ci-passed:
     name: ci-passed
     if: always()
