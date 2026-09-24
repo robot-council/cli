@@ -93,6 +93,14 @@ final class Bridge
     public const int READ_BYTES = 65536;
 
     /**
+     * How many reads the bridge makes, after the fleet ends its session, of what stdin already holds.
+     *
+     * Bounded because a harness still writing would otherwise keep a stopping bridge reading; at
+     * `READ_BYTES` each this is 4 MiB, far past anything a harness has queued.
+     */
+    public const int ENDING_READS = 64;
+
+    /**
      * The capability that makes Claude Code treat this server as a channel.
      *
      * Declared by the bridge rather than by the service, because the notice originates here: the
@@ -462,24 +470,71 @@ final class Bridge
 
                 $buffer .= $chunk;
 
-                // **Read by chunk and split here, never `fgets`.** `stream_select` reports a stream
-                // readable when ANY bytes have arrived, not a whole line, and on a non-blocking
-                // stream `fgets` hands back whatever is there. Measured: a 200,065-byte
-                // `tools/call` arrived as 24 fragments at the socket buffer's 8,192 bytes, and
-                // every one was forwarded as its own malformed request -- 0 valid messages of 24.
-                // A message only leaves here once its terminating newline has.
-                while (($break = strpos($buffer, "\n")) !== false) {
-                    $line = trim(substr($buffer, 0, $break));
-
-                    $buffer = substr($buffer, $break + 1);
-
-                    if ($line !== '') {
-                        $this->forward($line, $out, $diagnostic);
-                    }
-                }
+                $this->forwardLines($buffer, $out, $diagnostic);
             }
 
             $this->periodic($out, $diagnostic);
+        }
+
+        if ($this->sessionEnded) {
+            $this->answerWhatIsWaiting($in, $buffer, $out, $diagnostic);
+        }
+    }
+
+    /**
+     * Forward every complete line in the buffer, leaving any partial one.
+     *
+     * **Read by chunk and split here, never `fgets`.** `stream_select` reports a stream readable
+     * when ANY bytes have arrived, not a whole line, and on a non-blocking stream `fgets` hands back
+     * whatever is there. Measured: a 200,065-byte `tools/call` arrived as 24 fragments at the socket
+     * buffer's 8,192 bytes, and every one was forwarded as its own malformed request -- 0 valid
+     * messages of 24. A message only leaves here once its terminating newline has.
+     *
+     * @param  string  $buffer  What has been read and not yet forwarded, consumed in place.
+     * @param  resource  $out  Where responses go.
+     * @param  callable(string):void  $diagnostic  Where anything else goes.
+     */
+    private function forwardLines(string &$buffer, $out, callable $diagnostic): void
+    {
+        while (($break = strpos($buffer, "\n")) !== false) {
+            $line = trim(substr($buffer, 0, $break));
+
+            $buffer = substr($buffer, $break + 1);
+
+            if ($line !== '') {
+                $this->forward($line, $out, $diagnostic);
+            }
+        }
+    }
+
+    /**
+     * Answer what stdin already holds, once the fleet has ended the session.
+     *
+     * **A call the harness wrote while the ending was being discovered is still in the pipe**, not
+     * in the buffer: a harness sending calls concurrently writes the next while the first is
+     * waiting on the fleet. The loop stops without reading it, and the harness then fails it with
+     * a generic `Connection closed` instead of the reason (#226). So read what is already there,
+     * without waiting for more -- the stream is non-blocking, so an empty read means nothing is
+     * waiting -- and answer it the way `forward()` answers everything after the ending. A partial
+     * line at the end is left: it is not a request yet.
+     *
+     * @param  resource  $in  The harness's stdin.
+     * @param  string  $buffer  What has been read and not yet forwarded.
+     * @param  resource  $out  Where responses go.
+     * @param  callable(string):void  $diagnostic  Where anything else goes.
+     */
+    private function answerWhatIsWaiting($in, string $buffer, $out, callable $diagnostic): void
+    {
+        for ($reads = 0; $reads < self::ENDING_READS; $reads++) {
+            $chunk = fread($in, self::READ_BYTES);
+
+            if ($chunk === false || $chunk === '') {
+                return;
+            }
+
+            $buffer .= $chunk;
+
+            $this->forwardLines($buffer, $out, $diagnostic);
         }
     }
 
@@ -543,9 +598,9 @@ final class Bridge
      *
      * `-32002`, the code the pre-join refusal uses, since both mean there is no session to serve
      * the call, but never that refusal's words: this bridge did join, and `join` will not help. A
-     * notification carries no id and is answered by nothing, as everywhere else. A batch is not
-     * answered either -- MCP removed batching in 2025-06-18, and no harness this bridge serves
-     * sends one.
+     * notification carries no id and is answered by nothing, as everywhere else, and neither is a
+     * response the client sent. A batch is not answered either -- MCP removed batching in
+     * 2025-06-18, and no harness this bridge serves sends one.
      *
      * @param  string  $message  One JSON-RPC message, as the harness wrote it.
      * @param  resource  $out  Where protocol messages go.
@@ -554,7 +609,9 @@ final class Bridge
     {
         $decoded = json_decode($message, true);
 
-        if (! \is_array($decoded) || array_is_list($decoded) || ! \array_key_exists('id', $decoded)) {
+        // A list never carries an `id` key, so a batch falls out here too. And no `method` means a
+        // RESPONSE from the client, which JSON-RPC forbids answering.
+        if (! \is_array($decoded) || ! \array_key_exists('id', $decoded) || ! \array_key_exists('method', $decoded)) {
             return;
         }
 
@@ -828,6 +885,14 @@ final class Bridge
         }
 
         if ($method === 'tools/call' && \is_array($decoded['params'] ?? null) && ($decoded['params']['name'] ?? null) === self::JOIN_TOOL) {
+            // **After an ending, `join` gets the reason, not `callJoin()`'s answer**, which would say
+            // the session this bridge holds stays open -- the one thing no longer true.
+            if ($this->sessionEnded) {
+                $this->refuseAfterTheEnding($message, $out);
+
+                return true;
+            }
+
             $this->callJoin($out, $id, $decoded['params']['arguments'] ?? null, $diagnostic);
 
             return true;

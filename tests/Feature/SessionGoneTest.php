@@ -322,7 +322,7 @@ it('writes only the reply to the refused call to stdout while ending', function 
     $out = tmpfile();
 
     new Bridge($session, GONE_SERVICE, 0)
-        ->run(goneStream(), $out, fn (string $m): null => null);
+        ->run(goneMessages([goneCall(1)]), $out, fn (string $m): null => null);
 
     // One protocol message, the answer to the one request, and nothing else: the shutdown notice
     // went to the diagnostic, because a harness parses this stream (#226 added the reply).
@@ -855,10 +855,57 @@ it('answers no notification read after the ending, nor a request whose id MCP fo
             // MCP requires a string or an integer id. A `null` one names no request to answer, and
             // an error sent with it would read to a client as a reply to something unparseable.
             ['jsonrpc' => '2.0', 'id' => null, 'method' => 'tools/call', 'params' => ['name' => 'task_list']],
+
+            // An id with no method is a RESPONSE from the client, which JSON-RPC forbids answering.
+            ['jsonrpc' => '2.0', 'id' => 4, 'result' => []],
             goneCall(8),
         ]), $out, fn (string $m): null => null);
 
     expect(array_column(goneReplies($out), 'id'))->toBe([7, 8]);
+});
+
+it('answers a call still waiting in the pipe when the ending was found, not only the buffer', function (): void {
+    // **A harness sending calls concurrently writes the next one while the first waits on the
+    // fleet**, so it is in the pipe rather than in the chunk the loop read. More than `READ_BYTES`
+    // of blank lines between the two puts the second past the first read, which is that shape.
+    goneService(renewStatus: 409, callStatus: 401);
+
+    $session = goneSession();
+    $out = tmpfile();
+    $in = tmpfile();
+
+    fwrite($in, json_encode(goneCall(1), JSON_THROW_ON_ERROR)."\n".str_repeat("\n", Bridge::READ_BYTES + 10).json_encode(goneCall(2), JSON_THROW_ON_ERROR)."\n");
+    rewind($in);
+
+    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+        ->run($in, $out, fn (string $m): null => null);
+
+    $replies = goneReplies($out);
+
+    expect(array_column($replies, 'id'))->toBe([1, 2])
+        ->and($replies[1]['error']['message'])->toContain('The fleet ended session '.GONE_SESSION)
+
+        // Answered here, not sent to a fleet that has already ended the session.
+        ->and(goneForwarded())->toBe(1);
+});
+
+it('answers `join` after the ending with why, not with the session it held staying open', function (): void {
+    goneService(renewStatus: 409, callStatus: 401);
+
+    $session = goneSession();
+    $out = tmpfile();
+
+    new Bridge($session, GONE_SERVICE, Bridge::HEARTBEAT_SECONDS, new FleetFollower($session, GONE_SERVICE, goneSink(), 0))
+        ->run(goneMessages([
+            goneCall(1),
+            ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/call', 'params' => ['name' => Bridge::JOIN_TOOL, 'arguments' => []]],
+        ]), $out, fn (string $m): null => null);
+
+    $join = goneReplies($out)[1];
+
+    expect($join['id'])->toBe(2)
+        ->and($join['error']['message'])->toContain('The fleet ended session '.GONE_SESSION)
+        ->and(json_encode($join, JSON_THROW_ON_ERROR))->not->toContain('stays open');
 });
 
 it('keeps the pre-join refusal in its own words', function (): void {
