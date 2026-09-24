@@ -327,14 +327,43 @@ Run a few searches with varied terms and **include closed issues** (a fixed or w
 means *don't* refile):
 
 ```bash
-gh api 'search/issues?q=repo:{owner}/{repo}+<symptom or feature>&per_page=100' --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
-gh api 'search/issues?q=repo:{owner}/{repo}+<affected file / class / config key>&per_page=100' --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
-gh api 'search/issues?q=repo:{owner}/{repo}+<class of problem or label>&per_page=100' --jq '"matches: \(.total_count) (showing \(.items|length))", (.items[] | "\(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")'
+# One block, because the control and the questions have to be the same instrument. The repository
+# is resolved from the checkout once; the terms go in `-f` FIELDS rather than into the URL, so `gh`
+# encodes them. `-X GET` because `gh api` sends POST as soon as a field is present, and `timeout`
+# because the failure mode here is a hang rather than an error -- both explained below.
+here=$(gh api 'repos/{owner}/{repo}' --jq .full_name)
+
+for q in "robot-council" "<symptom or feature>" "<affected file / class / config key>" "<class of problem or label>"; do
+  printf '%s -> ' "$q"
+  timeout 25 gh api -X GET search/issues -f q="repo:$here $q" -f per_page=100 \
+    --jq '"matches: \(.total_count) (showing \(.items|length))  from: \(.items[0].repository_url // "-" | sub(".*/repos/"; ""))",
+          (.items[] | "  \(if .pull_request then "PR " else "iss" end) #\(.number)  \(.title)")' \
+    || echo "NO ANSWER (rc=$?) -- not a clean check"
+done
+
+echo "checkout: $here   <- every from: above must equal this"
 ```
+
+**A search term written into the URL with a space in it HANGS**, which is why the terms are passed
+as fields. Measured on 2026-09-24 with `gh` 2.92.0: `gh api "search/issues?q=repo:…+two words"`
+never returns. `--verbose` shows why -- it sends `GET /search/issues?q=…+two words&per_page=1
+HTTP/1.1`, a request line with a raw space in it, and then waits for a reply that never comes. One
+such call ran **22 minutes** before it was killed by hand. It is not the search endpoint's fault
+and not `q`'s: the same raw space anywhere in a query string does it, measured with
+`repos/{owner}/{repo}/issues?labels=a b`. A space in the **path** is harmless by contrast --
+`repos/{owner}/{repo}/iss ues` answers `404` promptly. The hazard is that the placeholders above
+are phrases, so following the recipe literally is what triggers it.
+
+**`-f` costs the placeholders, and that is the reason `$here` exists.** `gh` substitutes `{owner}`
+and `{repo}` in a **path**, and in a field whose value is *exactly* the placeholder -- which is what
+`writing-pull-requests`'s GraphQL recipe relies on with `-F owner='{owner}'`. It does **not**
+substitute them inside a longer field value: measured, `-f q='repo:{owner}/{repo} term'` sends the
+braces literally and GitHub answers `Validation Failed`. So the repository is read once through the
+path form and interpolated as text.
 
 **Read the `matches:` line before the rows.** `search/issues` returns one page, so a query broader than the page size is answered with a silent prefix, and the truncated output is identical in shape to a query that genuinely found everything. In `UAMS-Web/uams-statamic` (measured 2026-09-06) a broad query reported hundreds of matches while a narrow one reported single digits, and nothing but the total distinguished the truncated page from the complete one.
 
-**A total greater than the rows shown means the check has not answered the question.** Either paginate (`&page=2`, until a short page) or narrow the query until the total fits — "nothing matches" is not a conclusion you can draw from a truncated page. **`incomplete_results` is not that signal**: it reports a server-side timeout, not pagination, and it is `false` on truncated responses.
+**A total greater than the rows shown means the check has not answered the question.** Either paginate (add `-f page=2`, until a short page) or narrow the query until the total fits — "nothing matches" is not a conclusion you can draw from a truncated page. **`incomplete_results` is not that signal**: it reports a server-side timeout, not pagination, and it is `false` on truncated responses.
 
 **`gh issue list` and `gh search issues` exclude pull requests; the REST search endpoint above does not.** That matters because a fix often ships as a pull request with no issue behind it, so the wrapper hides exactly the in-flight work the check exists to find — in `UAMS-Web/uams-statamic` (2026-09-05) a wrapper search returned the issue and never the pull request implementing it. The `.pull_request` key is what distinguishes the two kinds, hence the `PR`/`iss` prefix. The endpoint cannot phrase-match and it indexes comments; see [`github-api-budget`](../../rules/github-api-budget.md).
 
@@ -347,23 +376,23 @@ gh api 'search/issues?q=repo:{owner}/{repo}+<class of problem or label>&per_page
 
 Two issues were filed on the strength of that line. Re-run afterwards with a working parser the check was genuinely clean — so no duplicate was filed, but that was luck rather than method, and the same output would have appeared had there been ten.
 
-**So show the query finding something, in the same invocation, before reading it finding nothing.** A term certain to appear in the repository is enough, and it costs one call:
+**So show the query finding something, in the same invocation, before reading it finding nothing.** A term certain to appear in the repository is enough, and it costs one call.
 
-```bash
-# The control and the question, same endpoint, same --jq, same quoting. A zero on the first line
-# means the instrument is broken and the second line says nothing about the world.
-for q in "robot-council" "<symptom or feature>"; do
-  printf '%s -> ' "$q"
-  gh api "search/issues?q=repo:{owner}/{repo}+$q&per_page=100" --jq '"matches: \(.total_count)"'
-done
-```
+**A count is not enough on its own, and the control has to name the repository that answered.** A term common enough to be a reliable control is common enough to match in *either* repository, so a healthy total confirms the instrument while saying nothing about which tracker was asked — and a duplicate check aimed at the wrong one reads exactly like a clean one. Measured from a `robot-council/core` checkout on 2026-09-24: the term `robot-council` returned **197** matches aimed at this repository and **126** aimed at the other. Both look fine. `repository_url` off the first item is what tells them apart.
 
-Read the control's total first. If it is `0`, or the line is missing entirely, stop — nothing below it is evidence. This is [`an-empty-result-is-not-evidence`](../../rules/an-empty-result-is-not-evidence.md) applied to the duplicate check; that rule owns the general form and the reasoning, and is not restated here.
+That is why `robot-council` is the **first** term in the block above rather than a separate
+invocation: the control and the questions then share one endpoint, one `--jq`, one quoting and one
+bound, so nothing can differ between them except the term.
+
+Read the control's total and its `from:` first. If the total is `0`, if the line is missing entirely, or if `from:` is not this checkout, stop — nothing below it is evidence. This is [`an-empty-result-is-not-evidence`](../../rules/an-empty-result-is-not-evidence.md) applied to the duplicate check; that rule owns the general form and the reasoning, and is not restated here.
+
+**`from:` reads `-` when a query matches nothing**, which is the honest answer and not a failure: there is no item to take a repository from. That is why the total is read first — the two lines answer different questions.
 
 Vary the terms across the symptom, the affected file/class/config key, and the class of problem —
-one query rarely surfaces a differently-worded duplicate. **The `repo:` qualifier above takes
-`{owner}` and `{repo}` from the checkout**, so these search the repository you are in; for work
-that spans repositories, name the other one explicitly in a further query. If anything plausibly covers the concept:
+one query rarely surfaces a differently-worded duplicate. **The `repo:` qualifier above is `$here`,
+read from the checkout**, so these search the repository you are in; for work that spans
+repositories, substitute the other one for `$here` in a further query and expect its `from:` to name
+that repository rather than this one. If anything plausibly covers the concept:
 **link it and skip**, or add a comment / sharpen the existing issue — don't open a duplicate. Only
 file once you've confirmed nothing matches.
 
