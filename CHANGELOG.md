@@ -4,6 +4,27 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.5 — Only Its Own Commands (2026-09-24)
+
+An installed `robot-council` now offers only its own six commands, rather than Laravel Zero's development commands beside them.
+
+### What's fixed
+- Run an installed `robot-council` as `production`, so it offers only its own commands [#247](https://github.com/robot-council/cli/pull/247)
+
+## v0.4.4 — Telling an Agent Why Its Calls Stopped (2026-09-24)
+
+When the fleet ends a session, every tool call the bridge could no longer serve now gets an error saying why, instead of failing as a closed connection.
+
+### What's fixed
+- Answer every call read after the fleet ended the session with the reason [#246](https://github.com/robot-council/cli/pull/246)
+
+## v0.4.3 — Letting a Stopped Bridge Go (2026-09-24)
+
+A bridge stopped while another process holds its fleet event sink now exits after about two seconds and says why, instead of waiting on the lock indefinitely.
+
+### What's fixed
+- Stop the shutdown sink clear holding a bridge open behind a stuck lock [#244](https://github.com/robot-council/cli/pull/244)
+
 ## v0.4.2 — Installs That Can Reach the Fleet (2026-09-24)
 
 An install from Packagist can make HTTP requests again: every earlier release failed `enroll`, `mcp` and `api` at their first request, because a package they need arrived only through a development dependency.

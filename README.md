@@ -997,6 +997,8 @@ composer test:refactor   # Rector (dry run)
 ./robot-council about
 ```
 
+A checkout runs as `production`, the same as an install, so Laravel Zero's development commands are hidden. Add `--env=development` to reach them: `./robot-council --env=development make:command FooCommand`.
+
 ## License
 
 The MIT License (MIT). See [License File](LICENSE.md).
