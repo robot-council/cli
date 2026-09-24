@@ -25,12 +25,15 @@ and bound scope explicitly. There is no PR template in `.github/`; this skill is
 
 **It is one shared document, carried identically by `robot-council/core` and `robot-council/cli`,
 so it names no repository of its own.** The `gh` recipes take `{owner}` and `{repo}` from the
-checkout, link templates are written with `<owner>`/`<repo>` placeholders, and the one worked
-example that has to name real files says which repository they come from. A recipe that named a
-fixed repository would act on *that* one from either tree, and the assignee recipe below is a
-write — so the parameterization is a correctness property, not tidiness. Where the two
-repositories genuinely differ, such as the CI matrix, this file describes the contract rather
-than one repository's cells.
+checkout, link templates are written with `<owner>`/`<repo>` placeholders, and the worked example
+says which repository its files come from. A recipe that named a fixed repository would act on
+*that* one from either tree, and the assignee recipe below is a **write** — so parameterizing them
+is a correctness property, not tidiness. Where the two repositories genuinely differ, such as the
+CI jobs, this file states the contract and sends you to the tree you are in.
+
+Some illustrative identifiers elsewhere are still the package's — its dependency handles under
+`## Inline code markup`, for instance. They are examples of what to backtick rather than paths to
+open, and they are left as they are.
 
 ## Output format
 
@@ -58,13 +61,18 @@ holds for `gh pr edit <n> --body-file`.
     the package resolves dependencies fresh at `prefer-lowest` and `prefer-stable` because it
     commits no lockfile, while the application installs from a committed one — so read
     `.github/workflows/ci.yml` in the tree you are in rather than assuming a shape.
-  - `phpstan` — PHPStan.
+  - `phpstan` — PHPStan, run through `composer analyse`.
   - `pint` — `vendor/bin/pint --test`, which fails on a style problem and fixes nothing. Run
     `vendor/bin/pint --dirty` before pushing.
   - `rector` — `vendor/bin/rector --dry-run`, which fails when Rector would change a file. Run
     `composer refactor` before pushing, and review its changes.
-  - `ci-passed` — succeeds only when all four succeeded. It is the check the `main` ruleset
-    requires, alongside a pull request and a branch that is up to date with `main`.
+  - `ci-passed` — the single check the `main` ruleset requires, alongside a pull request and a
+    branch that is up to date with `main`. **It gates every other job in that tree's `ci.yml`, and
+    the two repositories do not have the same set.** Measured: the application's `needs` is
+    `[tests, phpstan, pint, rector]`, the package's is
+    `[tests, phpstan, pint, rector, postgres, mysql, stylesheet]`. So the four above are the common
+    subset, not the gate — read `needs:` in the tree you are in before saying what a green check
+    covers.
 - **A PR's checks describe its current head only.** After a push, or after syncing with `main`
   per [`sync-pr-branch`](../../rules/sync-pr-branch.md), read `ci-passed` again on the new head
   rather than trusting an earlier green.
@@ -77,7 +85,11 @@ holds for `gh pr edit <n> --body-file`.
 gh api -X POST 'repos/{owner}/{repo}/issues/<pr-number>' -f 'assignees[]=<login>'
 ```
 
-**`{owner}` and `{repo}` are literal, and `gh` fills them from the checkout you run in.** Written that way the recipe cannot act on another repository, which matters most here because this one is a **write**: a fixed repository name followed from the wrong tree assigns somebody to *that* repository's issue carrying the same number, and the call returns an ordinary success because the number exists in both trackers. Nothing in the result says which repository was touched. Keep the quotes — an unquoted `{…}` is a brace expansion to the shell.
+**`{owner}` and `{repo}` are literal, and `gh` fills them from the checkout you run in.** Written that way the recipe follows the tree rather than a name baked into it, which matters most here because this one is a **write**: a fixed repository name followed from the wrong tree assigns somebody to *that* repository's issue carrying the same number, and the call returns an ordinary success because the number exists in both trackers. Nothing in the result says which repository was touched.
+
+**The bound worth knowing:** `gh` resolves the placeholders from its notion of the *current* repository, which `GH_REPO` and `gh repo set-default` both move — measured, `GH_REPO=robot-council/core` redirects them from inside this checkout. So the recipe follows the checkout; it is not a guarantee that no other repository can be reached. Read the response's `repository_url` when it matters.
+
+**Keep the quotes, and not for the reason that looks obvious.** PowerShell parses an unquoted `{…}` as a script block and splits the argument into five, and an unquoted `<N>` is a redirection in `bash`. Both measured on Windows, where this repository's agents use either shell. **`bash` does not brace-expand `{owner}`** — that needs a comma or a range — so an agent reasoning only from the `bash` tag on the fence concludes the quotes are ornamental and drops them, and the recipe then breaks for whoever runs it in the other shell.
 
 The PR number works on the `issues` endpoint — GitHub treats pull requests as issues for labels, assignees and comments. **That endpoint replaces the assignee list; the sibling `…/issues/{n}/assignees` adds to it.** The two diverge only when a request omits somebody already assigned, so a hand-over written against the wrong one silently produces two assignees — the mechanics are in [`github-api-budget`](../../rules/github-api-budget.md).
 
@@ -286,9 +298,15 @@ inside it leaves only the pipeline's status.
 same text and only one of them decides:
 
 ```bash
-gh api graphql -f query='{repository(owner:"robot-council",name:"core"){pullRequest(number:<N>){closingIssuesReferences(first:20){nodes{number}}}}}' \
+gh api graphql -F owner='{owner}' -F repo='{repo}' -F pr=<N> \
+  -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){closingIssuesReferences(first:20){nodes{number}}}}}' \
   --jq '[.data.repository.pullRequest.closingIssuesReferences.nodes[].number] | sort | join(" ")'
 ```
+
+**The placeholders go in `-F` values, never inside the query string.** `gh` substitutes `{owner}`
+and `{repo}` in `-F` arguments, and does **not** substitute them inside `-f query=…` — a query with
+them written inline fails with `Could not resolve to a Repository with the name '{owner}/{repo}'`.
+Both measured. That is why this recipe takes variables where the REST ones take a path.
 
 That field reports what the **body** declares, so it is not a substitute for the scan — the plain-text
 path reads the commit messages and the title, which the field never sees. Two readers, both checked.
