@@ -101,6 +101,14 @@ final class Bridge
     public const array ROLES = ['build', 'ci', 'coordinator'];
 
     /**
+     * The most pages of `tools/list` the bridge follows before it gives up and relays the first.
+     *
+     * The fleet serves 18 tools at 15 a page, so two pages today; the bound only matters to a
+     * service that keeps answering with a new cursor.
+     */
+    public const int MAX_TOOL_PAGES = 10;
+
+    /**
      * The protocol version answered to a harness that offered none this bridge knows.
      */
     public const string PROTOCOL_VERSION = '2025-11-25';
@@ -223,12 +231,6 @@ final class Bridge
      * everything read from the fleet is data, never instructions -- would otherwise never arrive.
      */
     private ?string $fleetInstructions = null;
-
-    /**
-     * Whether a join happened before the harness finished initializing, so the list-changed notice
-     * is still owed.
-     */
-    private bool $listChangedOwed = false;
 
     /**
      * Ask the loop to finish after the message it is handling.
@@ -354,23 +356,9 @@ final class Bridge
         }
 
         try {
-            $response = $this->post($session, $message);
+            $response = $this->exchange($session, $message);
 
-            // One renewal and one retry on a 401, never a loop: a second consecutive refusal means
-            // the installation itself is revoked, and retrying forever would hide that
-            if ($response === 401) {
-                $session->renew();
-
-                $response = $this->post($session, $message);
-
-                if ($response === 401) {
-                    throw new RuntimeException('The service refused this session twice. The installation may have been revoked.');
-                }
-            }
-
-            if (\is_string($response)) {
-                $this->reply($response, $out, $diagnostic);
-            }
+            $this->reply($this->everyTool($session, $message, $response), $out, $diagnostic);
         } catch (SessionHasGone $gone) {
             // **The busy bridge's path to the same news.** A tool call is refused, the renewal above
             // answers `409`, and there is nothing to retry: this session's claims and locks are
@@ -384,6 +372,143 @@ final class Bridge
             // malformed protocol message rather than as an error
             $diagnostic($throwable->getMessage());
         }
+    }
+
+    /**
+     * Send one message to the fleet and return its answer, renewing once on a refusal.
+     *
+     * One renewal and one retry on a 401, never a loop: a second consecutive refusal means the
+     * installation itself is revoked, and retrying forever would hide that.
+     *
+     * @throws RuntimeException When the service refused the session twice.
+     */
+    private function exchange(Session $session, string $message): string
+    {
+        $response = $this->post($session, $message);
+
+        if ($response === 401) {
+            $session->renew();
+
+            $response = $this->post($session, $message);
+
+            if ($response === 401) {
+                throw new RuntimeException('The service refused this session twice. The installation may have been revoked.');
+            }
+        }
+
+        return (string) $response;
+    }
+
+    /**
+     * The whole tool list in one reply, when the harness asked for the first page and the fleet
+     * answered with more to come.
+     *
+     * **Because Cursor never asks for a second page (cli#209).** The fleet pages `tools/list` at
+     * 15 and returns a `nextCursor`; Cursor 3.17.19 did not follow it, so its agents never saw
+     * `events_narrate`, `directive_post` or `presence_heartbeat` -- a coordinator in Cursor could
+     * not post a directive. The bridge follows the cursor itself and answers once, with no cursor
+     * left, which a harness that does page reads as a list that happens to be complete.
+     *
+     * **A request that names a cursor is relayed as asked**, so a harness paging for itself still
+     * gets the page it asked for.
+     *
+     * **Decoded as objects, never as arrays.** Each tool's `inputSchema` holds empty objects such as
+     * `"properties":{}`, and an associative decode turns those into `[]` -- a different value, in the
+     * schema a harness validates calls against.
+     *
+     * **Anything unexpected returns the first page untouched**: a page that does not parse, a cursor
+     * that repeats, or more pages than `MAX_TOOL_PAGES`. A short list the harness can still use is
+     * better than no answer.
+     *
+     * @param  string  $message  The harness's request.
+     * @param  string  $first  The fleet's answer to it.
+     * @return string The reply to write.
+     */
+    private function everyTool(Session $session, string $message, string $first): string
+    {
+        $request = json_decode($message);
+
+        if (! $request instanceof stdClass || ($request->method ?? null) !== 'tools/list') {
+            return $first;
+        }
+
+        $params = $request->params ?? null;
+
+        if ($params instanceof stdClass && isset($params->cursor)) {
+            return $first;
+        }
+
+        $answer = json_decode(trim($first));
+        $page = $this->toolPage($answer);
+
+        if (! $answer instanceof stdClass || $page === null || $page['next'] === null) {
+            return $first;
+        }
+
+        $tools = $page['tools'];
+        $cursor = $page['next'];
+        $seen = [$cursor => true];
+
+        for ($asked = 1; $cursor !== null; $asked++) {
+            if ($asked >= self::MAX_TOOL_PAGES) {
+                return $first;
+            }
+
+            $nextParams = $params instanceof stdClass ? clone $params : new stdClass;
+            $nextParams->cursor = $cursor;
+
+            $next = clone $request;
+            $next->params = $nextParams;
+
+            $following = $this->toolPage(json_decode(trim($this->exchange($session, (string) json_encode($next, JSON_UNESCAPED_SLASHES)))));
+
+            if ($following === null) {
+                return $first;
+            }
+
+            $tools = [...$tools, ...$following['tools']];
+            $cursor = $following['next'];
+
+            if ($cursor !== null && isset($seen[$cursor])) {
+                return $first;
+            }
+
+            if ($cursor !== null) {
+                $seen[$cursor] = true;
+            }
+        }
+
+        $result = $answer->result;
+
+        if (! $result instanceof stdClass) {
+            return $first;
+        }
+
+        $result->tools = $tools;
+        unset($result->nextCursor);
+
+        $encoded = json_encode($answer, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+
+        return $encoded === false ? $first : $encoded;
+    }
+
+    /**
+     * One decoded `tools/list` answer's tools and next cursor, or null when it is not one.
+     *
+     * @param  mixed  $decoded  The answer, decoded as objects.
+     * @return array{tools: list<mixed>, next: string|null}|null
+     */
+    private function toolPage(mixed $decoded): ?array
+    {
+        $result = $decoded instanceof stdClass ? ($decoded->result ?? null) : null;
+
+        if (! $result instanceof stdClass || ! \is_array($result->tools ?? null)) {
+            return null;
+        }
+
+        $next = $result->nextCursor ?? null;
+
+        return ['tools' => array_values($result->tools), 'next' => \is_string($next) ? $next : null];
     }
 
     /**
@@ -466,11 +591,12 @@ final class Bridge
         if ($method === 'notifications/initialized') {
             $this->initialized = true;
 
-            if ($this->listChangedOwed) {
-                $this->listChangedOwed = false;
-
-                $this->notifyListChanged($out);
-            }
+            // **Every time, not only when something changed since (cli#208).** A harness may be
+            // holding a list from an earlier process of this server: Cursor, restarting a stopped
+            // bridge or reloading one, keeps the previous process's tools and does not ask again,
+            // so an agent that had joined was left offered the fleet's tools and not `join`, with
+            // every call refused. The notice makes it ask; one extra `tools/list` is the cost.
+            $this->notifyListChanged($out);
 
             return true;
         }
@@ -636,8 +762,11 @@ final class Bridge
         if ($outcome['joined']) {
             // Before the result, the order #126 measured: the harness re-reads the list at once,
             // and the agent can call a fleet tool in the same turn it joined in. A harness that has
-            // not finished initializing is told once it has, rather than not at all.
-            $this->initialized ? $this->notifyListChanged($out) : $this->listChangedOwed = true;
+            // not finished initializing is told when it does, by the notice every
+            // `notifications/initialized` is answered with.
+            if ($this->initialized) {
+                $this->notifyListChanged($out);
+            }
         }
 
         $this->toolResult($out, $id, $outcome['text'], ! $outcome['joined']);
