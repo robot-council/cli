@@ -53,8 +53,7 @@ return [
     */
 
     'add' => [
-        // No longer the default, which is what used to register it, and still what `list` should be.
-        SummaryCommand::class,
+        //
     ],
 
     /*
