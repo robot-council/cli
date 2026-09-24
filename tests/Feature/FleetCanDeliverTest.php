@@ -145,10 +145,21 @@ it('says what to do only when the fleet definitely cannot deliver', function ():
     $warning = FleetDelivery::warning(false);
 
     expect($warning)->toBeString()
-        // Names the ability and says who fixes it. A line that reported the state without the
-        // remedy would be read once and then ignored.
-        ->and($warning)->toContain('coordinator:direct')
-        ->and($warning)->toContain('robot-council:grant-ability')
+        // **Names a running session in a role, not an installation holding an ability.**
+        // `robot-council/core#222` moved `coordinator:direct` onto a session's role and
+        // `robot-council/core#223` moved this field to match, so the old wording described a
+        // mechanism that no longer decides anything.
+        ->and($warning)->toContain('coordinator')
+        ->and($warning)->toContain('running')
+        ->and($warning)->not->toContain('installation')
+        // **And does not send anybody to `robot-council:grant-ability`.** It writes a column no
+        // session's abilities are read from, so an operator following that advice would fix
+        // something and see nothing change. The administration page is where a role is decided.
+        ->and($warning)->not->toContain('grant-ability')
+        ->and($warning)->toContain('administration page')
+        // Says the reading is a snapshot, because the answer flips when the one coordinator
+        // restarts and this line is emitted once.
+        ->and($warning)->toContain('at startup')
         // **And claims only what is gated.** An earlier version ended "a stop hook here will never
         // find anything waiting", which `FleetFollower` refutes: it delivers `lock.taken_over` to
         // the session a lease was taken from, and an ordinary takeover needs only `locks:acquire`.

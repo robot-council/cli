@@ -112,15 +112,22 @@ final class McpCommand extends Command
         $this->listenForSignals($bridge);
 
         // **Said once, at startup, and only when the answer is a definite no.** A fleet can be wired
-        // correctly and still deliver nothing: `FleetFollower::ALWAYS` is `['directive']`, posting
-        // one needs `coordinator:direct`, and enrollment can never request it. So unless an admin
-        // has granted it to some installation, no directive can be posted at all -- and a hook that
-        // finds an empty sink cannot tell that from a fleet with nothing to say (cli#113).
+        // correctly and still deliver nothing: `FleetFollower::ALWAYS` is `['directive']`, and
+        // posting one needs the `coordinator` role, which an administrator gives a session and which
+        // no session starts with. So unless somebody is running as the coordinator, no directive can
+        // be posted -- and a hook that finds an empty sink cannot tell that from a fleet with
+        // nothing to say (cli#113).
         //
-        // **Not a warning about THIS session's abilities.** A bridge that only ever receives is
-        // correctly configured while holding none of `coordinator:direct`, which is the common
-        // case; warning on that would train people to ignore the line. `null` -- an older service,
-        // or a request that did not land -- says nothing at all.
+        // **A snapshot, not a standing property, since `robot-council/core#223`.** The field answers
+        // whether a coordinator is running *now* rather than whether one could ever exist, so it
+        // flips when the fleet's one coordinator restarts. Said once anyway, deliberately: the
+        // decision is recorded on that ticket, and a stale `false` is one line on stderr while the
+        // case `#113` exists for -- no coordinator running at startup -- still reports correctly.
+        //
+        // **Not a warning about THIS session's role.** A bridge that only ever receives runs as
+        // `build` and is correctly configured, which is the common case; warning on that would train
+        // people to ignore the line. `null` -- an older service, or a request that did not land --
+        // says nothing at all.
         //
         // **Placed after the signal handlers, and that position is deliberate.** It is a network
         // call, bounded by the client's default 10s connect and 30s read timeouts, and `end()` is
