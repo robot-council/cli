@@ -96,10 +96,18 @@ final class FleetFollower
      *
      * **`session.resumed` is deliberately absent.** A session resumes by contacting the service, so
      * it IS the actor there, and hearing about its own resumption would be telling an agent what it
-     * just did. Only the sweep writes `session.stale` and `session.gone`, and the sweep is not a
-     * session.
+     * just did. Only the sweep writes `session.stale`, and the sweep is not a session.
+     *
+     * **`session.gone` is absent too, because a session can never read its own (#175).** Core's
+     * `Support\SessionPresence::goesNow()` flips the status, records the event and deletes the
+     * session's tokens in one transaction, and `Http\Middleware\EnsureAgentSession` refuses a gone
+     * session outright -- so from the instant the event exists, this session's feed read is a 401,
+     * with no token left to retry it. Reaching it would take core reversing both. A gone session is
+     * learned from the renewal's `409` instead (`SessionHasGone`), the one endpoint that still
+     * answers. Another session's `session.gone` is readable, and reaches a coordinator through
+     * `COORDINATOR_HEARS`.
      */
-    private const array OWN_PRESENCE = ['session.stale', 'session.gone'];
+    private const array OWN_PRESENCE = ['session.stale'];
 
     /**
      * Where the feed has been read to.
@@ -507,9 +515,9 @@ final class FleetFollower
         //
         // Placed after that discard, this branch was **unreachable**: every input that satisfies it
         // had already returned false, and the test that covered it asserted the unreachable outcome
-        // under a title describing the intended one. A `stale` session is recoverable and a `gone`
-        // one is not -- core refuses its tokens, releases its claims and drops its locks -- so both
-        // are exactly what the agent holding those claims has to hear.
+        // under a title describing the intended one. A `stale` session is recoverable, which is
+        // exactly what the agent holding its claims has to hear. Its own `gone` never reaches this
+        // far; see `OWN_PRESENCE`.
         if (\in_array($type, self::OWN_PRESENCE, true)
             && $this->actor($event) === $this->session->id()) {
             return true;
