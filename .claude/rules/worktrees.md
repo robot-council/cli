@@ -36,12 +36,12 @@ This file is shared, byte for byte, by `robot-council/core` and `robot-council/c
 | `composer.lock` | **gitignored**: copy the primary's into the slot before `composer install` | committed: `composer install` alone |
 | npm | `npm ci` in every slot, whatever the ticket touches | none |
 | First-party namespace in `vendor/composer/autoload_static.php` | `RobotCouncil\` | `App\` |
-| Smoke test after provisioning | `npm run check` exits `0` | `./robot-council about` exits `0` |
+| Smoke test after provisioning | `npm run check && vendor/bin/pest --list-tests >/dev/null` exits `0` | `./robot-council about` exits `0` |
 | `delete_branch_on_merge` (read 2026-09-24) | `true`, which contradicts this rule (see *Never delete the remote branch*) | `false` |
 
 **They are siblings, not nested under `.claude/worktrees/`, for three reasons.** They sit outside the repository, so no ignore rule has to hold for them. A `grep -r` from the primary cannot descend into them. And a process's working directory attributes it to one tree: the separator-anchored allow-list in [`long-running-commands`](long-running-commands.md) claims every nested tree's processes from the primary, and needs an explicit exclusion to stop doing so, while a sibling never matches.
 
-**But the primary's path is a string prefix of both slots' paths**, and `core`'s is a prefix of every sibling repository's too, so the anchor is load-bearing. Measured 2026-09-24 by feeding each path to both forms of the `case`, with the primary's own path as the control:
+**But the primary's path is a string prefix of both slots' paths**, and `core`'s is a prefix of every sibling whose name starts with `robot-council`, cli's trees included, so the anchor is load-bearing. Measured 2026-09-24 by feeding each path to both forms of the `case`, with the primary's own path as the control:
 
 | `MY_TREE` | Path tested | `"$MY_TREE"\|"$MY_TREE"/*)` | `"$MY_TREE"*)` |
 | --- | --- | --- | --- |
@@ -73,7 +73,15 @@ git worktree list
 
 So a slot showing `(detached HEAD)` with a clean tree is **free**, and a slot on a branch is **held**, either by you earlier or by another session right now. Take **A** first and **B** second. If both are held and you hold neither, there are two live sessions. Do not evict one; take an ephemeral worktree. **A rebase or bisect in progress also shows `(detached HEAD)`**, so a detached slot with a `rebase-merge/`, `rebase-apply/`, or `BISECT_LOG` under `git -C "$SLOT" rev-parse --git-dir` is held, not free.
 
-In the commands below, `$SLOT` is the slot's **absolute** path. A relative `../<primary>-a` resolves against whatever the cwd happens to be, and the cwd is not reliable (see the hazards section). Each block is **one fail-closed chain**, so a failed guard stops the command that follows it rather than printing a warning above it.
+In the commands below, `$SLOT` is the slot's **absolute** path and `$PRIMARY` the primary's. A relative `../<primary>-a` resolves against whatever the cwd happens to be, and the cwd is not reliable (see the hazards section). Each block is **one fail-closed chain**, so a failed guard stops the command that follows it rather than printing a warning above it.
+
+**The lock step**, run inside a slot before every `composer install` there, is the same in both repositories:
+
+```bash
+{ git ls-files --error-unmatch composer.lock >/dev/null 2>&1 || cp "$PRIMARY/composer.lock" composer.lock; }
+```
+
+In `cli` the lock is tracked, so it does nothing. In `core` it is untracked, so the slot takes the primary's lock, and a primary with no lock makes the `cp` fail and stops the chain rather than letting `composer install` resolve fresh. It is for slots only: the primary is the tree whose lock the slots copy.
 
 **Claim a slot by branching from `origin/main`**, never from whatever the slot happens to be sitting on:
 
@@ -83,7 +91,8 @@ cd "$SLOT" &&
   test -z "$(git status --porcelain)" &&      # nothing a previous ticket left behind
   git fetch origin &&
   git switch --no-track -c <branch> origin/main &&
-  composer install &&                         # the refresh gate below, including core's lock step
+  { git ls-files --error-unmatch composer.lock >/dev/null 2>&1 || cp "$PRIMARY/composer.lock" composer.lock; } &&
+  composer install &&                         # the refresh gate below
   { [ ! -e package-lock.json ] || npm ci; }   # core only
 ```
 
@@ -140,15 +149,9 @@ A non-empty diff does not prove the branch did *not* land, since `main` may have
 
 This is the risk the slot model **introduces**, and it is worse than the one it removes. A fresh worktree fails *loudly*: no `vendor/`, hard error, you notice. A stale slot fails *silently*: the tests run, they pass, and they pass against the wrong dependency versions. In `UAMS-Web/uams-statamic`, a checkout's `vendor/` sat at Pest 4.7.5 while `composer.lock` pinned 5.0.1, and nothing said so.
 
-**So whenever a slot's base moves, run `composer install` before any check whose result you intend to trust.** The base moves when you claim the slot from a newer `origin/main`, or when you sync a branch per [`sync-pr-branch`](sync-pr-branch.md). `composer install` reconciles `vendor/` to exactly the lock, and it prints `Nothing to install, update or remove` when the slot was already right. There is no reason to reason about whether it is needed; just run it. In `core`, `npm ci` follows it every time, for the same reason and whatever the ticket touches: a slot is set up completely rather than for the ticket in hand, so the next ticket never inherits a half-built tree. `npm ci` rather than `npm install`, because `install` reconciles against `package.json` and can leave `package-lock.json` modified, while `ci` installs exactly the lock. The primary needs the same gate whenever it pulls `main`.
+**So whenever a slot's base moves, run the lock step and `composer install` before any check whose result you intend to trust.** The base moves when you claim the slot from a newer `origin/main`, or when you sync a branch per [`sync-pr-branch`](sync-pr-branch.md). `composer install` reconciles `vendor/` to exactly the lock, and it prints `Nothing to install, update or remove` when the slot was already right. There is no reason to reason about whether it is needed; just run it. In `core`, `npm ci` follows it every time, for the same reason and whatever the ticket touches: a slot is set up completely rather than for the ticket in hand, so the next ticket never inherits a half-built tree. `npm ci` rather than `npm install`, because `install` reconciles against `package.json` and can leave `package-lock.json` modified, while `ci` installs exactly the lock. The primary needs the same gate whenever it pulls `main`.
 
-**Which lock it reconciles to is where the two repositories differ.** In `cli` the lock is committed, so two trees on one commit resolve to identical `vendor/` contents. In `core` the lock is gitignored, so each slot keeps whatever it resolved on the day it was installed, two slots installed on different days silently hold different dependency versions, and "same commit" does not cover it. So in `core`, copy the primary's lock into the slot first, and the primary is the one tree whose lock moves (by `composer update`):
-
-```bash
-cp "<primary>/composer.lock" "$SLOT/composer.lock" && cd "$SLOT" && composer install
-```
-
-A branch that changes `composer.json` is the exception: its slot runs `composer update` for the packages it changed, and its lock is no longer the primary's until the branch merges and the primary updates. Comparing two trees' results needs the same lock on both, per [`measurement-parity`](measurement-parity.md).
+**Which lock it reconciles to is where the two repositories differ.** In `cli` the lock is committed, so two trees on one commit resolve to identical `vendor/` contents. In `core` the lock is gitignored, so each slot keeps whatever it resolved on the day it was installed, two slots installed on different days silently hold different dependency versions, and "same commit" does not cover it. That is what the lock step is for: in `core`, the primary is the one tree whose lock moves (by `composer update`), and every slot copies it. A branch that changes `composer.json` is the exception: its slot runs `composer update` for the packages it changed, and its lock is no longer the primary's until the branch merges and the primary updates. Comparing two trees' results needs the same lock on both, per [`measurement-parity`](measurement-parity.md).
 
 **`composer install` compares versions, not bytes.** A `vendor/` file edited in place, for instance while debugging a dependency, survives it. The fix is `composer reinstall <package>`, and the check is `shasum -a 256` against a known-good tree, per [`measurement-parity`](measurement-parity.md).
 
@@ -156,14 +159,14 @@ A branch that changes `composer.json` is the exception: its slot runs `composer 
 
 ## Provisioning a slot (one time, and once only)
 
-All four slots were provisioned on macOS on 2026-09-24, and each passed its smoke test from the per-repository table. To provision or re-provision one, from the primary (`$SLOT` is the absolute path of the new tree):
+All four slots were provisioned on macOS on 2026-09-24, and each passed its smoke test from the per-repository table. To provision or re-provision one:
 
 ```bash
-git fetch origin &&
+cd "$PRIMARY" &&
+  git fetch origin &&
   git worktree add --detach "$SLOT" origin/main &&            # at rest: `main` belongs to the primary
-  { [ ! -e composer.lock ] || git ls-files --error-unmatch composer.lock >/dev/null 2>&1 ||
-    cp composer.lock "$SLOT/composer.lock"; } &&              # core only: an untracked lock is copied
   cd "$SLOT" &&
+  { git ls-files --error-unmatch composer.lock >/dev/null 2>&1 || cp "$PRIMARY/composer.lock" composer.lock; } &&
   composer install &&
   { [ ! -e package-lock.json ] || npm ci; }                     # core only
 ```
@@ -182,7 +185,7 @@ Slots cover ordinary work. A throwaway worktree is still right in exactly three 
 
 For those, the `EnterWorktree` tool creates a tree under `.claude/worktrees/<name>/` on a fresh branch and moves the session into it. The tool acts only on a user request or a project instruction, and this rule is that instruction for the three cases above.
 
-- **`.gitignore` ignores `/.claude/worktrees/`, and the entry must stay.** Without it, every nested tree sits untracked inside the primary: measured in a scratch repository on git 2.39.5 (2026-09-17), `git status` in the primary listed `?? .claude/worktrees/<name>/`, and `git add -A` staged the tree as an embedded repository (a gitlink) with only a warning. The ignore does not blind the tools inside a tree: measured 2026-09-17 with Pint 1.32.1, `pint --test` run from a nested worktree caught a planted violation both with and without the entry.
+- **`.gitignore` ignores the `.claude/worktrees` directory, and the entry must stay.** Without it, every nested tree sits untracked inside the primary: measured in a scratch repository on git 2.39.5 (2026-09-17), `git status` in the primary listed `?? .claude/worktrees/<name>/`, and `git add -A` staged the tree as an embedded repository (a gitlink) with only a warning. The ignore does not blind the tools inside a tree: measured 2026-09-17 with Pint 1.32.1, `pint --test` run from a nested worktree caught a planted violation both with and without the entry.
 - **Nesting has two effects the ignore does not remove.** `grep -r` from the primary descends into every nested tree (PHPStan and PHPUnit name explicit paths, and Pint's finder skips dot-directories). And a process can no longer be attributed to the primary by working directory alone, because the primary's separator-anchored prefix contains every nested tree; the sweep in [`long-running-commands`](long-running-commands.md) excludes them explicitly.
 - **Prefer `EnterWorktree` over `git worktree add` plus entering it.** Entering a tree the harness did not create is recorded as `"enteredExisting": true` with no `originalBranch` or `originalHeadCommit`, so the session shows no worktree marker in its history, and its transcript is filed under the worktree's project slug rather than the repository's. Wanting a specific branch name is not a reason to take the manual path: create with `EnterWorktree`, then `git switch -c <branch>` inside it. Reserve the manual path for a **pre-existing** branch you must not lose, since `ExitWorktree`'s `remove` deletes the tree **and its branch**: run `git worktree add .claude/worktrees/<name> <branch>` and enter it with `EnterWorktree`'s `path`. The slots are entered the same way, and `ExitWorktree` will not remove a tree entered like that.
 
