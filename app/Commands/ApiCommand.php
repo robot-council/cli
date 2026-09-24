@@ -14,6 +14,7 @@ use Illuminate\Console\Attributes\Signature;
 use Illuminate\Http\Client\Factory;
 use LaravelZero\Framework\Commands\Command;
 use RuntimeException;
+use Symfony\Component\Console\Output\ConsoleOutputInterface;
 use Throwable;
 
 /**
@@ -51,7 +52,7 @@ final class ApiCommand extends Command
         $service = $this->resolveService();
 
         if ($service === null) {
-            $this->components->error('Pass --service, or set ROBOT_COUNCIL_SERVICE, with the URL of your fleet.');
+            $this->diagnostic('Pass --service, or set ROBOT_COUNCIL_SERVICE, with the URL of your fleet.');
 
             return self::FAILURE;
         }
@@ -62,7 +63,7 @@ final class ApiCommand extends Command
         try {
             $installation = new InstallationChoice($credentials)->for($service, $this->stringOption('harness'));
         } catch (RuntimeException $runtimeException) {
-            $this->components->error($runtimeException->getMessage());
+            $this->diagnostic($runtimeException->getMessage());
 
             return self::FAILURE;
         }
@@ -70,7 +71,7 @@ final class ApiCommand extends Command
         $body = $this->decodeBody();
 
         if ($body === false) {
-            $this->components->error('--body must be valid JSON.');
+            $this->diagnostic('--body must be valid JSON.');
 
             return self::FAILURE;
         }
@@ -85,7 +86,7 @@ final class ApiCommand extends Command
 
             $session->start($this->stringOption('project'), $repository, $workLocation);
         } catch (Throwable $throwable) {
-            $this->components->error($this->readable($throwable, 'Could not start a session.'));
+            $this->diagnostic($this->readable($throwable, 'Could not start a session.'));
 
             return self::FAILURE;
         }
@@ -97,7 +98,7 @@ final class ApiCommand extends Command
         try {
             return $this->perform($session, $service, $body);
         } catch (Throwable $throwable) {
-            $this->components->error($this->readable($throwable, 'The call did not complete.'));
+            $this->diagnostic($this->readable($throwable, 'The call did not complete.'));
 
             return self::FAILURE;
         } finally {
@@ -128,9 +129,40 @@ final class ApiCommand extends Command
         }
 
         // The status on stderr, so it does not corrupt the body a caller is parsing
-        $this->components->error(sprintf('The service answered HTTP %d.', $response->status()));
+        $this->diagnostic(sprintf('The service answered HTTP %d.', $response->status()));
 
         return self::FAILURE;
+    }
+
+    /**
+     * Say something to the operator, never to the stream a caller is parsing.
+     *
+     * **This command's whole contract is that stdout is the response body.** A harness may pipe it
+     * straight into an agent, so a diagnostic written there is handed to the agent as though it were
+     * part of the answer -- and on a non-2xx it lands immediately after the body, where it is most
+     * likely to be read as one. The `components` error helper renders through the command's own
+     * output, which is stdout, so none of the six failure paths may use it (#205). It is named
+     * rather than written here, so a search for its call sites finds them and not this note.
+     *
+     * The body is `mcp`'s and `pending`'s, which keep stdout clean for the same reason and say
+     * things the same way. Three identical copies is the point at which extracting one is worth
+     * asking about, which is #218 rather than this change.
+     *
+     * @param  string  $message  What to say.
+     */
+    private function diagnostic(string $message): void
+    {
+        $output = $this->output->getOutput();
+
+        if ($output instanceof ConsoleOutputInterface) {
+            $output->getErrorOutput()->writeln('robot-council: '.$message);
+
+            return;
+        }
+
+        // The same last resort the other two use: reached under a test harness whose output is a
+        // single buffer rather than a console with two streams, and it still avoids stdout.
+        file_put_contents('php://stderr', 'robot-council: '.$message."\n");
     }
 
     /**
