@@ -215,7 +215,13 @@ final class EnrollCommand extends Command
         } catch (Throwable $throwable) {
             // Only our own exception type's message is repeated. A filesystem or driver message can
             // carry a path, and an unknown one could carry anything at all.
-            $this->components->error($this->readable($throwable, 'The credential could not be stored.'));
+            //
+            // **And what happened before it, which the failure alone does not say (cli#207).** The
+            // fleet has already approved this machine, so an operator reading only "could not be
+            // stored" cannot tell whether to approve again or give up. Enrolling again replaces the
+            // approval, so that is the whole remedy.
+            $this->components->error($this->readable($throwable, 'The credential could not be stored.')
+                .' This machine was approved, but without its credential it cannot join. Run `robot-council enroll` again; enrolling again replaces the approval.');
 
             return self::FAILURE;
         }
