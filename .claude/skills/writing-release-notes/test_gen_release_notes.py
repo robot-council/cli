@@ -661,3 +661,15 @@ class NoDataGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeliberateFailureProvingTheJobGates(unittest.TestCase):
+    """TEMPORARY. Removed in the next commit.
+
+    #199's criteria ask that the job be shown to FAIL rather than watched to pass, because a job
+    that only ever goes green cannot be told from one that is not running the tests -- which is
+    the gap this ticket exists to close.
+    """
+
+    def test_this_must_turn_the_generator_job_red(self):
+        self.assertEqual(1, 2, "deliberate: proving the generator job gates ci-passed")
