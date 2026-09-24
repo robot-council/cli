@@ -56,10 +56,38 @@ class Routing(unittest.TestCase):
         self.assertEqual(g.bucket("s", self.TITLE, paths=["CLAUDE.md", "composer.json"]), "maint")
         self.assertEqual(g.bucket("s", self.TITLE, paths=["CLAUDE.md"]), "maint")
 
-    def test_source_changes_still_route_by_title_and_diff_shape(self):
+    def test_a_source_change_routes_by_title_not_by_how_many_tests_it_ships(self):
+        """The correction #161 ported, and the assertion it had to invert.
+
+        The version before it required a test-dominant `app/` change to be Maintenance. Measured
+        over `v0.2.0..main`, that hid eleven user-visible changes in the v0.3.0 range, including
+        both the release was named for. Rule 5 already routes genuine maintenance by path, so by
+        the time the test-dominance rule is reached every change left has touched `app/`.
+        """
         paths = ["CLAUDE.md", "app/Commands/ApiCommand.php"]
-        self.assertEqual(g.bucket("s", self.TITLE, paths=paths, other_lines=10), "new")
+        neutral = "Report the fleet's roles on the dashboard"
+
+        self.assertEqual(g.bucket("s", neutral, paths=paths, other_lines=10), "new")
         self.assertEqual(g.bucket("s", "Fix the provider name", paths=paths, other_lines=10), "fix")
+
+        # **Still a product change when the tests outweigh it.** Taken from #149 with its real
+        # line counts; before #161 this returned "maint".
+        self.assertEqual(
+            g.bucket("s", "Renew when this session's role changes",
+                     paths=["app/Support/Bridge.php", "tests/Feature/SessionRoleChangeTest.php"],
+                     test_lines=648, other_lines=160),
+            "new")
+
+        # And #159, the other change v0.3.0 is named for, at its real counts.
+        self.assertEqual(
+            g.bucket("s", "Let a coordinating session hear another session's role change",
+                     paths=["app/Support/FleetFollower.php", "tests/Feature/FleetFollowerTest.php"],
+                     test_lines=34, other_lines=18),
+            "new")
+
+        # Dependency work is Maintenance because it SAYS so, whatever its diff shape. Before #161
+        # this title reached Maintenance only when its test diff happened to be the larger one.
+        self.assertEqual(g.bucket("s", self.TITLE, paths=paths, other_lines=10), "maint")
         self.assertEqual(g.bucket("s", self.TITLE, paths=paths, test_lines=20, other_lines=10), "maint")
 
     def test_published_surface_still_wins(self):
@@ -74,7 +102,21 @@ class Routing(unittest.TestCase):
         """
         fix = ["app/Support/Credentials/WindowsCredentialStore.php"]
         self.assertEqual(g.bucket("s", "Fix a broken read", paths=fix, other_lines=10), "fix")
+
+        # **Maintenance by its title, not by its diff shape.** This assertion used to pass through
+        # the test-dominance rule, which #161 stopped firing on `app/`; it now passes because the
+        # title is dependency work. Left deliberately, because a test that goes on passing for a
+        # different reason than it was written for is worth nailing down rather than deleting.
         self.assertEqual(g.bucket("s", self.TITLE, paths=fix, test_lines=20, other_lines=10), "maint")
+
+        # And the case that distinguishes them: same paths, same shape, a title claiming nothing.
+        # Before #161 this was "maint", which is how #109 and #110 -- ordinary credential-store
+        # fixes -- were filed as tooling.
+        self.assertEqual(
+            g.bucket("s", "Read the legacy credential once per refusal, not twice",
+                     paths=fix + ["tests/Feature/KeychainStoreTest.php"],
+                     test_lines=108, other_lines=32),
+            "new")
 
     def test_this_repository_commits_its_lock_so_a_bump_is_maintenance(self):
         """`composer.lock` is committed here and is not in `robot-council/core`.

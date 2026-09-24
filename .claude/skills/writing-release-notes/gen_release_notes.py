@@ -225,18 +225,33 @@ MAINT_FILES = {"composer.json", "composer.lock", "box.json", "phpstan.neon.dist"
 # **`app/` is deliberately absent, for the reason `robot-council/core` leaves `src/` out**:
 # it holds internals as well as the public surface. `app/Commands/` carries a new command
 # and a bug fix to an existing one in the same directory, and often the same file, so it
-# flows through the fix-verb and test-dominance rules below instead.
+# flows through the fix-verb and title rules below instead.
+#
+# It used to flow through the **test-dominance** rule as well, and that was the defect #161
+# ported out. Not being a published surface is not the same as being maintenance.
 #
 # `database/`, `resources/` and `routes/` are gone rather than kept harmlessly: none exists
 # here, and a list naming directories a reader will not find describes a different project.
 USER_FACING_PREFIXES = ("config/",)
+
+# Where this application keeps the code it ships. **Not a published surface** -- that is the
+# list above, and `app/` is correctly absent from it -- but a change touching one is not
+# maintenance either, which is what rule 6 was deciding by accident.
+#
+# `src/` is carried although this repository has none, because the two copies of this file are
+# ported between rather than rewritten, and a constant that reads the same in both is one less
+# thing to compare by eye.
+SOURCE_PREFIXES = ("src/", "app/")
 
 FIX_VERBS = re.compile(r"^(Fix|Resolve|Repair|Prevent|Guard|Restore|Correct|Harden|Stop|Avoid)\b")
 MAINT_VERBS = re.compile(
     r"^(Migrate|Document|Adopt|Refactor|Refresh|Rework|Bump|Reformat|Consolidate|Deduplicate)\b")
 MAINT_WORDS = re.compile(
     r"\btests?\b|paratest|test hygiene|test isolation|"
-    r"ci parity|\bcoverage\b|mutation|\bmutant\b|pcov|coverage driver|\bskill\b|worktree", re.I)
+    r"ci parity|\bcoverage\b|mutation|\bmutant\b|pcov|coverage driver|\bskill\b|worktree|"
+    # Dependency work, by the thing it is about rather than by its diff shape. Dependabot's own
+    # titles route on `Bump` in MAINT_VERBS and never needed this; a hand-written one did.
+    r"\bdependenc(?:y|ies)\b", re.I)
 
 
 def strip_cc_prefix(s):
@@ -293,9 +308,24 @@ def bucket(subject, title, labels=(), paths=(), test_lines=0, other_lines=0):
     if _all_maint(paths):
         return "maint"
 
-    # 6. Test-dominant diff: the production edit is incidental to the coverage it enables.
-    #    Safe only here, below rule 3 -- standalone it claims product work that ships tests.
-    if test_lines > other_lines:
+    # 6. Test-dominant diff with no source edit: the change is coverage, not product.
+    #
+    #    **The source exclusion is what makes this rule mean anything** (#161, ported from
+    #    `robot-council/core#266`). Rule 5 already routes a diff confined to `.claude/`, `tests/`,
+    #    `README.md` or the manifests, so by the time control arrives here every remaining change
+    #    has touched `app/` -- and comparing its line counts then decides a product change on the
+    #    size of its test suite. This repository asks for a control per detector and a negative
+    #    control per fix, so a test-dominant diff is the normal shape of a feature here.
+    #
+    #    **It bites harder here than in `core`** because rule 3's list is `("config/",)` alone, and
+    #    almost nothing touches it: nearly every pull request falls through to this rule. Measured
+    #    over `v0.2.0..main`, the v0.3.0 range: eleven user-visible changes landed in Maintenance
+    #    this way, including both the release was named for.
+    #
+    #    A threshold on the non-test lines cannot fix it either -- across that same range, product
+    #    changes run as low as 10 added lines while genuine maintenance reaches 82. The two ranges
+    #    overlap completely, and only the paths separate them.
+    if test_lines > other_lines and not any(p.startswith(SOURCE_PREFIXES) for p in paths):
         return "maint"
 
     if MAINT_VERBS.match(t) or "update dependencies" in t.lower() or MAINT_WORDS.search(t):
