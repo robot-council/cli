@@ -158,6 +158,24 @@ it('leaves a directive, whoever it came from', function (): void {
     expect(followed([feedEvent('directive', body: 'everyone stop')]))->toHaveCount(1);
 });
 
+it('leaves a placement instruction addressed to this session', function (): void {
+    expect(followed([feedEvent('placement.instruction', meta: ['task_id' => 3, 'to' => [MINE]], body: 'Branch off main.')]))
+        ->toHaveCount(1);
+});
+
+it('ignores a placement instruction addressed to another session, or to nobody', function (): void {
+    expect(followed([
+        feedEvent('placement.instruction', meta: ['task_id' => 3, 'to' => [THEIRS]]),
+        feedEvent('placement.instruction', meta: ['task_id' => 3]),
+        // Addressees that are not session ids address nobody
+        feedEvent('placement.instruction', meta: ['task_id' => 3, 'to' => ['7']]),
+    ]))->toBeEmpty();
+});
+
+it('ignores a placement instruction this session authored, even one addressed to itself', function (): void {
+    expect(followed([feedEvent('placement.instruction', actor: MINE, meta: ['to' => [MINE]])]))->toBeEmpty();
+});
+
 it('ignores an event this session authored', function (): void {
     // **The one that matters most.** A session's own `task.claimed` reaches its own feed, so
     // without this every tool call the agent makes queues a wake-up for the agent that made it.

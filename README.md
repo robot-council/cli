@@ -13,6 +13,8 @@ Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) a
 
 - **`robot-council new`** — create a fleet service in this directory, the way `statamic new` creates a site.
 
+Running a seat once it is set up -- starting it so the fleet can wake it, what it receives, restarting it, and checking it is healthy -- is in the [operator's guide on the wiki](https://github.com/robot-council/cli/wiki).
+
 ## Requirements
 
 - PHP 8.4 or later
@@ -423,28 +425,35 @@ session in a sink. `robot-council pending` prints what is waiting and clears it,
 **stop hook** is what calls it -- so the moment an agent would otherwise go idle, it picks up the
 directive or the handed-back task instead.
 
-**This is a turn boundary, not a wake-up.** An agent that stopped an hour ago stays stopped. Nothing
-here pushes into an idle session, and the one mechanism that could is still gated
-([#62](https://github.com/robot-council/cli/issues/62)). What this removes is the narrower case,
-which is also the common one: an agent finishes a task and goes idle while a directive is already
-waiting for it.
+**The hook delivers; it does not wake.** On its own it runs only when a turn ends, so an agent that
+stopped an hour ago stays stopped until something starts a turn. **In Claude Code, the bridge can
+start one**: when events arrive for an idle session, it sends a channel notice, and the turn that
+notice starts ends by running this hook (since `v0.4.0`,
+[#197](https://github.com/robot-council/cli/pull/197)). That needs Claude Code started with
+`--dangerously-load-development-channels server:robot-council`, and without it nothing reports that
+the seat cannot be woken. The wiki's
+[Starting a seat so it can be woken](https://github.com/robot-council/cli/wiki/Starting-a-seat-so-it-can-be-woken)
+has the invocation, its requirements, and how to confirm it registered. Cursor and Codex have no such
+notice, so for them the hook delivers at the next turn the operator starts.
 
 **A hook that always continues the turn is a session that never stops.** `robot-council pending`
 prints nothing and exits 0 when the fleet has been quiet, and the script below ends the turn on empty
 output. That one line is the whole difference between a hook and a loop.
 
-**Nothing will ever arrive unless somebody on the fleet holds `coordinator:direct`.** A directive is
-the only event that reaches a waiting session whatever it concerns -- every session when it names no
+**Without a session in the `coordinator` role, almost nothing arrives.** A directive is the only
+event that reaches a waiting session whatever it concerns -- every session when it names no
 `targets`, and only the sessions it names when it does
-([#269](https://github.com/robot-council/cli/issues/269)) -- and posting one needs that ability --
-which enrollment can never ask for, and which an admin grants from the dashboard afterwards. Every
-other way into a sink needs it too: reassigning a task, cancelling one, forcing a lock open. A task
-claim always assigns to whoever claimed it, and narration reaches no sink at all. Decided on
+([#269](https://github.com/robot-council/cli/issues/269)) -- and posting one needs
+`coordinator:direct`, which enrollment can never ask for and which comes with the `coordinator` role
+an administrator gives a running session from the fleet's administration page. Reassigning a task,
+cancelling one, and forcing a lock open need it too. What still arrives without one: a lock taken
+over from this session, which needs only `locks:acquire`, and this session's own `stale` marking. A
+task claim always assigns to whoever claimed it, and narration reaches no sink at all. Decided on
 [#112](https://github.com/robot-council/cli/issues/112), where the alternatives are recorded.
 
 So a machine can be enrolled, its bridge following the feed, its sink written and its stop hook
-wired into every harness, and still receive nothing at all -- because no installation on that fleet
-was ever granted the ability to send. **Every part reports healthy and the symptom is silence**,
+wired into every harness, and still receive no directive at all -- because no session on that fleet
+is running in the `coordinator` role. **Every part reports healthy and the symptom is silence**,
 which is indistinguishable from a fleet that genuinely has nothing to say. Wiring the hook up is
 worth doing anyway; it costs nothing while the fleet is quiet. Just know which of the two you are
 looking at.
