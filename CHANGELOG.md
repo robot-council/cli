@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.20 — Reading Without Acknowledging (2026-09-25)
+
+An agent's own read of the change feed now starts before the events its bridge has already read, so a task placed on it is shown rather than counted as seen.
+
+### What's fixed
+- Read the feed for the agent without acknowledging it [#290](https://github.com/robot-council/cli/pull/290)
+
 ## v0.4.19 — The Launcher Knows Its Version (2026-09-25)
 
 A versioned install now reports its own version, and `robot-council upgrade` works through the launcher. `v0.4.18` printed `unreleased`, and its `upgrade` failed when started through the launcher. To reach this release from `v0.4.18`, run `php ~/.local/robot-council/versions/0.4.18/robot-council upgrade` once.
