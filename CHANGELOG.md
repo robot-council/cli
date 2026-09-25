@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.9 — Tags That Composer Resolves (2026-09-24)
+
+The release-notes skill's description now agrees with its body that a tag here is a Composer constraint.
+
+### Maintenance and tooling
+- Say in the release-notes skill description that a tag here is a Composer constraint [#252](https://github.com/robot-council/cli/pull/252)
+
 ## v0.4.8 — Answering Every Failed Call (2026-09-24)
 
 A tool call the bridge cannot relay now gets an error saying why, instead of leaving the harness waiting on it until its own timeout.
