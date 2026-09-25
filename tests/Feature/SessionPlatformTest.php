@@ -93,6 +93,23 @@ it('starts without the platform when the service refuses it, rather than failing
         ->and($starts[1]['repository'])->toBe('robot-council/cli');
 });
 
+it('starts without the platform when the service refuses its shape, keyed on the bare field', function (): void {
+    // Core names bare `platform` when `array:os_family,arch` or `min:1` fails, not a dotted key.
+    Http::fake(['*/api/sessions' => Http::sequence()
+        ->push(['message' => 'The platform field must be an array.', 'errors' => ['platform' => ['The platform field must be an array.']]], 422)
+        ->push(['session_id' => 7, 'token' => 'rcouncil_2|T', 'expires_in' => 3600], 201)]);
+
+    expect(platformSession()->id())->toBe(7)
+        ->and(sessionStarts())->toHaveCount(2);
+});
+
+it('does not read a field that merely starts with the word as the platform', function (): void {
+    Http::fake(['*/api/sessions' => Http::response(['message' => 'Invalid.', 'errors' => ['platform_x' => ['Invalid.']]], 422)]);
+
+    expect(fn (): Session => platformSession())->toThrow(RuntimeException::class, 'HTTP 422')
+        ->and(sessionStarts())->toHaveCount(1);
+});
+
 it('still refuses a 422 about something else, and sends it once', function (): void {
     Http::fake(['*/api/sessions' => Http::response(['message' => 'The work location field format is invalid.', 'errors' => ['work_location' => ['The work location field format is invalid.']]], 422)]);
 
@@ -110,6 +127,12 @@ it('maps an OS family core does not know to Unknown, and leaves out an architect
         ->and(Platform::arch('-leading'))->toBeNull()
         ->and(Platform::arch(str_repeat('a', 33)))->toBeNull()
         ->and(Platform::arch('i686 (32-bit)'))->toBeNull();
+});
+
+it('reports the OS family alone when the machine names an architecture core would refuse', function (): void {
+    expect(Platform::report('Windows', 'i686 (32-bit)'))->toBe(['os_family' => 'Windows'])
+        ->and(Platform::report('Linux', 'AArch64'))->toBe(['os_family' => 'Linux', 'arch' => 'aarch64'])
+        ->and(Platform::report('Haiku', 'x86_64'))->toBe(['os_family' => 'Unknown', 'arch' => 'x86_64']);
 });
 
 it('mirrors the OS families core accepts', function (): void {

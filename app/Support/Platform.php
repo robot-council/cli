@@ -8,9 +8,13 @@ namespace App\Support;
  * The operating system family and architecture this process runs on, as a session reports them.
  *
  * **Read, never asked** (#266). A coordinator placing platform-bound work had no way to read a
- * session's platform from the fleet, and the bridge is the one party that knows it for certain: it
- * already branches on `PHP_OS_FAMILY` to choose a credential store. It is read on every session
- * start, so a credential moved to another machine reports the machine it is on now.
+ * session's platform from the fleet, and the bridge already branches on `PHP_OS_FAMILY` to choose a
+ * credential store. It is read on every session start, so a credential moved to another machine
+ * reports the machine it is on now.
+ *
+ * **Both values describe the PHP process, not the hardware under it.** An x64 PHP running under
+ * emulation on an ARM machine reports `amd64`. That is the platform the bridge's own code runs as,
+ * which is what matters to work that shells out from it.
  *
  * **The bounds mirror `robot-council/core`'s `Support\Platform`** (core#351), which refuses anything
  * outside them with a 422. A value that would be refused is left out rather than sent.
@@ -32,15 +36,18 @@ final class Platform
     /**
      * The `platform` a session start carries.
      *
+     * @param  string|null  $family  The OS family, when not this process's own; for tests.
+     * @param  string|null  $machine  The machine name, when not this process's own; for tests.
      * @return array{os_family: string, arch?: string}
      */
-    public static function report(): array
+    public static function report(?string $family = null, ?string $machine = null): array
     {
-        $arch = self::arch(php_uname('m'));
+        $osFamily = self::osFamily($family ?? PHP_OS_FAMILY);
+        $arch = self::arch($machine ?? php_uname('m'));
 
-        return $arch === null
-            ? ['os_family' => self::osFamily(PHP_OS_FAMILY)]
-            : ['os_family' => self::osFamily(PHP_OS_FAMILY), 'arch' => $arch];
+        // Left out rather than sent as null: core refuses an unknown or empty value, and an
+        // architecture it would refuse says nothing a missing one does not.
+        return $arch === null ? ['os_family' => $osFamily] : ['os_family' => $osFamily, 'arch' => $arch];
     }
 
     /**
