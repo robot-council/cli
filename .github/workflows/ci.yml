@@ -151,7 +151,7 @@ jobs:
         run: |
           listed=$(./robot-council list --raw | awk '{print $1}' | tr '\n' ' ')
           echo "$listed"
-          [ "$listed" = 'about api enroll mcp new pending ' ]
+          [ "$listed" = 'about api enroll mcp new pending upgrade ' ]
 
       # The import scan cannot see a class the container resolves by name, so make a request for
       # real. `Could not reach the service.` alone is not enough: it is the fallback text for any

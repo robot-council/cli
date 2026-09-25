@@ -1,0 +1,12 @@
+#!/bin/sh
+# The robot-council on PATH for a versioned install (robot-council/cli#280). Follows a symlink to
+# find the launcher beside it, then hands every argument to it.
+self=$0
+while [ -L "$self" ]; do
+    target=$(readlink "$self")
+    case $target in
+        /*) self=$target ;;
+        *) self=$(dirname "$self")/$target ;;
+    esac
+done
+exec php "$(dirname "$self")/robot-council.php" "$@"

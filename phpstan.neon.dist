@@ -10,6 +10,7 @@ parameters:
     paths:
         - app
         - config
+        - launcher
         - tests
         - rector.php
     tmpDir: build/phpstan
