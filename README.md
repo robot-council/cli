@@ -7,8 +7,8 @@ The command line for [Robot Council](https://github.com/robot-council/core), a c
 Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) and [#13](https://github.com/robot-council/cli/issues/13):
 
 - **`robot-council enroll`** — enroll this machine. It requests a device code, prints the user code and the verification URL, and polls until a developer approves. The credential it receives is stored in the OS keychain or a user-only file, and never printed.
-- **`robot-council mcp`** — the stdio MCP bridge. An agent harness launches it, and it comes up **without joining the fleet**: its one tool is `join`, and the fleet's coordination tools appear once an agent calls it. Once joined, it renews its own session token, so a token expiring needs no restart and no human.
-- **`robot-council pending`** — print the fleet events waiting for this harness, and clear them. The bridge reads the change feed while it runs and leaves anything that concerns its own session here; a harness's stop hook runs this at a turn boundary so an agent finds out without being asked. Prints nothing and exits `0` when the fleet has been quiet.
+- **`robot-council mcp`** — the stdio MCP bridge. An agent harness launches it, and it comes up **without joining the fleet**: its one tool is `join`, and the fleet's coordination tools appear once an agent calls it. Once joined, it renews its own session token, so a token expiring needs no restart and no human. Under Claude Code, `--keep-warm=<minutes>` has it wake an idle session to keep its prompt cache warm.
+- **`robot-council pending`** — print the fleet events waiting for this harness, and clear them. The bridge reads the change feed while it runs and leaves anything that concerns its own session here; a harness's stop hook runs this at a turn boundary so an agent finds out without being asked. Prints nothing and exits `0` when the fleet has been quiet. It also records when the turn ended, for a bridge keeping the session's cache warm.
 - **`robot-council api`** — the fallback for anything the bridge does not cover.
 
 - **`robot-council new`** — create a fleet service in this directory, the way `statamic new` creates a site.
@@ -461,6 +461,31 @@ looking at.
 **A session does not need the ability to receive.** Holding none of it is the ordinary, correct
 state for a machine that only listens, and it is what enrollment grants. The ability is needed by
 whoever sends.
+
+### Keeping an idle Claude Code session's cache warm
+
+An idle session's prompt cache expires, and the first turn after that pays to write the whole conversation again. For a fleet session idle between tasks, that cost lands on the first turn of the next task. **`--keep-warm=<minutes>` has the bridge wake its own session once it has been idle that long**, with a channel notice saying there is nothing to do, so the woken turn is short and hits the cache ([#279](https://github.com/robot-council/cli/issues/279)). Off by default.
+
+```bash
+claude mcp add -s user robot-council \
+  -e ROBOT_COUNCIL_SERVICE=https://your-fleet.example.com \
+  -e ROBOT_COUNCIL_HARNESS=claude \
+  -- robot-council mcp --keep-warm=55 --keep-warm-for=480
+```
+
+**Set the interval from your cache's TTL; the bridge does not detect it.** Claude Code's [prompt caching documentation](https://code.claude.com/docs/en/prompt-caching.md) gives the main conversation a **one-hour** TTL on a Claude subscription within its included usage, and **five minutes** on an API key, a cloud provider, or a subscription drawing on usage credits; `CLAUDE_CODE_PROMPT_CACHE_TTL` sets it to `5m` or `1h`. For one hour, 55 minutes leaves room for a slow turn. **On a five-minute TTL the option buys nothing at any practical interval.** It would take a woken turn every four minutes for as long as the session sits idle, and by [the pricing](https://platform.claude.com/docs/en/about-claude/pricing) each reads the whole cache at a tenth of the input price, so an idle hour of them costs about what the one rewrite they prevent does, before counting what each woken turn writes.
+
+**`--keep-warm-for=<minutes>` is the ceiling.** Once the session has been idle that long, keep-alives stop, so a seat abandoned overnight is not woken every hour until morning. Without it they go on for as long as the bridge runs. It has to be longer than the interval, or no keep-alive could ever be sent. A value that is not a whole number of minutes, a ceiling no longer than the interval, or `--keep-warm` given to any harness but Claude Code is reported on stderr, and the bridge runs without keep-alives.
+
+**What counts as activity, and what the bridge cannot see.** The bridge sees no turns ([#211](https://github.com/robot-council/cli/issues/211) records why), so it reads three things that stand in for them: a tool call arriving, a notice it sent about fleet events, and a turn end the stop hook recorded. Under Claude Code, `robot-council pending` records the time it drains the sink, in a file beside the sink; `--peek` does not, and neither does any other harness's hook. So:
+
+- **It needs the stop hook below, and Claude Code started with channels**, as [waking a seat](https://github.com/robot-council/cli/wiki/Starting-a-seat-so-it-can-be-woken) describes. Without channels, the notice is dropped and nothing is kept warm.
+- **A long turn that calls no fleet tool looks idle until it ends**, hook or no hook: running Bash and editing files moves nothing the bridge reads. So a turn longer than the interval can receive a keep-alive while it runs. The server instructions tell the agent to ignore one that arrives mid-task and carry on, and the turn folds it in. Without the hook, every turn is like this.
+- **A keep-alive's own turn end is not activity**, or the ceiling could never arrive: the first turn end within two minutes of a keep-alive is taken as that keep-alive's. A tool call in between means the agent did something, and the turn end after it counts. The cost is the case above: a real turn that folded a keep-alive in, and ended within two minutes of it without calling a fleet tool, is taken for the keep-alive's, and the ceiling arrives that much early.
+- **A continued turn's end is not recorded.** The script's loop guard exits before `pending` runs when Claude Code has already continued the turn, so the clock runs from the first end, and a long continuation can be followed by a keep-alive sooner than the interval.
+- **The record has the sink's identity**: the service, the harness and the project. Two Claude Code sessions sharing all three share one record, as they already share one sink.
+
+**What the woken turn does has not been measured yet.** The server instructions tell the agent that a notice carrying `keep_warm` has nothing behind it, and to end the turn without tool calls unless it is in the middle of a task; whether a live session does, and that the cache stays warm, are open on [#279](https://github.com/robot-council/cli/issues/279).
 
 ### The script every harness runs
 

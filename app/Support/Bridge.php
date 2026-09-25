@@ -191,6 +191,8 @@ final class Bridge
      * @param  (Closure(array{role: string|null, repository: string|null, work_location: string|null}): Joined)|null  $join
      *                                                                                                                       What the `join` tool does. It throws a `RuntimeException` carrying what to tell the agent when joining fails.
      * @param  int  $reannounceSeconds  How long a notice is given to be acted on before it is first sent again.
+     * @param  KeepWarm|null  $keepWarm  When to wake an idle session to keep its prompt cache warm, or
+     *                                   null for never, which is the default (#279).
      *
      * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -215,6 +217,7 @@ final class Bridge
         private readonly bool $channel = false,
         private readonly ?Closure $join = null,
         private readonly int $reannounceSeconds = self::REANNOUNCE_SECONDS,
+        private readonly ?KeepWarm $keepWarm = null,
     ) {}
 
     /**
@@ -937,6 +940,11 @@ final class Bridge
         $id = $decoded['id'] ?? null;
         $joined = $this->session instanceof Session;
 
+        // A tool call is a turn running, whatever the tool
+        if ($method === 'tools/call') {
+            $this->keepWarm?->active();
+        }
+
         if ($method === 'notifications/initialized') {
             $this->initialized = true;
 
@@ -1029,7 +1037,7 @@ final class Bridge
         if ($this->channel && ($this->follower instanceof FleetFollower || $this->join instanceof Closure)) {
             $capabilities['experimental'] = [self::CHANNEL_CAPABILITY => new stdClass];
 
-            $instructions[] = self::CHANNEL_INSTRUCTIONS;
+            $instructions[] = self::CHANNEL_INSTRUCTIONS.($this->keepWarm instanceof KeepWarm ? KeepWarm::INSTRUCTIONS : '');
         }
 
         return [
@@ -1325,6 +1333,9 @@ final class Bridge
 
         $this->notify($out, ['new' => (string) $this->unannounced]);
 
+        // A notice wakes a turn, so the session is not idle, and no keep-alive follows on its heels
+        $this->keepWarm?->active();
+
         // A new batch starts a new count: what is waiting now is what this notice announced
         $this->announcedSink = $this->follower?->waiting();
         $this->announcedNew = $this->unannounced;
@@ -1362,7 +1373,30 @@ final class Bridge
 
         $this->notify($out, ['new' => (string) $this->announcedNew, 'repeat' => (string) $this->repeats]);
 
+        $this->keepWarm?->active();
+
         $this->nextReannounce = time() + self::reannounceDelay($this->reannounceSeconds, $this->repeats);
+    }
+
+    /**
+     * Wake an idle session so its prompt cache does not expire, when the operator asked for it (#279).
+     *
+     * **A notice like any other, with nothing behind it.** `keep_warm` in the meta is what the
+     * server instructions tell the agent to end the turn on; the stop hook then finds the sink
+     * empty and lets it end. After `announce()` in the same pass, so a pass that has just announced
+     * events counts as activity and sends no keep-alive beside them.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     */
+    private function keepCacheWarm($out): void
+    {
+        if (! $this->channel || ! $this->initialized || ! $this->keepWarm instanceof KeepWarm || ! $this->keepWarm->due()) {
+            return;
+        }
+
+        $this->notify($out, ['keep_warm' => '1'], KeepWarm::NOTICE);
+
+        $this->keepWarm->sent();
     }
 
     /**
@@ -1385,14 +1419,15 @@ final class Bridge
      *
      * @param  resource  $out  Where protocol messages go.
      * @param  array<string, string>  $meta  Keys must be identifiers and values strings, per the channels reference.
+     * @param  string  $content  What the notice says.
      */
-    private function notify($out, array $meta): void
+    private function notify($out, array $meta, string $content = 'New fleet events are waiting for this session.'): void
     {
         $this->write($out, $this->encode([
             'jsonrpc' => '2.0',
             'method' => 'notifications/claude/channel',
             'params' => [
-                'content' => 'New fleet events are waiting for this session.',
+                'content' => $content,
                 'meta' => $meta,
             ],
         ]));
@@ -1525,6 +1560,8 @@ final class Bridge
         }
 
         $this->announce($out);
+
+        $this->keepCacheWarm($out);
 
         // **The feed's 401 asks the same question the heartbeat's does**, and the renewal below is
         // what answers it. Without this a bridge whose session had been ended learned nothing from
