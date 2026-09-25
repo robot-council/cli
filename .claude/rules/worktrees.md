@@ -20,8 +20,8 @@ Three trees, all **siblings** of each other:
 | Tree | Path (relative to the primary) | Role |
 | --- | --- | --- |
 | Primary | *the main clone itself* | Reference checkout. **Holds the `main` branch**, current with `origin/main`. Not a work surface. |
-| Slot A | `../<primary>-a` | Ticket work. Take this one first. |
-| Slot B | `../<primary>-b` | A second concurrent session, or a second ticket. |
+| Slot A | `../<slots>-a` | Ticket work. Take this one first. |
+| Slot B | `../<slots>-b` | A second concurrent session, or a second ticket. |
 
 There is no local-CI slot. CI is the single GitHub Actions workflow, and nothing local checks branches in and out of a tree of its own.
 
@@ -32,25 +32,28 @@ This file is shared, byte for byte, by `robot-council/core` and `robot-council/c
 | | `robot-council/core` | `robot-council/cli` |
 | --- | --- | --- |
 | `<primary>`, the primary's directory name | `robot-council` | `robot-council-cli` |
-| Slots | `../robot-council-a`, `../robot-council-b` | `../robot-council-cli-a`, `../robot-council-cli-b` |
+| `<slots>`, the name both slots share | `robot-council-core` | `robot-council-cli` |
+| Slots | `../robot-council-core-a`, `../robot-council-core-b` | `../robot-council-cli-a`, `../robot-council-cli-b` |
 | `composer.lock` | **gitignored**: copy the primary's into the slot before `composer install` | committed: `composer install` alone |
 | npm | `npm ci` in every slot, whatever the ticket touches | none |
 | First-party namespace in `vendor/composer/autoload_static.php` | `RobotCouncil\` | `App\` |
 | Smoke test after provisioning | `npm run check && vendor/bin/pest --list-tests >/dev/null` exits `0` | `./robot-council about` exits `0` |
 | `delete_branch_on_merge` (read 2026-09-24) | `false` | `false` |
 
+**`core`'s slots name the repository, and its primary does not.** They were `robot-council-a` and `-b` until 2026-09-25, when they were renamed so that each slot's directory says which repository it holds, as `cli`'s always have; the primary kept `robot-council`, because other tools and the project memory are keyed to its path. So in `core`, `<slots>` and `<primary>` differ, and nothing may derive a slot's path by appending `-a` to the primary's.
+
 **The last row no longer differs, and is kept because the rule below turns on it.** It was `true` on `core` until `robot-council/core#288` changed it on 2026-09-24; the pull requests merged before then still have dead file links, which is the cost this table was recording.
 
 **They are siblings, not nested under `.claude/worktrees/`, for three reasons.** They sit outside the repository, so no ignore rule has to hold for them. A `grep -r` from the primary cannot descend into them. And a process's working directory attributes it to one tree: the separator-anchored allow-list in [`long-running-commands`](long-running-commands.md) claims every nested tree's processes from the primary, and needs an explicit exclusion to stop doing so, while a sibling never matches.
 
-**But the primary's path is a string prefix of both slots' paths**, and `core`'s is a prefix of every sibling whose name starts with `robot-council`, cli's trees included, so the anchor is load-bearing. Measured 2026-09-24 by feeding each path to both forms of the `case`, with the primary's own path as the control:
+**But the primary's path is a string prefix of both slots' paths**, and `core`'s is a prefix of every sibling whose name starts with `robot-council`, cli's trees included, so the anchor is load-bearing. Measured 2026-09-24 by feeding each path to both forms of the `case`, with the primary's own path as the control, and the `core` slot rows re-measured under their new names on 2026-09-25:
 
 | `MY_TREE` | Path tested | `"$MY_TREE"\|"$MY_TREE"/*)` | `"$MY_TREE"*)` |
 | --- | --- | --- | --- |
 | `robot-council-cli` | `robot-council-cli` | claimed | claimed |
 | `robot-council-cli` | `robot-council-cli-a`, `-b` | skipped | **claimed** |
 | `robot-council` | `robot-council` | claimed | claimed |
-| `robot-council` | `robot-council-a`, `robot-council-cli`, `robot-council-cli-a`, `robot-council-app` | skipped | **claimed** |
+| `robot-council` | `robot-council-core-a`, `-b`, `robot-council-cli`, `robot-council-cli-a`, `robot-council-app` | skipped | **claimed** |
 
 A casually written bare-prefix match claims other sessions' processes, in this repository's slots and, from `core`, in other repositories entirely. The failure is killing someone else's run. Anchor on the separator, always.
 
@@ -75,7 +78,7 @@ git worktree list
 
 So a slot showing `(detached HEAD)` with a clean tree is **free**, and a slot on a branch is **held**, either by you earlier or by another session right now. Take **A** first and **B** second. If both are held and you hold neither, there are two live sessions. Do not evict one; take an ephemeral worktree. **A rebase or bisect in progress also shows `(detached HEAD)`**, so a detached slot with a `rebase-merge/`, `rebase-apply/`, or `BISECT_LOG` under `git -C "$SLOT" rev-parse --git-dir` is held, not free.
 
-In the commands below, `$SLOT` is the slot's **absolute** path and `$PRIMARY` the primary's. A relative `../<primary>-a` resolves against whatever the cwd happens to be, and the cwd is not reliable (see the hazards section). Each block is **one fail-closed chain**, so a failed guard stops the command that follows it rather than printing a warning above it.
+In the commands below, `$SLOT` is the slot's **absolute** path and `$PRIMARY` the primary's. A relative `../<slots>-a` resolves against whatever the cwd happens to be, and the cwd is not reliable (see the hazards section). Each block is **one fail-closed chain**, so a failed guard stops the command that follows it rather than printing a warning above it.
 
 **The lock step**, run inside a slot before every `composer install` there, is the same in both repositories:
 
@@ -206,7 +209,7 @@ These matter **more** with long-lived slots, not less: every slot is always pres
   cd "$SLOT" && echo "CWD=$(pwd) HEAD=$(git rev-parse --short HEAD)" && <the real command>
   ```
 
-  The guard matters more with slots than with per-ticket trees, because slots do not differ by name. `<primary>-a` and `<primary>-b` look alike, and the stale cwd is as likely to point at the other slot as at the primary. So the right question is "which tree did it land in?", not "did it land on `main`?". Prefer the file tools with absolute paths for edits. If work lands in the wrong tree, `cp` the files to where they belong, then restore the wrong tree's copy (see the next item for when that is safe).
+  The guard matters more with slots than with per-ticket trees, because slots do not differ by name. `<slots>-a` and `<slots>-b` look alike, and the stale cwd is as likely to point at the other slot as at the primary. So the right question is "which tree did it land in?", not "did it land on `main`?". Prefer the file tools with absolute paths for edits. If work lands in the wrong tree, `cp` the files to where they belong, then restore the wrong tree's copy (see the next item for when that is safe).
 - **`git checkout -- <file>` discards all uncommitted work on that file**, not just your last change. Use it only where the file should match `HEAD`. To undo a temporary edit on a file that also holds uncommitted work you want, such as reverting a fix for a negative control, apply the inverse edit or `cp` the file aside first. If you lose work anyway, rebuild it from the session transcript's `Read` and `Edit` results plus `HEAD`, then re-verify before trusting it.
 - **The stash stack belongs to the repository, not the worktree.** Verified on git 2.39.5: a stash pushed in a linked worktree shows up as `stash@{0}` in the primary. Two mistakes chain into losing someone else's work. First, `git stash push -- <paths>` naming any untracked path fails (`error: pathspec … did not match any file(s) known to git`, exit 1) and stashes **nothing**. Then the paired bare `pop` applies whatever entry another session pushed. Prefer a WIP commit, or `cp` the file aside. If you must stash, run `git stash push -u -m "<unique-tag>"`, take the SHA from `git stash list --format='%H %gs'`, and `git stash apply <sha>`. Never use a bare `pop`. **Recovery**, because a popped stash commit is unreachable, not gone:
 
