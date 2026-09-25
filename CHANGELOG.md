@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.16 — Placement Instructions (2026-09-25)
+
+A lane now receives the instructions a coordinator gives it when placing work, which core v0.6.0 sends apart from the fleet-wide directive.
+
+### What's new
+- Deliver a placement instruction addressed to this session [#276](https://github.com/robot-council/cli/pull/276)
+
 ## v0.4.15 — Saying Where a Session Runs (2026-09-25)
 
 A session now reports the operating system family and architecture it runs on when it starts, so a fleet can tell which machine is which without anyone typing it in.
