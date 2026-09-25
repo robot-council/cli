@@ -1429,8 +1429,8 @@ final class Bridge
      *
      * **A failure is said and survived.** A missed heartbeat reads as `stale`, which is honest, and
      * a bridge must not stop watching because it could not say that it was. A `404` is a service
-     * without the route: said once, and not sent again this session. A `401` is left to the
-     * presence heartbeat and the renewal it triggers.
+     * without the route: said once, and not sent again this session. A `401` asks for a renewal,
+     * which says what it meant.
      *
      * @param  callable(string):void  $diagnostic  Where failures go.
      */
@@ -1452,9 +1452,14 @@ final class Bridge
             return;
         }
 
-        // **A 401 is not the watcher's to report.** It means the session's token is refused, which
-        // the presence heartbeat above has already turned into a renewal, and the renewal says what
-        // happened -- saying it here too would put a status code in front of the reason (#165).
+        // **A 401 is not the watcher's to report; it is the renewal's to explain.** It means the
+        // session's token is refused, so it asks for the renewal the presence heartbeat would ask
+        // for -- the two are not always due in the same pass -- and the renewal says what happened.
+        // Saying it here too would put a status code in front of the reason (#165).
+        if ($status === 401) {
+            $this->renewalDue = true;
+        }
+
         $failed = ($status < 200 || $status >= 300) && $status !== 401;
 
         if ($failed && ! $this->watcherFailing) {

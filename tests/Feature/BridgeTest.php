@@ -693,3 +693,36 @@ it('sends no watcher heartbeat from a joined bridge with nothing following the f
 
     expect(watcherBeats())->toBe(0);
 });
+
+it('asks for a renewal when the watcher heartbeat is refused, whether or not the presence heartbeat was due', function (): void {
+    // The two are scheduled apart, so a refused watcher beat can land in a pass where the presence
+    // heartbeat was not sent. Its 401 means the same thing, and asks for the same renewal.
+    Http::fake([
+        '*/api/sessions/7/renew' => Http::response(['token' => SECOND_TOKEN, 'expires_in' => 3600], 200),
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600, 'feed_cursor' => 1], 201),
+        '*/api/agent/watcher' => Http::response(null, 401),
+        '*/api/events*' => Http::response(['events' => [], 'cursor' => 1], 200),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200),
+    ]);
+
+    $session = startedSession();
+    $state = sys_get_temp_dir().'/rc-watcher-'.bin2hex(random_bytes(6));
+    putenv('XDG_STATE_HOME='.$state);
+    $said = [];
+
+    // The presence heartbeat is a minute away, so only the watcher is sent on this pass.
+    new Bridge($session, BRIDGE_SERVICE, follower: new FleetFollower($session, BRIDGE_SERVICE, new PendingEvents(BRIDGE_SERVICE, 'claude', 'watch'), 0))
+        ->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"), tmpfile(), function (string $m) use (&$said): void {
+            $said[] = $m;
+        });
+
+    array_map(unlink(...), glob($state.'/robot-council/pending/*') ?: []);
+    @rmdir($state.'/robot-council/pending');
+    @rmdir($state.'/robot-council');
+    @rmdir($state);
+    putenv('XDG_STATE_HOME');
+
+    expect(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/agent/heartbeat')))->toBeEmpty()
+        ->and(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/renew')))->toHaveCount(1)
+        ->and(watcherLines($said))->toBeEmpty();
+});
