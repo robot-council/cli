@@ -399,7 +399,9 @@ prints nothing and exits 0 when the fleet has been quiet, and the script below e
 output. That one line is the whole difference between a hook and a loop.
 
 **Nothing will ever arrive unless somebody on the fleet holds `coordinator:direct`.** A directive is
-the only event that reaches a waiting session unconditionally, and posting one needs that ability --
+the only event that reaches a waiting session whatever it concerns -- every session when it names no
+`targets`, and only the sessions it names when it does
+([#269](https://github.com/robot-council/cli/issues/269)) -- and posting one needs that ability --
 which enrollment can never ask for, and which an admin grants from the dashboard afterwards. Every
 other way into a sink needs it too: reassigning a task, cancelling one, forcing a lock open. A task
 claim always assigns to whoever claimed it, and narration reaches no sink at all. Decided on

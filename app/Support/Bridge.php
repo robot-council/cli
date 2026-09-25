@@ -223,6 +223,24 @@ final class Bridge
     private int $nextHeartbeat = 0;
 
     /**
+     * When the watcher's own heartbeat is next due, as a Unix timestamp.
+     *
+     * On the presence heartbeat's interval, a minute by default, which sits inside core's
+     * `presence.watcher_stale_after_seconds` of 90: a live watcher never reads as stale (#264).
+     */
+    private int $nextWatcherBeat = 0;
+
+    /**
+     * Whether the service has no watcher route, so the heartbeat is not sent again this session.
+     */
+    private bool $watcherUnsupported = false;
+
+    /**
+     * Whether the last watcher heartbeat failed, so a run of failures is said once, not per minute.
+     */
+    private bool $watcherFailing = false;
+
+    /**
      * The earliest a renewal may be attempted again.
      */
     private int $nextRenewAttempt = 0;
@@ -1400,6 +1418,60 @@ final class Bridge
     }
 
     /**
+     * Report that the watcher is watching, while it is.
+     *
+     * **Only while the follower runs**, because the follower is what watches: it reads the feed
+     * and fills the sink that the channel notice and the stop hook deliver from. A bridge that has
+     * not joined has no follower and sends nothing, and a bridge that stops sends nothing further,
+     * so a dead watcher reads as `stale` and then `unknown` -- the signal the column exists for.
+     * It is sent by this loop and never by an agent's tool call, so the agent's activity cannot
+     * keep it alive.
+     *
+     * **A failure is said and survived.** A missed heartbeat reads as `stale`, which is honest, and
+     * a bridge must not stop watching because it could not say that it was. A `404` is a service
+     * without the route: said once, and not sent again this session. A `401` asks for a renewal,
+     * which says what it meant.
+     *
+     * @param  callable(string):void  $diagnostic  Where failures go.
+     */
+    private function watcherHeartbeat(Session $session, callable $diagnostic): void
+    {
+        if (! $this->follower instanceof FleetFollower || $this->watcherUnsupported || time() < $this->nextWatcherBeat) {
+            return;
+        }
+
+        $this->nextWatcherBeat = time() + $this->heartbeatSeconds;
+
+        $status = $session->watcherHeartbeat();
+
+        if ($status === 404) {
+            $this->watcherUnsupported = true;
+
+            $diagnostic('This fleet does not accept a watcher heartbeat yet (robot-council/core#337), so its lane board will read this watcher as absent.');
+
+            return;
+        }
+
+        // **A 401 is not the watcher's to report; it is the renewal's to explain.** It means the
+        // session's token is refused, so it asks for the renewal the presence heartbeat would ask
+        // for -- the two are not always due in the same pass -- and the renewal says what happened.
+        // Saying it here too would put a status code in front of the reason (#165).
+        if ($status === 401) {
+            $this->renewalDue = true;
+        }
+
+        $failed = ($status < 200 || $status >= 300) && $status !== 401;
+
+        if ($failed && ! $this->watcherFailing) {
+            $diagnostic($status === 0
+                ? 'The watcher heartbeat could not be sent; the lane board will read this watcher as stale until one lands.'
+                : sprintf('The watcher heartbeat was refused (HTTP %d); the lane board will read this watcher as stale until one lands.', $status));
+        }
+
+        $this->watcherFailing = $failed;
+    }
+
+    /**
      * Heartbeat, follow the feed, and renew, on their own schedules.
      *
      * @param  resource  $out  Where protocol messages go, for a channel notice.
@@ -1436,6 +1508,8 @@ final class Bridge
                 $this->renewalDue = true;
             }
         }
+
+        $this->watcherHeartbeat($session, $diagnostic);
 
         // Read before the renewal rather than after it: a renewal that throws is caught below and
         // backed off, and putting the feed after it would make a service that refuses renewals also
