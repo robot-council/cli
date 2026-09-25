@@ -470,8 +470,11 @@ event that reaches a waiting session whatever it concerns -- every session when 
 an administrator gives a running session from the fleet's administration page. Reassigning a task,
 cancelling one, and forcing a lock open need it too. What still arrives without one: a lock taken
 over from this session, which needs only `locks:acquire`, and this session's own `stale` marking. A
-task claim always assigns to whoever claimed it, and narration reaches no sink at all. Decided on
-[#112](https://github.com/robot-council/cli/issues/112), where the alternatives are recorded.
+task claim always assigns to whoever claimed it. Narration reaches a sink only when it is addressed
+to that session, through `meta.to` or a task it holds in `meta.to_tasks`, which is how a coordinator
+answers a seat ([#313](https://github.com/robot-council/cli/issues/313)); any other narration
+reaches no sink at all. Decided on [#112](https://github.com/robot-council/cli/issues/112), where
+the alternatives are recorded.
 
 So a machine can be enrolled, its bridge following the feed, its sink written and its stop hook
 wired into every harness, and still receive no directive at all -- because no session on that fleet

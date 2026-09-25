@@ -583,6 +583,16 @@ final class FleetFollower
             return \in_array($this->session->id(), $this->addressees($event), true);
         }
 
+        // **A narration written TO this session** (#313). #112 keeps narration out because it is
+        // free text broadcast to everybody, and a turn would drown in everybody else's commentary.
+        // An addressed one is the opposite case -- written for this session, and how a coordinator
+        // answers a seat -- so it arrives on the same terms as an addressed placement instruction.
+        // Unaddressed narration still never arrives. This session's own was discarded above.
+        if ($type === 'narration') {
+            return \in_array($this->session->id(), $this->addressees($event), true)
+                || \in_array($this->session->id(), $this->taskAddressees($event), true);
+        }
+
         // Work handed to this session, by somebody else.
         if (\in_array($type, ['task.claimed', 'task.reassigned'], true)
             && $this->assignedTo($event) === $this->session->id()) {
@@ -672,6 +682,36 @@ final class FleetFollower
     private function assignedTo(array $event): ?int
     {
         return $this->metaInt($event, 'assigned_to');
+    }
+
+    /**
+     * The sessions an event reaches through the tasks it names, from `meta.to_tasks`.
+     *
+     * Core resolves each task to the session holding it when the event is written, and serves
+     * `[{"task_id": N, "session_id": M}, ...]`. Anything else in an entry is skipped, and anything
+     * that is not a list reads as addressing nobody, as `addressees()` does and for its reason.
+     *
+     * @param  array<array-key, mixed>  $event  One event from the feed.
+     * @return list<int> The addressed session ids.
+     */
+    private function taskAddressees(array $event): array
+    {
+        $meta = $event['meta'] ?? null;
+        $toTasks = \is_array($meta) ? ($meta['to_tasks'] ?? null) : null;
+
+        if (! \is_array($toTasks)) {
+            return [];
+        }
+
+        $ids = [];
+
+        foreach ($toTasks as $entry) {
+            if (\is_array($entry) && \is_int($entry['session_id'] ?? null)) {
+                $ids[] = $entry['session_id'];
+            }
+        }
+
+        return $ids;
     }
 
     /**
