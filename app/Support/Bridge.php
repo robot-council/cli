@@ -193,9 +193,14 @@ final class Bridge
      */
     public const string CHANNEL_INSTRUCTIONS_WITHOUT_HOOK = 'A channel notice from this server says only that new Robot Council '
         .'fleet events are waiting for this session. No stop hook was found to deliver them, so read them yourself: call '
-        .'`events_read`, passing the `cursor` your last read returned (omit it on your first read), act on what concerns this '
-        .'session, and check the tasks this session holds with `task_list`. Then end the turn. If you are in the middle of a '
-        .'task, finish the step you are on first.';
+        .'`events_read`, passing the `cursor` your last read returned (omit it on your first read), and act on what concerns this '
+        .'session. Tasks placed on this session appear in `task_list` under the `claimed` and `in_progress` statuses. Then end '
+        .'the turn. If you are in the middle of a task, finish the step you are on first.';
+
+    /**
+     * The fleet tool an agent reads the feed with, which settles a notice when no hook will (#306).
+     */
+    public const string FEED_READ_TOOL = 'events_read';
 
     /**
      * @param  Session|null  $session  A started session to forward through at once, or null to
@@ -962,6 +967,14 @@ final class Bridge
         // A tool call is a turn running, whatever the tool
         if ($method === 'tools/call') {
             $this->keepWarm?->active();
+
+            // **Without a stop hook, the agent's own read is what a repeat waits for** (#306).
+            // Repeats stop when the sink changes, and with no hook nothing ever drains it, so
+            // every batch would otherwise wake the agent six times over half an hour, each time
+            // told to read the feed again. Once it has read, the notice has done its job.
+            if (! $this->stopHook && \is_array($decoded['params'] ?? null) && ($decoded['params']['name'] ?? null) === self::FEED_READ_TOOL) {
+                $this->announcedSink = null;
+            }
         }
 
         if ($method === 'notifications/initialized') {

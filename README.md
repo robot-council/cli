@@ -442,11 +442,16 @@ the hook is what delivers. On 2026-09-25, six seats with channels on and no `Sto
 within a second of a placement, ended the turn as instructed, and saw nothing for over forty minutes.
 So under Claude Code, the bridge checks at start for a `Stop` hook in the settings Claude Code reads
 for the launch folder: `settings.json` and `settings.local.json` in `~/.claude` (or
-`CLAUDE_CONFIG_DIR`), and in the project's `.claude`. If there is none, or a file sets
-`disableAllHooks`, the agent is told to call `events_read` on a notice and check its tasks, rather
-than to end the turn. Any `Stop` hook with a command counts as found, whatever it runs. Either way,
-the bridge says which case applied once, on stderr, which Claude Code keeps as the server's log:
-`stop hook: found in <file>.` or `stop hook: none found; agents told to read the feed themselves.`
+`CLAUDE_CONFIG_DIR`), and in the project's `.claude`. A hook counts when its `type` is `command`,
+whatever it runs. `disableAllHooks` is taken from the most specific file that sets it, as Claude
+Code does. Managed (enterprise) settings are not read.
+
+If no hook will run, a notice tells the agent to call `events_read` and act on what concerns it,
+rather than to end the turn. The bridge stops repeating that notice once the agent has read the
+feed, since with no hook nothing else would ever settle it. Either way, the bridge says which case
+applied once, on stderr, which Claude Code keeps as the server's log:
+`robot-council: stop hook: found in <file>.` or
+`robot-council: stop hook: none found; an agent woken by a notice is told to read the feed itself.`
 A settings file that is not valid JSON is named there and treated as having no hook. Reading the
 feed that way works, but the hook is still worth installing, because it hands over events at every
 turn end and not only when a notice wakes the agent.

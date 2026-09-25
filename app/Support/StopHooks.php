@@ -19,12 +19,14 @@ use JsonException;
  * command counts, whatever it runs, because the documented arrangement is a script whose name
  * says nothing about `robot-council pending`. A false "found" costs what happens today; a false
  * "none" costs an agent one extra read of the feed. `disableAllHooks` in any file read counts as
- * none, since Claude Code runs no hooks then.
+ * none, since Claude Code runs no hooks then, and only a hook whose `type` is `command` counts, since
+ * Claude Code runs nothing else as one.
  *
  * Reads the four files Claude Code loads for a folder: the user's `settings.json` and
  * `settings.local.json` (under `CLAUDE_CONFIG_DIR` when that is set, otherwise `~/.claude`), and
- * the project's `.claude/settings.json` and `.claude/settings.local.json`. Managed (enterprise)
- * settings are not read.
+ * the project's `.claude/settings.json` and `.claude/settings.local.json`, in that order, least
+ * specific first. Managed (enterprise) settings are not read, so a managed `disableAllHooks` or
+ * `allowManagedHooksOnly` is invisible here and reads as a hook found.
  */
 final readonly class StopHooks
 {
@@ -90,8 +92,11 @@ final readonly class StopHooks
                 continue;
             }
 
-            if (($settings['disableAllHooks'] ?? false) === true) {
-                $disabledBy ??= $file;
+            // The most specific file that says wins, as Claude Code resolves it: the files are read
+            // from least to most specific, so a later answer replaces an earlier one. Measured on
+            // 2.1.282: `true` in the project file and `false` in its local file ran the hook
+            if (\is_bool($settings['disableAllHooks'] ?? null)) {
+                $disabledBy = $settings['disableAllHooks'] ? $file : null;
             }
 
             if ($found === null && self::namesStopCommand($settings)) {
@@ -123,9 +128,9 @@ final readonly class StopHooks
         );
 
         $lines[] = match (true) {
-            $this->disabledBy !== null => sprintf('stop hook: none will run, since %s sets disableAllHooks; agents told to read the feed themselves.', $this->disabledBy),
+            $this->disabledBy !== null => sprintf('stop hook: none will run, since %s sets disableAllHooks; an agent woken by a notice is told to read the feed itself.', $this->disabledBy),
             $this->found !== null => sprintf('stop hook: found in %s.', $this->found),
-            default => 'stop hook: none found; agents told to read the feed themselves.',
+            default => 'stop hook: none found; an agent woken by a notice is told to read the feed itself.',
         };
 
         return $lines;
@@ -153,7 +158,8 @@ final readonly class StopHooks
             }
 
             foreach ($entries as $entry) {
-                if (\is_array($entry) && \is_string($entry['command'] ?? null) && trim($entry['command']) !== '') {
+                // `type` is required: measured on 2.1.282, a hook with a command and no `type` did not run
+                if (\is_array($entry) && ($entry['type'] ?? null) === 'command' && \is_string($entry['command'] ?? null) && trim($entry['command']) !== '') {
                     return true;
                 }
             }

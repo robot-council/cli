@@ -15,9 +15,8 @@ declare(strict_types=1);
 use App\Support\Bridge;
 use App\Support\Joined;
 use App\Support\StopHooks;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\File;
-use Tests\Fixtures\TwoStreamOutput;
+use Symfony\Component\Process\Process;
 
 /**
  * A settings file with one `Stop` hook running the given command.
@@ -122,7 +121,7 @@ describe('finding a hook', function (): void {
         $hooks = StopHooks::inspect($this->project, $this->user);
 
         expect($hooks->delivers())->toBeFalse()
-            ->and($hooks->report())->toBe(['stop hook: none found; agents told to read the feed themselves.']);
+            ->and($hooks->report())->toBe(['stop hook: none found; an agent woken by a notice is told to read the feed itself.']);
     });
 
     it('finds none in settings with other hooks and no Stop hook', function (): void {
@@ -151,6 +150,20 @@ describe('finding a hook', function (): void {
 
         expect($hooks->delivers())->toBeFalse()
             ->and($hooks->report()[0])->toContain('sets disableAllHooks');
+    });
+
+    it('lets the most specific file decide whether hooks are off, as Claude Code does', function (): void {
+        // Measured on 2.1.282: true in the project file, false in its local file, and the hook ran
+        stopHookWrite($this->project.'/.claude/settings.json', [...stopHookSettings(), 'disableAllHooks' => true]);
+        stopHookWrite($this->project.'/.claude/settings.local.json', ['disableAllHooks' => false]);
+
+        expect(StopHooks::inspect($this->project, $this->user)->delivers())->toBeTrue();
+    });
+
+    it('does not count a hook with no type, which Claude Code does not run', function (): void {
+        stopHookWrite($this->user.'/settings.json', ['hooks' => ['Stop' => [['hooks' => [['command' => '/bin/true']]]]]]);
+
+        expect(StopHooks::inspect($this->project, $this->user)->delivers())->toBeFalse();
     });
 });
 
@@ -191,44 +204,58 @@ describe('what the agent is told', function (): void {
     });
 });
 
+/**
+ * Run the real `robot-council mcp` in a project folder, hand it `initialize`, and read both streams.
+ *
+ * **Its own process, launched in the folder**, because what is under test is the wiring: the
+ * command reads the settings for the folder it starts in and hands the answer to the bridge, whose
+ * `initialize` answer is what the agent reads. A bridge built directly would skip exactly that.
+ *
+ * @return array{instructions: string, stderr: string}
+ */
+function stopHookLaunch(string $project, string $userDirectory, string $state, string $harness = 'claude'): array
+{
+    $bridge = new Process(
+        [PHP_BINARY, base_path('robot-council'), 'mcp', '--service=https://fleet.example.test'],
+        $project,
+        [
+            'CLAUDE_CONFIG_DIR' => $userDirectory,
+            'XDG_STATE_HOME' => $state,
+            'ROBOT_COUNCIL_HARNESS' => $harness,
+            'ROBOT_COUNCIL_SERVICE' => false,
+        ],
+        '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}'."\n",
+        60,
+    );
+
+    $bridge->run();
+
+    $first = strtok($bridge->getOutput(), "\n");
+    $instructions = data_get(json_decode($first === false ? '' : $first, true), 'result.instructions');
+
+    return ['instructions' => \is_string($instructions) ? $instructions : '', 'stderr' => $bridge->getErrorOutput()];
+}
+
 describe('the bridge at start', function (): void {
-    beforeEach(function (): void {
-        putenv('CLAUDE_CONFIG_DIR='.$this->user);
-        putenv('XDG_STATE_HOME='.$this->root.'/state');
-    });
-
-    afterEach(function (): void {
-        putenv('CLAUDE_CONFIG_DIR');
-        putenv('XDG_STATE_HOME');
-        putenv('ROBOT_COUNCIL_HARNESS');
-    });
-
-    it('says once, under Claude Code, which case applied', function (bool $withHook, string $says): void {
-        putenv('ROBOT_COUNCIL_HARNESS=claude');
-
+    it('tells the agent what the settings in its launch folder mean, and says which once', function (bool $withHook, string $told, string $says): void {
         if ($withHook) {
-            stopHookWrite($this->user.'/settings.json', stopHookSettings());
+            stopHookWrite($this->project.'/.claude/settings.json', stopHookSettings());
         }
 
-        $output = new TwoStreamOutput;
+        $launched = stopHookLaunch($this->project, $this->user, $this->root.'/state');
 
-        Artisan::call('mcp', ['--service' => 'https://fleet.example.test'], $output);
-
-        expect(substr_count($output->stderr(), 'stop hook:'))->toBe(1)
-            ->and($output->stderr())->toContain($says)
-            ->and($output->stdout())->toBeEmpty();
+        expect($launched['instructions'])->toContain($told)
+            ->and(substr_count($launched['stderr'], 'stop hook:'))->toBe(1)
+            ->and($launched['stderr'])->toContain($says);
     })->with([
-        'with a hook' => [true, 'stop hook: found in'],
-        'without one' => [false, 'stop hook: none found'],
+        'with a hook' => [true, Bridge::CHANNEL_INSTRUCTIONS, 'stop hook: found in'],
+        'without one' => [false, Bridge::CHANNEL_INSTRUCTIONS_WITHOUT_HOOK, 'stop hook: none found'],
     ]);
 
     it('says nothing and inspects nothing for another harness', function (): void {
-        putenv('ROBOT_COUNCIL_HARNESS=cursor');
+        $launched = stopHookLaunch($this->project, $this->user, $this->root.'/state', 'cursor');
 
-        $output = new TwoStreamOutput;
-
-        Artisan::call('mcp', ['--service' => 'https://fleet.example.test'], $output);
-
-        expect($output->stderr())->not->toContain('stop hook:');
+        expect($launched['stderr'])->not->toContain('stop hook:')
+            ->and($launched['instructions'])->not->toContain(Bridge::CHANNEL_INSTRUCTIONS_WITHOUT_HOOK);
     });
 });
