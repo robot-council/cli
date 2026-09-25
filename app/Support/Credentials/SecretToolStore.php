@@ -74,10 +74,17 @@ final class SecretToolStore implements CredentialStore
 
         $read->run();
 
-        // **Both a missing item and a failure land here, and whether this backend can tell
-        // them apart is unmeasured.** `CredentialStore::get()` says an implementation that
-        // can must raise instead; `WindowsCredentialStore` does. `robot-council/cli#54`
-        // measures the exit codes this tool actually produces, and this follows from it.
+        // **Both a missing item and a failure land here, because this backend cannot tell them
+        // apart.** `CredentialStore::get()` says an implementation that can must raise instead;
+        // `WindowsCredentialStore` and `KeychainStore` do. Measured for #85 on Ubuntu 24.04.5,
+        // libsecret-tools 0.21.4 and gnome-keyring 46.1: a present item exits 0 (the control), an
+        // absent one exits 1, and so does every failure produced -- a dead bus address, no bus at
+        // all, a locked collection, and a daemon restarted locked. Only a usage error differs (2).
+        //
+        // **A locked keyring reads as absent, and silently.** The locked lookups wrote nothing to
+        // stderr, so a stored credential behind a locked collection is indistinguishable from none.
+        // The bus failures did write to stderr, but a rule keyed on stderr would catch only them,
+        // and whether a genuine miss is always silent there has not been measured across versions.
         if (! $read->isSuccessful()) {
             return null;
         }
