@@ -46,7 +46,14 @@ final class FleetFollower
     public const int MAX_BACKOFF_SECONDS = 300;
 
     /**
-     * The event types that always concern a session, whoever they name.
+     * The event types that concern a session whoever they name -- unless they name somebody.
+     *
+     * **A directive with `targets` concerns only the sessions it names** (#269).
+     * `robot-council/core#139` let a directive record which sessions are expected to act, and this
+     * list predates it: every directive went into every sink, and on Claude Code every sink write
+     * wakes an idle session (#197), so a coordinator speaking to one session interrupted all of
+     * them. An unnamed session still reads the directive through `events_read` at its own next
+     * turn; it is only not woken for it. A directive without `targets` is for the fleet, as before.
      */
     private const array ALWAYS = ['directive'];
 
@@ -556,7 +563,9 @@ final class FleetFollower
         }
 
         if (\in_array($type, self::ALWAYS, true)) {
-            return true;
+            $targets = $this->targets($event);
+
+            return $targets === null || \in_array($this->session->id(), $targets, true);
         }
 
         // Work handed to this session, by somebody else.
@@ -648,6 +657,32 @@ final class FleetFollower
     private function assignedTo(array $event): ?int
     {
         return $this->metaInt($event, 'assigned_to');
+    }
+
+    /**
+     * The sessions a directive names in `meta.targets`, or null when it names nobody.
+     *
+     * **Anything that is not a list of session ids reads as naming nobody**, so the directive
+     * reaches every session as it did before `targets` existed. Core resolves every id before it
+     * records the event and stores no empty list (`Support\DirectiveTargets`), so a malformed value
+     * is a service this was not written against, and the failure that costs least is an extra
+     * wake-up rather than a directive nobody hears.
+     *
+     * @param  array<array-key, mixed>  $event  One event from the feed.
+     * @return list<int>|null The named session ids, or null.
+     */
+    private function targets(array $event): ?array
+    {
+        $meta = $event['meta'] ?? null;
+        $targets = \is_array($meta) ? ($meta['targets'] ?? null) : null;
+
+        if (! \is_array($targets) || $targets === [] || ! array_is_list($targets)) {
+            return null;
+        }
+
+        $ids = array_values(array_filter($targets, \is_int(...)));
+
+        return \count($ids) === \count($targets) ? $ids : null;
     }
 
     /**
