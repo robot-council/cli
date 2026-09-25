@@ -568,6 +568,15 @@ final class FleetFollower
             return $targets === null || \in_array($this->session->id(), $targets, true);
         }
 
+        // **A coordinator's words for work placed on this session** (#270). `robot-council/core#331`
+        // moved them out of the broadcast directive, which now says only which task went where,
+        // into an event core serves to the lane and to sessions of the coordinator's own developer.
+        // Delivered only where `meta.to` names this session, so the coordinator's other sessions are
+        // not woken by an instruction meant for somebody else.
+        if ($type === 'placement.instruction') {
+            return \in_array($this->session->id(), $this->addressees($event), true);
+        }
+
         // Work handed to this session, by somebody else.
         if (\in_array($type, ['task.claimed', 'task.reassigned'], true)
             && $this->assignedTo($event) === $this->session->id()) {
@@ -657,6 +666,28 @@ final class FleetFollower
     private function assignedTo(array $event): ?int
     {
         return $this->metaInt($event, 'assigned_to');
+    }
+
+    /**
+     * The sessions an event is addressed to, from `meta.to`.
+     *
+     * **Anything that is not a list of session ids reads as addressing nobody**, the opposite of the
+     * directive's fallback: an instruction is meant for one lane, so the failure that costs least
+     * is not delivering it here -- core's directive names the event's id, which reads it back.
+     *
+     * @param  array<array-key, mixed>  $event  One event from the feed.
+     * @return list<int> The addressed session ids.
+     */
+    private function addressees(array $event): array
+    {
+        $meta = $event['meta'] ?? null;
+        $to = \is_array($meta) ? ($meta['to'] ?? null) : null;
+
+        if (! \is_array($to)) {
+            return [];
+        }
+
+        return array_values(array_filter($to, \is_int(...)));
     }
 
     /**
