@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.14 — The Watcher Says It Is Watching (2026-09-25)
+
+The bridge now sends its watcher's own heartbeat, so a fleet's lane board can tell a live watcher from a dead one.
+
+### What's new
+- Send the watcher's own heartbeat to core [#272](https://github.com/robot-council/cli/pull/272)
+
 ## v0.4.13 — Waking Only Whom a Directive Names (2026-09-25)
 
 A directive that names its `targets` now wakes only the sessions it names, rather than every idle session on the fleet.
