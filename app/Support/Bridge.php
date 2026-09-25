@@ -182,6 +182,27 @@ final class Bridge
         .'of a task, carry on with it, and the events arrive when it ends.';
 
     /**
+     * What the agent is told a channel notice means when no stop hook will deliver the events (#306).
+     *
+     * **The opposite of `CHANNEL_INSTRUCTIONS`, because following that one here loses the event.**
+     * An agent told the hook delivers ends the turn, nothing delivers, and the placement it was
+     * woken for is never seen -- measured on six seats at once on 2026-09-25. So the agent reads
+     * the feed itself: `events_read` is the fleet's own tool, and with the cursor it last returned it
+     * answers exactly what arrived since. Still trusted where the notice is not, for the reason
+     * `CHANNEL_INSTRUCTIONS` gives.
+     */
+    public const string CHANNEL_INSTRUCTIONS_WITHOUT_HOOK = 'A channel notice from this server says only that new Robot Council '
+        .'fleet events are waiting for this session. No stop hook was found to deliver them, so read them yourself: call '
+        .'`events_read`, passing the `cursor` your last read returned (omit it on your first read), and act on what concerns this '
+        .'session. Tasks placed on this session appear in `task_list` under the `claimed` and `in_progress` statuses. Then end '
+        .'the turn. If you are in the middle of a task, finish the step you are on first.';
+
+    /**
+     * The fleet tool an agent reads the feed with, which settles a notice when no hook will (#306).
+     */
+    public const string FEED_READ_TOOL = 'events_read';
+
+    /**
      * @param  Session|null  $session  A started session to forward through at once, or null to
      *                                 start unjoined and join through `$join`.
      * @param  string  $service  The service's base URL.
@@ -193,6 +214,8 @@ final class Bridge
      * @param  int  $reannounceSeconds  How long a notice is given to be acted on before it is first sent again.
      * @param  KeepWarm|null  $keepWarm  When to wake an idle session to keep its prompt cache warm, or
      *                                   null for never, which is the default (#279).
+     * @param  bool  $stopHook  Whether a stop hook will deliver events at the end of a turn, which
+     *                          decides what a channel notice tells the agent to do (#306).
      *
      * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -218,6 +241,7 @@ final class Bridge
         private readonly ?Closure $join = null,
         private readonly int $reannounceSeconds = self::REANNOUNCE_SECONDS,
         private readonly ?KeepWarm $keepWarm = null,
+        private readonly bool $stopHook = true,
     ) {}
 
     /**
@@ -943,6 +967,14 @@ final class Bridge
         // A tool call is a turn running, whatever the tool
         if ($method === 'tools/call') {
             $this->keepWarm?->active();
+
+            // **Without a stop hook, the agent's own read is what a repeat waits for** (#306).
+            // Repeats stop when the sink changes, and with no hook nothing ever drains it, so
+            // every batch would otherwise wake the agent six times over half an hour, each time
+            // told to read the feed again. Once it has read, the notice has done its job.
+            if (! $this->stopHook && \is_array($decoded['params'] ?? null) && ($decoded['params']['name'] ?? null) === self::FEED_READ_TOOL) {
+                $this->announcedSink = null;
+            }
         }
 
         if ($method === 'notifications/initialized') {
@@ -1037,7 +1069,8 @@ final class Bridge
         if ($this->channel && ($this->follower instanceof FleetFollower || $this->join instanceof Closure)) {
             $capabilities['experimental'] = [self::CHANNEL_CAPABILITY => new stdClass];
 
-            $instructions[] = self::CHANNEL_INSTRUCTIONS.($this->keepWarm instanceof KeepWarm ? KeepWarm::INSTRUCTIONS : '');
+            $instructions[] = ($this->stopHook ? self::CHANNEL_INSTRUCTIONS : self::CHANNEL_INSTRUCTIONS_WITHOUT_HOOK)
+                .($this->keepWarm instanceof KeepWarm ? KeepWarm::INSTRUCTIONS : '');
         }
 
         return [

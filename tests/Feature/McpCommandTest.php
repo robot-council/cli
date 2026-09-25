@@ -41,6 +41,10 @@ beforeEach(function (): void {
 
     putenv('XDG_STATE_HOME='.$this->stateDirectory);
 
+    // A Claude Code bridge now reads the user's settings for a stop hook (#306); point it at an
+    // empty directory so a run reads nothing of the developer's own
+    putenv('CLAUDE_CONFIG_DIR='.$this->stateDirectory.'/claude');
+
     // An unmatched URL must fail loudly rather than reach the network.
     Http::preventStrayRequests();
 });
@@ -52,6 +56,7 @@ afterEach(function (): void {
     @rmdir($this->stateDirectory);
 
     putenv('XDG_STATE_HOME');
+    putenv('CLAUDE_CONFIG_DIR');
     putenv('ROBOT_COUNCIL_HARNESS');
 });
 
