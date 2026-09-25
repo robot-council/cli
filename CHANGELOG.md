@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.27 — Addressed Narration Reaches Its Seat (2026-09-25)
+
+A narration addressed to a session now reaches it. The fleet's coordinator answers a seat with a narration addressed to it by `meta.to` or `meta.to_tasks`, and until now the bridge discarded every narration, so those replies went unseen until the seat happened to read the feed itself. Narration addressed to nobody, or to other sessions, is still kept out.
+
+### What's fixed
+- Deliver a narration addressed to a session to its sink, so a coordinator's reply is seen [#316](https://github.com/robot-council/cli/pull/316)
+
 ## v0.4.26 — Adding a Cursor Seat (2026-09-25)
 
 The README's Cursor wiring section now notes that on macOS the launcher needs `php` on the `PATH` Cursor inherits, and that whether a Cursor started from the Dock gets it has not been measured. The operator's guide on the wiki now covers adding a Cursor seat, and describes this release line.
