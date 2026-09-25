@@ -22,6 +22,7 @@ use App\Support\FleetFollower;
 use App\Support\PendingEvents;
 use App\Support\Session;
 use Illuminate\Http\Client\Factory;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 
 const FOLLOW_SERVICE = 'https://fleet.example.test';
@@ -174,6 +175,14 @@ it('ignores a placement instruction addressed to another session, or to nobody',
 
 it('ignores a placement instruction this session authored, even one addressed to itself', function (): void {
     expect(followed([feedEvent('placement.instruction', actor: MINE, meta: ['to' => [MINE]])]))->toBeEmpty();
+});
+
+it("reads the feed without acknowledging it, so the agent's own read still resumes before what it reads", function (): void {
+    followed([feedEvent('directive', body: 'placed on you')]);
+
+    Http::assertSent(static fn (Request $request): bool => str_contains($request->url(), '/robot-council/api/events')
+        && ($request->data()['acknowledge'] ?? null) === 'false'
+        && \array_key_exists('after', $request->data()));
 });
 
 it('ignores an event this session authored', function (): void {

@@ -470,8 +470,14 @@ final class FleetFollower
      */
     private function read(): array
     {
+        // **`acknowledge=false`, because the stored position is the agent's, not this follower's**
+        // (#289, `robot-council/core#354`). The agent's own `events_read` with no `after` resumes
+        // from it, so a poll that acknowledged as it went would count everything it read as seen by
+        // an agent that was never shown it -- a task placed on the session included. This follower
+        // keeps its own position in `$cursor`. A service that predates the flag ignores it, and
+        // behaves as it always did.
         $response = $this->session->request()
-            ->get($this->service.'/robot-council/api/events', ['after' => $this->cursor]);
+            ->get($this->service.'/robot-council/api/events', ['after' => $this->cursor, 'acknowledge' => 'false']);
 
         if (! $response->successful()) {
             // **The status travels as the exception's code**, so the caller can tell a refusal from
