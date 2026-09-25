@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.22 — Measuring the Secret Service Store (2026-09-25)
+
+The Secret Service credential store, used on Linux, now has measured answers to its two open questions, and neither needed a behavior change. Keys that differ only in case stay apart. And `secret-tool` cannot tell a missing credential from a failure, so a locked keyring reads as "not enrolled", which the store now says where it decides.
+
+### Maintenance and tooling
+- Pin the Secret Service store's case-sensitivity, and record that it cannot tell a missing credential from a failure [#296](https://github.com/robot-council/cli/pull/296)
+
 ## v0.4.21 — Keeping an Idle Session Warm (2026-09-25)
 
 The bridge can now keep an idle Claude Code session's prompt cache warm, so the first turn of the next task does not pay to rewrite the whole conversation. It is off unless `mcp` is given `--keep-warm=<minutes>`, and `--keep-warm-for=<minutes>` stops it once a session has been idle that long. The README section "Keeping an idle Claude Code session's cache warm" says how to set the interval from the cache's TTL, and why a five-minute TTL gains nothing.
