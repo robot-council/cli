@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.10 — One Place to Say It (2026-09-24)
+
+The three commands whose stdout is somebody else's input now say their diagnostics through one helper.
+
+### Maintenance and tooling
+- Say every diagnostic through one `Stderr` helper, keeping each command's reason at its own call [#254](https://github.com/robot-council/cli/pull/254)
+
 ## v0.4.9 — Tags That Composer Resolves (2026-09-24)
 
 The release-notes skill's description now agrees with its body that a tag here is a Composer constraint.
