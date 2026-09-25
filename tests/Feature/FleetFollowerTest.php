@@ -177,6 +177,50 @@ it('ignores a placement instruction this session authored, even one addressed to
     expect(followed([feedEvent('placement.instruction', actor: MINE, meta: ['to' => [MINE]])]))->toBeEmpty();
 });
 
+/**
+ * A dataset's meta, keyed by name as an event's meta is.
+ *
+ * @param  array<array-key, mixed>  $meta  The dataset row.
+ * @return array<string, mixed>
+ */
+function narrationMeta(array $meta): array
+{
+    $named = [];
+
+    foreach ($meta as $key => $value) {
+        $named[(string) $key] = $value;
+    }
+
+    return $named;
+}
+
+it('leaves a narration addressed to this session, by `to` or by a task it holds', function (array $meta): void {
+    // #313: how a coordinator answers a seat. Event 2113 on 2026-09-25 carried both forms
+    expect(followed([feedEvent('narration', meta: narrationMeta($meta), body: 'Approved, push once it is made.')]))->toHaveCount(1);
+})->with([
+    'by `to`' => [['to' => [MINE]]],
+    'by `to_tasks`' => [['to_tasks' => [['task_id' => 100, 'session_id' => MINE]]]],
+    'by both, once' => [['to' => [MINE], 'to_tasks' => [['task_id' => 100, 'session_id' => MINE]]]],
+    'among others' => [['to' => [THEIRS, MINE]]],
+]);
+
+it('ignores a narration addressed to other sessions, to nobody, or malformed', function (array $meta): void {
+    expect(followed([feedEvent('narration', meta: narrationMeta($meta))]))->toBeEmpty();
+})->with([
+    'to another session' => [['to' => [THEIRS]]],
+    "to another session's task" => [['to_tasks' => [['task_id' => 100, 'session_id' => THEIRS]]]],
+    'to nobody' => [[]],
+    '`to` as a string id' => [['to' => [(string) MINE]]],
+    '`to` not a list' => [['to' => MINE]],
+    '`to_tasks` not a list' => [['to_tasks' => MINE]],
+    '`to_tasks` entry with no session' => [['to_tasks' => [['task_id' => 100]]]],
+    '`to_tasks` session as a string' => [['to_tasks' => [['task_id' => 100, 'session_id' => (string) MINE]]]],
+]);
+
+it('ignores a narration this session wrote, even one addressed to itself', function (): void {
+    expect(followed([feedEvent('narration', actor: MINE, meta: ['to' => [MINE], 'to_tasks' => [['task_id' => 1, 'session_id' => MINE]]])]))->toBeEmpty();
+});
+
 it("reads the feed without acknowledging it, so the agent's own read still resumes before what it reads", function (): void {
     followed([feedEvent('directive', body: 'placed on you')]);
 

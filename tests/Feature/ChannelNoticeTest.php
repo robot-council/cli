@@ -275,6 +275,24 @@ it('announces new events the follower left, once the harness has initialized', f
         ->and(json_encode($notices[0]))->not->toContain('hold new migrations');
 });
 
+it('announces a narration addressed to this session, and nothing for one addressed elsewhere', function (int $to, int $notices): void {
+    // #313: a coordinator's reply by narration used to reach no seat at all
+    channelService([[
+        'id' => 21,
+        'type' => 'narration',
+        'body' => 'Approved, push once it is made.',
+        'meta' => ['to' => [$to]],
+        'created_at' => '2026-09-25T20:45:00+00:00',
+        'actor' => ['session_id' => 9, 'github_login' => 'otherdev', 'coordinator_direct' => true],
+    ]]);
+
+    expect(channelNotices(channelRun([CHANNEL_INITIALIZE, CHANNEL_INITIALIZED])))->toHaveCount($notices);
+})->with([
+    // The fake service starts this bridge's session as 7
+    'to this session' => [7, 1],
+    'to another' => [8, 0],
+]);
+
 it('announces nothing before the harness has said it finished initializing', function (): void {
     channelService([channelDirective(11)]);
 
