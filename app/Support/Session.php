@@ -279,6 +279,35 @@ final class Session
     }
 
     /**
+     * Tell the service the bridge's watcher is still watching, and say what it answered.
+     *
+     * **Apart from `heartbeat()`, because it answers a different question** (#264). Every request
+     * an agent makes refreshes the session's contact, so a lane whose bridge watcher died while its
+     * agent kept calling tools would read as watched. Core records this one alone, in its own
+     * column, and the lane board's `Watcher` reads it (`robot-council/core#337`).
+     *
+     * @return int The HTTP status, or 0 when nothing came back. `404` is a service without the
+     *             route, which is every release before the one carrying `robot-council/core#350`.
+     */
+    public function watcherHeartbeat(): int
+    {
+        if (! $this->token instanceof Credential) {
+            return 0;
+        }
+
+        try {
+            return $this->http
+                ->acceptJson()
+                ->asJson()
+                ->withToken($this->token->reveal())
+                ->post($this->service.'/robot-council/api/agent/watcher')
+                ->status();
+        } catch (Throwable) {
+            return 0;
+        }
+    }
+
+    /**
      * Whether the token is close enough to expiry to be worth replacing now.
      *
      * Renewing early rather than on a 401 means an ordinary tool call does not pay for the round
