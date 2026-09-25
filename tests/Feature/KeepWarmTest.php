@@ -136,6 +136,7 @@ beforeEach(function (): void {
     $this->stateDirectory = sys_get_temp_dir().'/rc-warm-'.bin2hex(random_bytes(6));
 
     putenv('XDG_STATE_HOME='.$this->stateDirectory);
+    putenv('CLAUDE_CONFIG_DIR='.$this->stateDirectory.'/claude');
     putenv('ROBOT_COUNCIL_SERVICE='.WARM_SERVICE);
     putenv('ROBOT_COUNCIL_HARNESS=claude');
 
@@ -146,6 +147,7 @@ afterEach(function (): void {
     File::deleteDirectory($this->stateDirectory);
 
     putenv('XDG_STATE_HOME');
+    putenv('CLAUDE_CONFIG_DIR');
     putenv('ROBOT_COUNCIL_SERVICE');
     putenv('ROBOT_COUNCIL_HARNESS');
 });

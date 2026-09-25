@@ -12,6 +12,7 @@ use App\Support\MachineIdentity;
 use App\Support\PendingEvents;
 use App\Support\Stderr;
 use App\Support\StdinReader;
+use App\Support\StopHooks;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Http\Client\Factory;
@@ -92,6 +93,7 @@ final class McpCommand extends Command
             channel: $harness === 'claude',
             join: $join(...),
             keepWarm: $this->keepWarm($service, $harness),
+            stopHook: $this->stopHookDelivers($harness),
         );
 
         if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
@@ -154,6 +156,35 @@ final class McpCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Whether a stop hook will deliver events to this session at the end of a turn (#306).
+     *
+     * **Claude Code only.** It is the one harness this bridge wakes through a channel, and so the
+     * one whose agent is told what a notice means; every other harness keeps today's instructions
+     * and is not inspected. Said once, on stderr, which Claude Code keeps as the server's log, so
+     * an operator has a line to grep rather than a silence to interpret.
+     *
+     * @param  string  $harness  Which harness this process is.
+     */
+    private function stopHookDelivers(string $harness): bool
+    {
+        if ($harness !== 'claude') {
+            return true;
+        }
+
+        $directory = getcwd();
+
+        // Where the session was launched is where Claude Code started this server, measured on
+        // 2.1.282 (#299), so the project's settings are read from here
+        $hooks = StopHooks::inspect(\is_string($directory) ? $directory : '.');
+
+        foreach ($hooks->report() as $line) {
+            $this->diagnostic($line);
+        }
+
+        return $hooks->delivers();
     }
 
     /**

@@ -108,7 +108,7 @@ function channelDirective(int $id): array
  * @param  string|null  $outPath  A file to write to instead of an anonymous one, for a feeder that waits on it.
  * @return list<array<array-key, mixed>> What the bridge wrote.
  */
-function channelRun(array $lines, bool $withFollower = true, bool $channel = true, $in = null, int $reannounceSeconds = Bridge::REANNOUNCE_SECONDS, ?string $outPath = null): array
+function channelRun(array $lines, bool $withFollower = true, bool $channel = true, $in = null, int $reannounceSeconds = Bridge::REANNOUNCE_SECONDS, ?string $outPath = null, bool $stopHook = true): array
 {
     $session = new Session(app(Factory::class), CHANNEL_SERVICE, new Credential(CHANNEL_INSTALLATION));
     $session->start();
@@ -119,7 +119,7 @@ function channelRun(array $lines, bool $withFollower = true, bool $channel = tru
 
     $out = $outPath === null ? tmpfile() : fopen($outPath, 'w+');
 
-    new Bridge($session, CHANNEL_SERVICE, follower: $follower, channel: $channel, reannounceSeconds: $reannounceSeconds)
+    new Bridge($session, CHANNEL_SERVICE, follower: $follower, channel: $channel, reannounceSeconds: $reannounceSeconds, stopHook: $stopHook)
         ->run($in ?? channelInput($lines), $out, fn (string $m): null => null);
 
     rewind($out);
@@ -458,13 +458,13 @@ function channelPages(array $pages): mixed
  * @param  list<string|array{await: string}|array{put: string, with: string}>  $steps  What the harness does.
  * @return list<mixed> Each notice's meta, in order.
  */
-function channelRepeats(array $steps, bool $channel = true, int $reannounceSeconds = 0): array
+function channelRepeats(array $steps, bool $channel = true, int $reannounceSeconds = 0, bool $stopHook = true): array
 {
     $outPath = (string) tempnam(sys_get_temp_dir(), 'channel-out-');
 
     [$feeder, $stdout] = channelFeeder($steps, $outPath);
 
-    $notices = channelNotices(channelRun([], channel: $channel, in: $stdout, reannounceSeconds: $reannounceSeconds, outPath: $outPath));
+    $notices = channelNotices(channelRun([], channel: $channel, in: $stdout, reannounceSeconds: $reannounceSeconds, outPath: $outPath, stopHook: $stopHook));
 
     proc_close($feeder);
     File::delete($outPath);
@@ -591,3 +591,21 @@ it('repeats nothing before the harness has initialized', function (): void {
 
     expect(channelRepeats([CHANNEL_INITIALIZE, ...channelPings(3)]))->toBeEmpty();
 })->skipOnWindows();
+
+it('stops announcing once the agent has read the feed itself, when no stop hook will drain the sink', function (bool $stopHook, int $notices): void {
+    // #306: with no hook nothing drains the sink, so a repeat would otherwise wake the agent six
+    // times over half an hour for one batch it has already read
+    channelService(feed: channelPages([[channelDirective(11)]]));
+
+    $metas = channelRepeats([
+        ...channelHandshake(),
+        '{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"'.Bridge::FEED_READ_TOOL.'","arguments":{}}}',
+        ...channelPings(Bridge::REANNOUNCE_LIMIT + 2),
+    ], stopHook: $stopHook);
+
+    expect($metas)->toHaveCount($notices);
+})->with([
+    // The control: with a hook, reading the feed is not what settles a notice, so nothing changes
+    'with a hook' => [true, Bridge::REANNOUNCE_LIMIT + 1],
+    'without one' => [false, 1],
+])->skipOnWindows();
