@@ -134,6 +134,10 @@ function goneService(int $renewStatus = 200, int $sessionTokenStatus = 200, int 
         '*/api/agent/heartbeat' => $sessionTokenStatus === 200
             ? Http::response(['ok' => true], 200)
             : Http::response(null, $sessionTokenStatus),
+        // The watcher's own heartbeat takes the session token too, so it answers as the rest do.
+        '*/api/agent/watcher' => $sessionTokenStatus === 200
+            ? Http::response(null, 204)
+            : Http::response(null, $sessionTokenStatus),
         '*/api/mcp' => ($callStatus ?? $sessionTokenStatus) === 200
             ? Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200)
             : Http::response('', $callStatus ?? $sessionTokenStatus),

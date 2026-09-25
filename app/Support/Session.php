@@ -7,6 +7,7 @@ namespace App\Support;
 use App\Support\Credentials\Credential;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Response;
 use RuntimeException;
 use Throwable;
 
@@ -101,6 +102,9 @@ final class Session
      * `project_id` keeps being sent while the service still stores it. Retiring it is the epic's
      * own final slice, not this one.
      *
+     * **The platform rides along, read rather than configured** (#266): `Platform::report()`, on
+     * every start, and dropped for a retry if the service refuses it.
+     *
      * @param  string|null  $projectId  The old single label, when the caller names one.
      * @param  string|null  $repository  The GitHub repository, as `owner/name`.
      * @param  string|null  $workLocation  Which working copy of it this is.
@@ -109,18 +113,24 @@ final class Session
      */
     public function start(?string $projectId = null, ?string $repository = null, ?string $workLocation = null): void
     {
-        $response = $this->http
-            ->acceptJson()
-            ->asJson()
-            ->withToken($this->installation->reveal())
-            // **Filtered on null rather than on falsiness.** A bare `array_filter` also drops `'0'`,
-            // and `0` is a legal work location -- a worktree may be called that -- so a directory
-            // named `0` would have silently reported no location at all.
-            ->post($this->service.'/robot-council/api/sessions', array_filter([
-                'project_id' => $projectId,
-                'repository' => $repository,
-                'work_location' => $workLocation,
-            ], static fn (?string $value): bool => $value !== null));
+        // **Filtered on null rather than on falsiness.** A bare `array_filter` also drops `'0'`,
+        // and `0` is a legal work location -- a worktree may be called that -- so a directory named
+        // `0` would have silently reported no location at all.
+        $identity = array_filter([
+            'project_id' => $projectId,
+            'repository' => $repository,
+            'work_location' => $workLocation,
+        ], static fn (?string $value): bool => $value !== null);
+
+        $response = $this->post([...$identity, 'platform' => Platform::report()]);
+
+        // **The platform must never be the reason a session fails to start** (#266). A service
+        // without the field ignores it (`robot-council/core` before #351 validates only the keys it
+        // lists), but one that knows it refuses a value outside its own bounds with a 422 naming
+        // the field -- so a refusal that names `platform` is answered by starting without it.
+        if ($response->status() === 422 && $this->refusedPlatform($response->json())) {
+            $response = $this->post($identity);
+        }
 
         if ($response->status() === 401) {
             throw new RuntimeException('This machine is not enrolled, or its credential was revoked. Run `robot-council enroll`.');
@@ -142,6 +152,36 @@ final class Session
 
         $this->expiresAt = \is_int($body['expires_in'] ?? null) ? time() + $body['expires_in'] : null;
         $this->abilities = $this->abilitiesIn($body);
+    }
+
+    /**
+     * Ask the service to start a session with this body.
+     *
+     * @param  array<string, mixed>  $body  What to send.
+     */
+    private function post(array $body): Response
+    {
+        return $this->http
+            ->acceptJson()
+            ->asJson()
+            ->withToken($this->installation->reveal())
+            ->post($this->service.'/robot-council/api/sessions', $body);
+    }
+
+    /**
+     * Whether a 422's body names the `platform` field among its errors.
+     *
+     * @param  mixed  $body  The decoded response.
+     */
+    private function refusedPlatform(mixed $body): bool
+    {
+        $errors = \is_array($body) ? ($body['errors'] ?? null) : null;
+
+        if (! \is_array($errors)) {
+            return false;
+        }
+
+        return array_any(array_keys($errors), fn (int|string $field): bool => \is_string($field) && ($field === 'platform' || str_starts_with($field, 'platform.')));
     }
 
     /**
@@ -276,6 +316,35 @@ final class Session
         // is the earliest routine signal that something is wrong, and what it means is settled by
         // a renewal, which answers 409 for exactly that case (#165).
         return $response->status() !== 401;
+    }
+
+    /**
+     * Tell the service the bridge's watcher is still watching, and say what it answered.
+     *
+     * **Apart from `heartbeat()`, because it answers a different question** (#264). Every request
+     * an agent makes refreshes the session's contact, so a lane whose bridge watcher died while its
+     * agent kept calling tools would read as watched. Core records this one alone, in its own
+     * column, and the lane board's `Watcher` reads it (`robot-council/core#337`).
+     *
+     * @return int The HTTP status, or 0 when nothing came back. `404` is a service without the
+     *             route, which is every release before the one carrying `robot-council/core#350`.
+     */
+    public function watcherHeartbeat(): int
+    {
+        if (! $this->token instanceof Credential) {
+            return 0;
+        }
+
+        try {
+            return $this->http
+                ->acceptJson()
+                ->asJson()
+                ->withToken($this->token->reveal())
+                ->post($this->service.'/robot-council/api/agent/watcher')
+                ->status();
+        } catch (Throwable) {
+            return 0;
+        }
     }
 
     /**
