@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.21 — Keeping an Idle Session Warm (2026-09-25)
+
+The bridge can now keep an idle Claude Code session's prompt cache warm, so the first turn of the next task does not pay to rewrite the whole conversation. It is off unless `mcp` is given `--keep-warm=<minutes>`, and `--keep-warm-for=<minutes>` stops it once a session has been idle that long. The README section "Keeping an idle Claude Code session's cache warm" says how to set the interval from the cache's TTL, and why a five-minute TTL gains nothing.
+
+### What's new
+- Keep an idle Claude Code session's prompt cache warm from the bridge, on request [#292](https://github.com/robot-council/cli/pull/292)
+
 ## v0.4.20 — Reading Without Acknowledging (2026-09-25)
 
 An agent's own read of the change feed now starts before the events its bridge has already read, so a task placed on it is shown rather than counted as seen.
