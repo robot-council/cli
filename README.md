@@ -436,6 +436,21 @@ the seat cannot be woken. The wiki's
 has the invocation, its requirements, and how to confirm it registered. Cursor and Codex have no such
 notice, so for them the hook delivers at the next turn the operator starts.
 
+**Without a stop hook, a woken Claude Code agent is told to read the feed itself**
+([#306](https://github.com/robot-council/cli/issues/306)). The notice only wakes the agent, and
+the hook is what delivers. On 2026-09-25, six seats with channels on and no `Stop` hook each woke
+within a second of a placement, ended the turn as instructed, and saw nothing for over forty minutes.
+So under Claude Code, the bridge checks at start for a `Stop` hook in the settings Claude Code reads
+for the launch folder: `settings.json` and `settings.local.json` in `~/.claude` (or
+`CLAUDE_CONFIG_DIR`), and in the project's `.claude`. If there is none, or a file sets
+`disableAllHooks`, the agent is told to call `events_read` on a notice and check its tasks, rather
+than to end the turn. Any `Stop` hook with a command counts as found, whatever it runs. Either way,
+the bridge says which case applied once, on stderr, which Claude Code keeps as the server's log:
+`stop hook: found in <file>.` or `stop hook: none found; agents told to read the feed themselves.`
+A settings file that is not valid JSON is named there and treated as having no hook. Reading the
+feed that way works, but the hook is still worth installing, because it hands over events at every
+turn end and not only when a notice wakes the agent.
+
 **A hook that always continues the turn is a session that never stops.** `robot-council pending`
 prints nothing and exits 0 when the fleet has been quiet, and the script below ends the turn on empty
 output. That one line is the whole difference between a hook and a loop.
