@@ -571,7 +571,7 @@ final class Bridge
         try {
             $response = $this->exchange($session, $message);
 
-            $this->reply($this->everyTool($session, $message, $response), $out, $diagnostic);
+            $this->reply($message, $this->everyTool($session, $message, $response), $out, $diagnostic);
         } catch (SessionHasGone $gone) {
             // **The busy bridge's path to the same news.** A tool call is refused, the renewal
             // `exchange()` makes answers `409`, and there is nothing to retry: this session's
@@ -585,7 +585,61 @@ final class Bridge
             // To stderr, never to stdout: a harness parsing stdout would read a diagnostic as a
             // malformed protocol message rather than as an error
             $diagnostic($throwable->getMessage());
+
+            // **And to the agent, as the answer to its call** (#245). The bridge carries on, so
+            // without a reply the harness waits on this id until its own timeout, which is worse
+            // than a closed connection: nothing ever closes. Guarded, because the failure may BE
+            // stdout -- a broken pipe -- and the answer then cannot be written either; letting that
+            // second failure escape would stop a loop that used to carry on.
+            try {
+                $this->failCall($message, $out, $throwable->getMessage());
+            } catch (Throwable) {
+                // Already said on stderr above; there is nowhere else to say it.
+            }
         }
+    }
+
+    /**
+     * Answer a request the bridge sent the fleet and could relay no reply for.
+     *
+     * `-32603`, JSON-RPC's internal error, because the call may never have reached the fleet and
+     * the bridge cannot say what the fleet would have answered. The message is the reason already
+     * said on stderr, so the agent reads why its call failed rather than timing out on it.
+     *
+     * @param  string  $message  The request, as the harness wrote it.
+     * @param  resource  $out  Where protocol messages go.
+     * @param  string  $reason  Why there is no reply.
+     */
+    private function failCall(string $message, $out, string $reason): void
+    {
+        $id = $this->requestId($message);
+
+        if ($id !== null) {
+            $this->error($out, $id, -32603, $reason);
+        }
+    }
+
+    /**
+     * The id of a request, or null for anything that must not be answered.
+     *
+     * A notification carries no id, and a message with an `id` but no `method` is a response from
+     * the client, which JSON-RPC forbids answering. MCP requires a string or an integer id, so a
+     * `null` or fractional one names no request either. A list never carries an `id` key, so a
+     * batch falls out here too.
+     *
+     * @param  string  $message  One JSON-RPC message, as the harness wrote it.
+     */
+    private function requestId(string $message): int|string|null
+    {
+        $decoded = json_decode($message, true);
+
+        if (! \is_array($decoded) || ! \array_key_exists('id', $decoded) || ! \array_key_exists('method', $decoded)) {
+            return null;
+        }
+
+        $id = $decoded['id'];
+
+        return \is_int($id) || \is_string($id) ? $id : null;
     }
 
     /**
@@ -607,21 +661,11 @@ final class Bridge
      */
     private function refuseAfterTheEnding(string $message, $out): void
     {
-        $decoded = json_decode($message, true);
+        $id = $this->requestId($message);
 
-        // A list never carries an `id` key, so a batch falls out here too. And no `method` means a
-        // RESPONSE from the client, which JSON-RPC forbids answering.
-        if (! \is_array($decoded) || ! \array_key_exists('id', $decoded) || ! \array_key_exists('method', $decoded)) {
-            return;
+        if ($id !== null) {
+            $this->error($out, $id, -32002, $this->endedSentence ?? 'The fleet ended this session.');
         }
-
-        $id = $decoded['id'];
-
-        if (! \is_int($id) && ! \is_string($id)) {
-            return;
-        }
-
-        $this->error($out, $id, -32002, $this->endedSentence ?? 'The fleet ended this session.');
     }
 
     /**
@@ -731,7 +775,16 @@ final class Bridge
             $next = clone $request;
             $next->params = $nextParams;
 
-            $following = $this->toolPage(json_decode(trim($this->exchange($session, (string) json_encode($next, JSON_UNESCAPED_SLASHES)))));
+            // **A later page that fails keeps the first**, as every other surprise here does: the
+            // session-ended news still ends the loop, but a timeout on page two must not cost the
+            // agent the tools page one already listed (#245's review).
+            try {
+                $following = $this->toolPage(json_decode(trim($this->exchange($session, (string) json_encode($next, JSON_UNESCAPED_SLASHES)))));
+            } catch (SessionHasGone $gone) {
+                throw $gone;
+            } catch (Throwable) {
+                return $first;
+            }
 
             if ($following === null) {
                 return $first;
@@ -794,23 +847,30 @@ final class Bridge
      * - **Anything that is not JSON at all**, such as a maintenance page or a proxy interstitial.
      *
      * A harness parses this stream, so each of those is a malformed message rather than a visible
-     * error. They go to the operator instead.
+     * error. They go to the operator instead, and a REQUEST that got one is answered with an error
+     * saying so, since the harness is otherwise left waiting on its id (#245).
      *
+     * @param  string  $message  What the harness sent, which decides whether an answer is owed.
      * @param  string  $response  What the service sent back.
      * @param  resource  $out  Where protocol messages go.
      * @param  callable(string):void  $diagnostic  Where anything else goes.
      */
-    private function reply(string $response, $out, callable $diagnostic): void
+    private function reply(string $message, string $response, $out, callable $diagnostic): void
     {
         $trimmed = trim($response);
 
         if ($trimmed === '') {
-            // A notification, answered with 202 and no body. Nothing to relay, and nothing wrong.
+            // A notification, answered with 202 and no body. Nothing to relay, and nothing wrong --
+            // unless it was a request, which is owed an answer (#245).
+            $this->failCall($message, $out, 'The service answered this request with nothing.');
+
             return;
         }
 
         if (str_contains($trimmed, "\n") || ! \is_array(json_decode($trimmed, true))) {
             $diagnostic('The service answered with something that is not a protocol message.');
+
+            $this->failCall($message, $out, 'The service answered with something that is not a protocol message.');
 
             return;
         }
@@ -1144,7 +1204,9 @@ final class Bridge
      */
     private function encode(array $message): string
     {
-        $encoded = json_encode($message, JSON_UNESCAPED_SLASHES);
+        // Invalid UTF-8 substituted rather than refused: a reason read from an exception may carry
+        // a stray byte, and refusing it would answer with a null id the harness cannot match.
+        $encoded = json_encode($message, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
 
         if ($encoded !== false) {
             return $encoded;
@@ -1187,7 +1249,10 @@ final class Bridge
      * Write a tool result carrying one sentence.
      *
      * **`isError` rather than a JSON-RPC error**, so the agent reads the sentence: a protocol error
-     * is the harness's to handle, and most report it as a failed call without the text.
+     * is the harness's to handle, and most report it as a failed call without the text. Used for
+     * the answers the bridge chooses to give, such as `join`'s. A call the bridge could not serve
+     * at all -- the session ended (#226), or the fleet could not be reached (#245) -- gets a
+     * JSON-RPC error instead, as #221 decided: there is no tool result to report.
      *
      * @param  resource  $out  Where protocol messages go.
      */

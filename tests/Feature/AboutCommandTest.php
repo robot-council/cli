@@ -35,6 +35,19 @@ it('registers the command under its own name', function (): void {
     expect(array_keys($this->app->make(Kernel::class)->all()))->toContain('about');
 });
 
+it("registers none of Laravel Zero's development commands", function (): void {
+    // **They arrive in any environment but `production`**, and this application is installed
+    // through Composer, where nothing else sets one. An installed copy offered `test`, which
+    // crashed without dev dependencies, and `make:command`, which wrote into `vendor/` (#241).
+    expect(array_keys($this->app->make(Kernel::class)->all()))
+        ->not->toContain('test')
+        ->not->toContain('app:build')
+        ->not->toContain('app:install')
+        ->not->toContain('app:rename')
+        ->not->toContain('make:command')
+        ->not->toContain('make:test');
+});
+
 it('prints no credential-shaped value, since it holds none', function (): void {
     Artisan::call('about');
 

@@ -17,6 +17,7 @@ declare(strict_types=1);
 use App\Support\Bridge;
 use App\Support\Credentials\Credential;
 use App\Support\Session;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
@@ -216,9 +217,15 @@ it('writes only parseable protocol messages to stdout, across a whole run', func
         expect(json_decode($line, true))->toBeArray("stdout line {$index} must parse: ".var_export($line, true));
     }
 
-    // Two of the four exchanges had a protocol message to relay; the notification and the HTML
-    // page did not, and neither reached stdout
-    expect($lines)->toHaveCount(2);
+    // Two of the four exchanges had a protocol message to relay. The notification's empty 202
+    // reached nothing, and the HTML page did not reach stdout: the request it answered got an
+    // error saying so instead, since the harness would otherwise wait on id 3 forever (#245).
+    expect($lines)->toHaveCount(3)
+        ->and(json_decode($lines[1], true))->toBe([
+            'jsonrpc' => '2.0',
+            'id' => 3,
+            'error' => ['code' => -32603, 'message' => 'The service answered with something that is not a protocol message.'],
+        ]);
 });
 
 it('relays a message that arrives in pieces, rather than forwarding each piece', function (): void {
@@ -356,3 +363,181 @@ it('sends no heartbeat before one is due, which is what makes the test above mea
 
     Http::assertNotSent(fn (Request $request): bool => str_ends_with($request->url(), '/agent/heartbeat'));
 });
+
+/**
+ * Every line the bridge wrote, each decoded, failing the test on any that is not a protocol message.
+ *
+ * @param  resource  $out  What the bridge wrote to.
+ * @return list<array<array-key, mixed>>
+ */
+function bridgeReplies($out): array
+{
+    rewind($out);
+
+    $raw = (string) stream_get_contents($out);
+    $replies = [];
+
+    foreach ($raw === '' ? [] : explode("\n", rtrim($raw, "\n")) as $line) {
+        $reply = json_decode($line, true);
+
+        if (! is_array($reply)) {
+            throw new RuntimeException('stdout carried something that is not a protocol message: '.$line);
+        }
+
+        $replies[] = $reply;
+    }
+
+    return $replies;
+}
+
+it('answers a call refused, renewed and refused again, and keeps relaying', function (): void {
+    // #185's state: the renewal succeeds and the fleet still refuses the new token. The bridge
+    // carries on, so before #245 the harness waited on this id until its own timeout.
+    Http::fake([
+        '*/api/sessions/7/renew' => Http::response(['token' => SECOND_TOKEN, 'expires_in' => 3600], 200),
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/mcp' => Http::sequence()
+            ->push('', 401)
+            ->push('', 401)
+            ->push('{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}', 200),
+    ]);
+
+    $out = tmpfile();
+
+    new Bridge(startedSession(), BRIDGE_SERVICE)->run(streamOf(
+        '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_list"}}'."\n"
+            .'{"jsonrpc":"2.0","id":2,"method":"tools/list"}'."\n"
+    ), $out, fn (string $m): null => null);
+
+    $replies = bridgeReplies($out);
+
+    expect($replies)->toHaveCount(2)
+        ->and($replies[0]['id'])->toBe(1)
+        ->and($replies[0]['error'])->toBe([
+            'code' => -32603,
+            'message' => 'The service issued a new token for this session and refused it on the next call, so this message did not reach the fleet.',
+        ])
+
+        // Still relaying: the next call reached the fleet and its answer came back.
+        ->and($replies[1])->toBe(['jsonrpc' => '2.0', 'id' => 2, 'result' => ['tools' => []]]);
+});
+
+it('answers a call whose request never reached the fleet', function (): void {
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/mcp' => function (): never {
+            throw new ConnectionException('cURL error 28: Operation timed out');
+        },
+    ]);
+
+    $out = tmpfile();
+
+    new Bridge(startedSession(), BRIDGE_SERVICE)->run(streamOf(
+        '{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"task_list"}}'."\n"
+            // A notification whose forwarding fails the same way gets no reply: it names no request.
+            .'{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"call-0"}}'."\n"
+    ), $out, fn (string $m): null => null);
+
+    expect(bridgeReplies($out))->toBe([[
+        'jsonrpc' => '2.0',
+        'id' => 'call-1',
+        'error' => ['code' => -32603, 'message' => 'cURL error 28: Operation timed out'],
+    ]]);
+});
+
+it('answers a request the fleet answered with nothing', function (): void {
+    // An empty body is right for a notification and wrong for a request, which is owed an answer.
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/mcp' => Http::response('', 200),
+    ]);
+
+    $out = tmpfile();
+
+    new Bridge(startedSession(), BRIDGE_SERVICE)->run(streamOf(
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"task_list"}}'."\n"
+            .'{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4}}'."\n"
+    ), $out, fn (string $m): null => null);
+
+    expect(bridgeReplies($out))->toBe([[
+        'jsonrpc' => '2.0',
+        'id' => 5,
+        'error' => ['code' => -32603, 'message' => 'The service answered this request with nothing.'],
+    ]]);
+});
+
+it('keeps the first page of tools when a later page fails', function (): void {
+    // `everyTool()` returns the first page for every other surprise; a timeout on page two must not
+    // cost an agent the tools page one listed, which Cursor, reading only one page, depends on.
+    $first = '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"task_list","inputSchema":{"type":"object","properties":{}}}],"nextCursor":"p2"}}';
+    $pages = 0;
+
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/mcp' => function () use (&$pages, $first) {
+            if (++$pages === 1) {
+                return Http::response($first, 200);
+            }
+
+            throw new ConnectionException('cURL error 28: Operation timed out');
+        },
+    ]);
+
+    $out = tmpfile();
+
+    new Bridge(startedSession(), BRIDGE_SERVICE)
+        ->run(streamOf('{"jsonrpc":"2.0","id":1,"method":"tools/list"}'."\n"), $out, fn (string $m): null => null);
+
+    expect(bridgeReplies($out))->toBe([json_decode($first, true)])
+        ->and($pages)->toBe(2);
+});
+
+it('keeps the id when the reason carries bytes that are not UTF-8', function (): void {
+    // Refused outright, the reply would be re-encoded with a null id the harness cannot match.
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/mcp' => function (): never {
+            throw new ConnectionException("Could not resolve host: bad\xff\xfehost");
+        },
+    ]);
+
+    $out = tmpfile();
+
+    new Bridge(startedSession(), BRIDGE_SERVICE)
+        ->run(streamOf('{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"task_list"}}'."\n"), $out, fn (string $m): null => null);
+
+    $replies = bridgeReplies($out);
+    $error = $replies[0]['error'] ?? null;
+
+    expect($replies)->toHaveCount(1)
+        ->and($replies[0]['id'])->toBe(9)
+        ->and(is_array($error) ? $error['message'] ?? null : null)->toStartWith('Could not resolve host: bad');
+});
+
+it('carries on relaying when the answer to a failed call cannot be written either', function (): void {
+    // The failure may be stdout itself. Writing the error then fails too, and that second failure
+    // must not escape the loop, which used to carry on after the first.
+    $calls = 0;
+
+    // Counted here rather than through `Http::recorded()`, which records a response and so never
+    // sees a request whose fake throws.
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/mcp' => function () use (&$calls): never {
+            $calls++;
+
+            throw new ConnectionException('cURL error 7: Failed to connect');
+        },
+    ]);
+
+    [$out, $peer] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP) ?: throw new RuntimeException('No socket pair.');
+    fclose($peer);
+
+    new Bridge(startedSession(), BRIDGE_SERVICE)->run(streamOf(
+        '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_list"}}'."\n"
+            .'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"task_list"}}'."\n"
+    ), $out, fn (string $m): null => null);
+
+    // Both calls reached the fleet: the loop survived the first unwritable answer.
+    expect($calls)->toBe(2);
+})->skipOnWindows();

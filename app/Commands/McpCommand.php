@@ -8,13 +8,13 @@ use App\Support\Bridge;
 use App\Support\Credentials\Credentials;
 use App\Support\FleetJoin;
 use App\Support\MachineIdentity;
+use App\Support\Stderr;
 use App\Support\StdinReader;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Http\Client\Factory;
 use LaravelZero\Framework\Commands\Command;
 use RuntimeException;
-use Symfony\Component\Console\Output\ConsoleOutputInterface;
 use Throwable;
 
 /**
@@ -184,17 +184,7 @@ final class McpCommand extends Command
      */
     private function diagnostic(string $message): void
     {
-        $output = $this->output->getOutput();
-
-        if ($output instanceof ConsoleOutputInterface) {
-            $output->getErrorOutput()->writeln('robot-council: '.$message);
-
-            return;
-        }
-
-        // A last resort that still avoids stdout. Reached when the command runs under a test
-        // harness whose output is a single buffer rather than a console with two streams.
-        file_put_contents('php://stderr', 'robot-council: '.$message."\n");
+        Stderr::say($this->output->getOutput(), $message);
     }
 
     /**

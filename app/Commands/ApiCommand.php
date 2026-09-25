@@ -9,12 +9,12 @@ use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
 use App\Support\Credentials\InstallationChoice;
 use App\Support\Session;
+use App\Support\Stderr;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Http\Client\Factory;
 use LaravelZero\Framework\Commands\Command;
 use RuntimeException;
-use Symfony\Component\Console\Output\ConsoleOutputInterface;
 use Throwable;
 
 /**
@@ -144,25 +144,14 @@ final class ApiCommand extends Command
      * output, which is stdout, so none of the six failure paths may use it (#205). It is named
      * rather than written here, so a search for its call sites finds them and not this note.
      *
-     * The body is `mcp`'s and `pending`'s, which keep stdout clean for the same reason and say
-     * things the same way. Three identical copies is the point at which extracting one is worth
-     * asking about, which is #218 rather than this change.
+     * The body is `Support\Stderr`, shared with `mcp` and `pending`, which keep stdout clean for
+     * their own reasons (#218).
      *
      * @param  string  $message  What to say.
      */
     private function diagnostic(string $message): void
     {
-        $output = $this->output->getOutput();
-
-        if ($output instanceof ConsoleOutputInterface) {
-            $output->getErrorOutput()->writeln('robot-council: '.$message);
-
-            return;
-        }
-
-        // The same last resort the other two use: reached under a test harness whose output is a
-        // single buffer rather than a console with two streams, and it still avoids stdout.
-        file_put_contents('php://stderr', 'robot-council: '.$message."\n");
+        Stderr::say($this->output->getOutput(), $message);
     }
 
     /**
