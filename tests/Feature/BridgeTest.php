@@ -16,6 +16,8 @@ declare(strict_types=1);
  */
 use App\Support\Bridge;
 use App\Support\Credentials\Credential;
+use App\Support\FleetFollower;
+use App\Support\PendingEvents;
 use App\Support\Session;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory;
@@ -541,3 +543,186 @@ it('carries on relaying when the answer to a failed call cannot be written eithe
     // Both calls reached the fleet: the loop survived the first unwritable answer.
     expect($calls)->toBe(2);
 })->skipOnWindows();
+
+/**
+ * Run one joined bridge three times, against a service answering the watcher heartbeat as given.
+ *
+ * **Three runs of one bridge rather than one run of three lines**, because a run reads its whole
+ * input in one chunk and so makes one periodic pass: a single run could not tell a heartbeat sent
+ * once from one sent every pass. The bridge's own state carries across the runs.
+ *
+ * @param  callable(): mixed  $watcher  What `agent/watcher` answers, called per request.
+ * @return list<string> What the bridge said on stderr.
+ */
+function watchingRuns(callable $watcher, int $heartbeatSeconds): array
+{
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600, 'feed_cursor' => 1], 201),
+        '*/api/agent/heartbeat' => Http::response('', 200),
+        '*/api/agent/watcher' => $watcher,
+        '*/api/events*' => Http::response(['events' => [], 'cursor' => 1], 200),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}', 200),
+    ]);
+
+    $session = startedSession();
+    $said = [];
+    $state = sys_get_temp_dir().'/rc-watcher-'.bin2hex(random_bytes(6));
+    putenv('XDG_STATE_HOME='.$state);
+
+    $bridge = new Bridge($session, BRIDGE_SERVICE, heartbeatSeconds: $heartbeatSeconds, follower: new FleetFollower($session, BRIDGE_SERVICE, new PendingEvents(BRIDGE_SERVICE, 'claude', 'watch'), 0));
+
+    for ($run = 0; $run < 3; $run++) {
+        $bridge->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"), tmpfile(), function (string $m) use (&$said): void {
+            $said[] = $m;
+        });
+    }
+
+    array_map(unlink(...), glob($state.'/robot-council/pending/*') ?: []);
+    @rmdir($state.'/robot-council/pending');
+    @rmdir($state.'/robot-council');
+    @rmdir($state);
+    putenv('XDG_STATE_HOME');
+
+    return $said;
+}
+
+/**
+ * The watcher heartbeats that reached the service.
+ */
+function watcherBeats(): int
+{
+    return Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/api/agent/watcher'))->count();
+}
+
+/**
+ * What the bridge said about the watcher heartbeat.
+ *
+ * @param  list<string>  $said  Everything it said.
+ * @return list<string>
+ */
+function watcherLines(array $said): array
+{
+    return array_values(array_filter($said, fn (string $m): bool => str_contains($m, 'watcher heartbeat')));
+}
+
+it('sends the watcher heartbeat on every due pass while the follower watches, on the session token', function (): void {
+    watchingRuns(fn () => Http::response('', 204), heartbeatSeconds: 0);
+
+    expect(watcherBeats())->toBe(3);
+
+    Http::assertSent(fn (Request $request): bool => ! str_ends_with($request->url(), '/api/agent/watcher')
+        || $request->hasHeader('Authorization', 'Bearer '.FIRST_TOKEN));
+});
+
+it('sends it once per interval, not once per pass', function (): void {
+    // The negative control for the test above: at the default interval three passes inside one
+    // minute send the first heartbeat and no more.
+    watchingRuns(fn () => Http::response('', 204), heartbeatSeconds: Bridge::HEARTBEAT_SECONDS);
+
+    expect(watcherBeats())->toBe(1);
+});
+
+it('keeps the interval inside the staleness core allows a watcher', function (): void {
+    // Core reads a watcher as `stale` past `presence.watcher_stale_after_seconds`, 90 by default
+    // (robot-council/core#350); the watcher heartbeat is sent on the presence heartbeat's interval.
+    expect(Bridge::HEARTBEAT_SECONDS)->toBeLessThan(90);
+});
+
+it('sends no watcher heartbeat from a bridge that has not joined, whatever the agent calls', function (): void {
+    Http::fake([
+        '*/api/agent/watcher' => Http::response('', 204),
+    ]);
+
+    new Bridge(null, BRIDGE_SERVICE, heartbeatSeconds: 0)
+        ->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"), tmpfile(), fn (string $m): null => null);
+
+    expect(watcherBeats())->toBe(0);
+});
+
+it('stops sending on a service without the route, and says so once', function (): void {
+    $told = watcherLines(watchingRuns(fn () => Http::response('', 404), heartbeatSeconds: 0));
+
+    expect(watcherBeats())->toBe(1)
+        ->and($told)->toHaveCount(1)
+        ->and($told[0])->toContain('robot-council/core#337');
+});
+
+it('keeps sending through failed watcher heartbeats, saying so once for a run of them', function (): void {
+    $attempts = 0;
+
+    // Counted here, since `Http::recorded()` never sees a request whose fake throws.
+    $told = watcherLines(watchingRuns(function () use (&$attempts): never {
+        $attempts++;
+
+        throw new ConnectionException('cURL error 28: Operation timed out');
+    }, heartbeatSeconds: 0));
+
+    expect($attempts)->toBe(3)
+        ->and(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/api/mcp')))->toHaveCount(3)
+        ->and($told)->toHaveCount(1)
+        ->and($told[0])->toContain('could not be sent');
+});
+
+it('says a refused watcher heartbeat with its status, and says it again after one lands', function (): void {
+    // Failed, landed, failed: two runs of failure, so two lines -- a heartbeat that landed ends the
+    // first run, and silence about the second would read as a watcher that recovered for good.
+    $answers = [500, 204, 503];
+
+    $told = watcherLines(watchingRuns(function () use (&$answers) {
+        return Http::response('', array_shift($answers) ?? 204);
+    }, heartbeatSeconds: 0));
+
+    expect(watcherBeats())->toBe(3)
+        ->and($told)->toBe([
+            'The watcher heartbeat was refused (HTTP 500); the lane board will read this watcher as stale until one lands.',
+            'The watcher heartbeat was refused (HTTP 503); the lane board will read this watcher as stale until one lands.',
+        ]);
+});
+
+it('sends no watcher heartbeat from a joined bridge with nothing following the feed', function (): void {
+    // The follower is what watches. A session without one has nothing to report as watching.
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
+        '*/api/agent/heartbeat' => Http::response('', 200),
+        '*/api/agent/watcher' => Http::response('', 204),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200),
+    ]);
+
+    new Bridge(startedSession(), BRIDGE_SERVICE, heartbeatSeconds: 0)
+        ->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"), tmpfile(), fn (string $m): null => null);
+
+    expect(watcherBeats())->toBe(0);
+});
+
+it('asks for a renewal when the watcher heartbeat is refused, whether or not the presence heartbeat was due', function (): void {
+    // The two are scheduled apart, so a refused watcher beat can land in a pass where the presence
+    // heartbeat was not sent. Its 401 means the same thing, and asks for the same renewal.
+    Http::fake([
+        '*/api/sessions/7/renew' => Http::response(['token' => SECOND_TOKEN, 'expires_in' => 3600], 200),
+        '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600, 'feed_cursor' => 1], 201),
+        '*/api/agent/watcher' => Http::response(null, 401),
+        '*/api/events*' => Http::response(['events' => [], 'cursor' => 1], 200),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200),
+    ]);
+
+    $session = startedSession();
+    $state = sys_get_temp_dir().'/rc-watcher-'.bin2hex(random_bytes(6));
+    putenv('XDG_STATE_HOME='.$state);
+    $said = [];
+
+    // The presence heartbeat is a minute away, so only the watcher is sent on this pass.
+    new Bridge($session, BRIDGE_SERVICE, follower: new FleetFollower($session, BRIDGE_SERVICE, new PendingEvents(BRIDGE_SERVICE, 'claude', 'watch'), 0))
+        ->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"), tmpfile(), function (string $m) use (&$said): void {
+            $said[] = $m;
+        });
+
+    array_map(unlink(...), glob($state.'/robot-council/pending/*') ?: []);
+    @rmdir($state.'/robot-council/pending');
+    @rmdir($state.'/robot-council');
+    @rmdir($state);
+    putenv('XDG_STATE_HOME');
+
+    expect(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/agent/heartbeat')))->toBeEmpty()
+        ->and(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/renew')))->toHaveCount(1)
+        ->and(watcherLines($said))->toBeEmpty();
+});

@@ -166,6 +166,7 @@ function roleService(array $pages, array $before = [], array $after = [], int $e
             'abilities' => $before,
         ], 201),
         '*/api/events*' => $feed,
+        '*/api/agent/watcher' => Http::response(null, 204),
         '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{}}', 200),
     ]);
 }
