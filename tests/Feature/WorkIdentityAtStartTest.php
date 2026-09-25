@@ -24,7 +24,7 @@ const WORK_SERVICE = 'https://fleet.test';
 const WORK_INSTALLATION = 'installation-token';
 
 /**
- * The payload the one session-start request carried.
+ * The work identity the one session-start request carried, without the platform beside it.
  *
  * @return array<string, mixed>
  */
@@ -39,6 +39,10 @@ function startPayload(): array
 
         return true;
     });
+
+    // The platform rides on every start (#266) and has its own tests in `SessionPlatformTest`;
+    // what these pin is the work identity beside it.
+    unset($sent['platform']);
 
     /** @var array<string, mixed> $sent */
     return $sent;
