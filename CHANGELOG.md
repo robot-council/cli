@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.12 — Reporting the Branch Later (2026-09-24)
+
+The README now says how a lane reports the branch a task is built on: the agent calls the fleet's `task_branch` once the branch exists.
+
+### Maintenance and tooling
+- Say that the agent reports its branch through `task_branch` once the branch exists [#265](https://github.com/robot-council/cli/pull/265)
+
 ## v0.4.11 — Warning When Nothing Resolved (2026-09-24)
 
 The release generator now warns when no pull request in a batch resolved, not only when the batch returned no data.
