@@ -26,7 +26,7 @@ Example (cut v0.3.0 from the previous tag):
       --breaking "rename the \\`foo\\` config key to \\`bar\\` in a published config." \\
       --breaking-item "Rename the \\`foo\\` config key to \\`bar\\` [#12](...)." \\
       > body.md
-  gh release create v0.3.0 --title 'v0.3.0 — Theme' --notes-file body.md --verify-tag
+  # then publish body.md through REST as a pre-release: SKILL.md, "Cutting a release", step 3
 
 Options:
   --repo O/R          GitHub repo (default: derived from this checkout)

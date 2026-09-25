@@ -10,7 +10,7 @@ description: >-
   subject), no `by @author`, inline code preserved. Covers the routing cascade and the bundled
   generator, what a tag of this repository promises and to whom (a Composer constraint that
   Packagist resolves, so below 1.0 a breaking change bumps the minor), cutting a release (the `CHANGELOG.md` pull
-  request, then the tag and the GitHub Release), and the retroactive-tag footer. Activate whenever drafting,
+  request, then the tag and a pre-release GitHub Release published through REST, then the wiki refresh), and the retroactive-tag footer. Activate whenever drafting,
   rewriting, or critiquing a GitHub Release title or body, generating release notes, or cutting
   a tag for this repo.
 ---
@@ -274,15 +274,46 @@ every change, so the tag must point at a commit that already carries the entry.
    git log --oneline -1 origin/main
    git tag -a vX.Y.Z origin/main -m 'vX.Y.Z — <Theme>'
    git push origin vX.Y.Z
-   gh release create vX.Y.Z --title 'vX.Y.Z — <Theme>' --notes-file body.md --verify-tag
+   jq -n --rawfile body body.md --arg tag vX.Y.Z --arg name 'vX.Y.Z — <Theme>' \
+     '{tag_name: $tag, name: $name, body: $body, prerelease: true}' |
+     gh api -X POST repos/{owner}/{repo}/releases --input - --jq .html_url
    ```
 
-   Write the body to a file and pass `--notes-file` (never inline `--notes` — the bodies are dense
-   with backticks, `#`, and `—` that the shell mangles). The release body is `body.md` as generated,
+   **Publish through REST, not `gh release create`,** per
+   [`github-api-budget`](../../rules/github-api-budget.md): `gh release create` spends the GraphQL
+   quota every session shares, and on 2026-09-25, with that quota exhausted, it created no
+   release while the tag was already public -- the release had to be created by hand afterwards. **Every
+   release is a pre-release until `v1.0.0`** (the maintainer's standing instruction): the tag stays
+   plain, and `prerelease: true` is the GitHub flag, which, as the versioning section explains,
+   Composer never sees. Read the release back
+   (`gh api repos/{owner}/{repo}/releases/tags/vX.Y.Z --jq '.tag_name, .prerelease'`) before moving
+   on. The body goes in from the file with `--rawfile`, never inline, because the bodies are dense
+   with backticks, `#`, and `—` that the shell mangles. The release body is `body.md` as generated,
    with `##` headings; only the `CHANGELOG.md` copy is demoted.
 
-**Keep the release and the entry in step.** `gh release edit vX.Y.Z --title '…' --notes-file notes.md`
-changes only the release, so a correction to one is a pull request to the other.
+4. **Refresh the wiki for this version.** A release is a changelog entry **and** a wiki that
+   describes it; without this step a release ships while the wiki still describes an older one.
+   Clone or pull `<repo>.wiki.git`, then:
+
+   - **Set the version line** each page opens with (`Describes robot-council/<repo> vX.Y.Z.`),
+     Home's included.
+   - **Correct every page this release's changes make wrong.** Walk the release body's entries and
+     check each against the pages it touches, reading the code at the new tag rather than the
+     entry's wording; link the issue or pull request behind each changed claim, and the source at
+     `blob/vX.Y.Z`.
+   - **A release that changes nothing a page describes still moves the version line**, and its
+     release note says the wiki was checked.
+
+   **A wiki push publishes immediately; there is no pull request and no check between the push and
+   every reader.** So the change is reviewed *before* it is pushed, by whoever the maintainer has
+   delegated wiki approval to -- send them the diff, and push only what they approved. Then read
+   the push back from a fresh clone of `<repo>.wiki.git` and compare it with what was approved,
+   file for file.
+
+**Keep the release and the entry in step.** Editing a published release
+(`gh api -X PATCH repos/{owner}/{repo}/releases/<id> -F body=@notes.md`, with the id from
+`releases/tags/vX.Y.Z`) changes only the release, so a correction to one is a pull request to the
+other.
 
 Retroactive tags: create an **annotated** tag stamped with the target commit's date so
 `git tag --sort=creatordate` orders correctly —
