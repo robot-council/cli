@@ -145,6 +145,14 @@ jobs:
       - name: Check every import under app/ resolves
         run: php .github/scripts/check-production-imports.php
 
+      # Laravel Zero adds its development commands outside `production`, and an installed copy
+      # offered `test` and `make:command` beside the real ones (#241).
+      - name: List only the commands this application ships
+        run: |
+          listed=$(./robot-council list --raw | awk '{print $1}' | tr '\n' ' ')
+          echo "$listed"
+          [ "$listed" = 'about api enroll mcp new pending ' ]
+
       # The import scan cannot see a class the container resolves by name, so make a request for
       # real. `Could not reach the service.` alone is not enough: it is the fallback text for any
       # Throwable, a missing class included, so require the connection failure `-v` names.
