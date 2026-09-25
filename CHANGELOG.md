@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.11 — Warning When Nothing Resolved (2026-09-24)
+
+The release generator now warns when no pull request in a batch resolved, not only when the batch returned no data.
+
+### Maintenance and tooling
+- Warn when no pull request in a release-notes batch resolved, not only when the batch returned no data [#256](https://github.com/robot-council/cli/pull/256)
+
 ## v0.4.10 — One Place to Say It (2026-09-24)
 
 The three commands whose stdout is somebody else's input now say their diagnostics through one helper.
