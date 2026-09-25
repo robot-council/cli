@@ -79,3 +79,15 @@ it('reports something usable from the running application, whatever shape it is 
         ->and($version)->toBe(trim($version))
         ->and(config('app.version'))->toBe($version);
 });
+
+it('reports a versioned install by the directory it was installed into, which nothing else knows', function (): void {
+    // #280, measured on the released v0.4.18: `composer create-project` makes this package the
+    // root, so Composer reports `dev-main`-like nothing and the archive has no `.git`, and the
+    // launcher printed `robot-council unreleased`.
+    expect(Version::resolve(Version::PACKAGE, null, Version::UNKNOWN, '0.4.19'))->toBe('v0.4.19')
+        ->and(Version::resolve(Version::PACKAGE, null, Version::UNKNOWN, 'v0.4.19'))->toBe('v0.4.19')
+
+        // And without a layout, the decision is what it was.
+        ->and(Version::resolve(Version::PACKAGE, null, Version::UNKNOWN))->toBe(Version::UNKNOWN)
+        ->and(Version::resolve('__root__', 'v0.2.0', 'unreleased'))->toBe('v0.2.0');
+});
