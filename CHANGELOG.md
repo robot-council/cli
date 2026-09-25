@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.25 — Quieter Reads Through `api` (2026-09-25)
+
+A read through `robot-council api` now starts an ephemeral session. This is the client half of keeping a loop of reads from filling the fleet feed with a join and an end for every call. The fleet stops announcing those sessions once `robot-council/core#424` ships. Until then a read behaves as before, because a service that does not know the flag ignores it. A call that can change something still starts an ordinary session and ends it.
+
+### What's fixed
+- Start an ephemeral session for a read through `robot-council api` [#310](https://github.com/robot-council/cli/pull/310)
+
 ## v0.4.24 — Reading the Feed Without a Stop Hook (2026-09-25)
 
 A Claude Code seat with no stop hook now hears the fleet. Before this, the bridge told every woken agent to end its turn and let the stop hook deliver the events, and on a machine with no hook nothing did. The bridge now checks for a hook at start. Without one, it tells the agent to read the feed itself and stops repeating a notice once the agent has. It logs which case applied.
