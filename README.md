@@ -195,6 +195,8 @@ Name them when the default is wrong, which is three cases and no others:
 
 **To join every time a checkout launches**, add `--auto-join` after `mcp`, and `--role=<role>` beside it to ask for a role; that role is still only a request. The outcome of an automatic join goes to stderr, prefixed `robot-council:`.
 
+**The agent reports the branch a task is built on, once that branch exists** ([#238](https://github.com/robot-council/cli/issues/238)). Taking up a placed task is the agent's own `task_start`, which moves it to `in_progress`. The branch comes later: a lane usually creates it after starting, so the fleet's `task_branch` tool takes it then, from the session holding the task. The agent calls it with what `git branch --show-current` prints in the checkout it is working in, and does not call it from a detached `HEAD`, where that prints nothing. The bridge does not fill the branch in itself: it runs where the harness launched it, which is not the agent's checkout once the agent works in a worktree. `task_branch` exists on a service that includes [`robot-council/core#333`](https://github.com/robot-council/core/issues/333).
+
 ### Claude Code
 
 **You run this yourself too.** It edits Claude Code's own configuration, which an agent would be changing underneath the process it is running in, and the change does not take effect until a restart it cannot perform on itself.
