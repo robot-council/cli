@@ -136,9 +136,10 @@ final class McpCommand extends Command
             // otherwise outlive the bridge that started it.
             $reader->stop();
 
-            // The session must not outlive the harness. Ending it releases its tasks and locks now
-            // rather than leaving them held until the presence sweep notices. A bridge that never
-            // joined has nothing to end, and leaves nothing on the fleet.
+            // The session must not outlive the harness. Ending it marks it gone now, rather than
+            // leaving it to the presence sweep's stale and gone thresholds, and core's next sweep
+            // releases the tasks and locks it held. A bridge that never joined has nothing to end,
+            // and leaves nothing on the fleet.
             $bridge->session()?->end();
 
             // And the fleet events go with it. Unread ones name tasks and locks THIS session held,
