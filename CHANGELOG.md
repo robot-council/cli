@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.26 — Adding a Cursor Seat (2026-09-25)
+
+The README's Cursor wiring section now notes that on macOS the launcher needs `php` on the `PATH` Cursor inherits, and that whether a Cursor started from the Dock gets it has not been measured. The operator's guide on the wiki now covers adding a Cursor seat, and describes this release line.
+
+### Maintenance and tooling
+- Note the macOS php precaution for a Cursor seat in the README [#311](https://github.com/robot-council/cli/pull/311)
+
 ## v0.4.25 — Quieter Reads Through `api` (2026-09-25)
 
 A read through `robot-council api` now starts an ephemeral session. This is the client half of keeping a loop of reads from filling the fleet feed with a join and an end for every call. The fleet stops announcing those sessions once `robot-council/core#424` ships. Until then a read behaves as before, because a service that does not know the flag ignores it. A call that can change something still starts an ordinary session and ends it.
