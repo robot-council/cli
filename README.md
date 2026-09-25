@@ -405,19 +405,20 @@ notice, so for them the hook delivers at the next turn the operator starts.
 prints nothing and exits 0 when the fleet has been quiet, and the script below ends the turn on empty
 output. That one line is the whole difference between a hook and a loop.
 
-**Nothing will ever arrive unless somebody on the fleet holds `coordinator:direct`.** A directive is
-the only event that reaches a waiting session whatever it concerns -- every session when it names no
+**Without a session in the `coordinator` role, almost nothing arrives.** A directive is the only
+event that reaches a waiting session whatever it concerns -- every session when it names no
 `targets`, and only the sessions it names when it does
-([#269](https://github.com/robot-council/cli/issues/269)) -- and posting one needs that ability --
-which enrollment can never ask for, and which comes with the `coordinator` role an administrator
-gives a running session from the fleet's administration page. Every
-other way into a sink needs it too: reassigning a task, cancelling one, forcing a lock open. A task
-claim always assigns to whoever claimed it, and narration reaches no sink at all. Decided on
+([#269](https://github.com/robot-council/cli/issues/269)) -- and posting one needs
+`coordinator:direct`, which enrollment can never ask for and which comes with the `coordinator` role
+an administrator gives a running session from the fleet's administration page. Reassigning a task,
+cancelling one, and forcing a lock open need it too. What still arrives without one: a lock taken
+over from this session, which needs only `locks:acquire`, and this session's own `stale` marking. A
+task claim always assigns to whoever claimed it, and narration reaches no sink at all. Decided on
 [#112](https://github.com/robot-council/cli/issues/112), where the alternatives are recorded.
 
 So a machine can be enrolled, its bridge following the feed, its sink written and its stop hook
-wired into every harness, and still receive nothing at all -- because no installation on that fleet
-was ever granted the ability to send. **Every part reports healthy and the symptom is silence**,
+wired into every harness, and still receive no directive at all -- because no session on that fleet
+is running in the `coordinator` role. **Every part reports healthy and the symptom is silence**,
 which is indistinguishable from a fleet that genuinely has nothing to say. Wiring the hook up is
 worth doing anyway; it costs nothing while the fleet is quiet. Just know which of the two you are
 looking at.
