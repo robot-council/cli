@@ -77,6 +77,7 @@ final class ApiCommand extends Command
         }
 
         $session = new Session($http, $service, $installation);
+        $method = $this->httpMethod();
 
         try {
             [$repository, $workLocation] = Checkout::resolve(
@@ -84,7 +85,12 @@ final class ApiCommand extends Command
                 $this->stringOption('work-location'),
             );
 
-            $session->start($this->stringOption('project'), $repository, $workLocation);
+            // **A read starts an ephemeral session** (#298). It acquires nothing, so the fleet has
+            // nothing to learn from its join and end -- and a loop of reads once filled the feed
+            // with about 105 of each, which read as a crash loop. Every other method starts an
+            // ordinary session, because a call that claims something is exactly the one whose end
+            // the fleet must see. Ending stays in the `finally` for both.
+            $session->start($this->stringOption('project'), $repository, $workLocation, ephemeral: $method === 'GET');
         } catch (Throwable $throwable) {
             $this->diagnostic($this->readable($throwable, 'Could not start a session.'));
 
@@ -96,7 +102,7 @@ final class ApiCommand extends Command
         // and otherwise waits for the presence sweep -- so an unclosed session leaves the fleet
         // holding work nobody is doing.
         try {
-            return $this->perform($session, $service, $body);
+            return $this->perform($session, $service, $method, $body);
         } catch (Throwable $throwable) {
             $this->diagnostic($this->readable($throwable, 'The call did not complete.'));
 
@@ -111,12 +117,12 @@ final class ApiCommand extends Command
      *
      * @param  Session  $session  The started session.
      * @param  string  $service  The service's base URL.
+     * @param  string  $method  The HTTP method, upper-cased.
      * @param  array<string, mixed>|null  $body  The decoded request body, when there is one.
      * @return int The exit code.
      */
-    private function perform(Session $session, string $service, ?array $body): int
+    private function perform(Session $session, string $service, string $method, ?array $body): int
     {
-        $method = strtoupper($this->stringArgument('method') ?? 'GET');
         $path = '/'.ltrim($this->stringArgument('path') ?? '', '/');
 
         $response = $session->request()->send($method, $service.$path, $body === null ? [] : ['json' => $body]);
@@ -210,6 +216,14 @@ final class ApiCommand extends Command
         return $this->output->isVerbose()
             ? sprintf('%s (%s: %s)', $message, $failure::class, $failure->getMessage())
             : $message;
+    }
+
+    /**
+     * The HTTP method, upper-cased, and `GET` when none was given.
+     */
+    private function httpMethod(): string
+    {
+        return strtoupper($this->stringArgument('method') ?? 'GET');
     }
 
     /**
