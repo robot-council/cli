@@ -370,6 +370,54 @@ final class PendingEvents
     }
 
     /**
+     * Record that a turn has just ended, for a bridge keeping the session's cache warm (#279).
+     *
+     * **The stop hook is the one thing that sees every turn end**, and this is how it tells the
+     * bridge: a file beside the sink whose modification time is the moment. It holds nothing, so
+     * there is nothing in it to read wrongly. Best-effort, because a hook must never fail a turn over
+     * bookkeeping; a mark that could not be written makes the bridge think the session idler than it
+     * is, which costs one extra short turn.
+     */
+    public function markTurnEnded(): void
+    {
+        $directory = $this->directory();
+
+        if (! is_dir($directory) && ! @mkdir($directory, 0o700, true) && ! is_dir($directory)) {
+            return;
+        }
+
+        $path = $this->turnMarkPath();
+
+        if (@touch($path)) {
+            @chmod($path, 0o600);
+        }
+    }
+
+    /**
+     * When a turn last ended, as a Unix timestamp, or null when none has been recorded.
+     */
+    public function turnEndedAt(): ?int
+    {
+        $path = $this->turnMarkPath();
+
+        // Read afresh each time: PHP caches `stat` results, and a cached one would be a mark that
+        // never moves
+        clearstatcache(true, $path);
+
+        $modified = @filemtime($path);
+
+        return $modified === false ? null : $modified;
+    }
+
+    /**
+     * Where the turn-end mark lives.
+     */
+    public function turnMarkPath(): string
+    {
+        return $this->directory().'/'.$this->key().'.turn';
+    }
+
+    /**
      * Where this bridge's sink lives.
      */
     public function path(): string

@@ -7,7 +7,9 @@ namespace App\Commands;
 use App\Support\Bridge;
 use App\Support\Credentials\Credentials;
 use App\Support\FleetJoin;
+use App\Support\KeepWarm;
 use App\Support\MachineIdentity;
+use App\Support\PendingEvents;
 use App\Support\Stderr;
 use App\Support\StdinReader;
 use Illuminate\Console\Attributes\Description;
@@ -36,7 +38,9 @@ use Throwable;
     {--work-location= : Which working copy of that repository this is; read from the checkout when omitted}
     {--harness= : Which enrolled harness this process is, when detection cannot tell}
     {--auto-join : Join the fleet at launch, for a checkout that should join every time it starts}
-    {--role= : With --auto-join, the role to ask for: build, ci or coordinator}')]
+    {--role= : With --auto-join, the role to ask for: build, ci or coordinator}
+    {--keep-warm= : Claude Code only: wake the session after this many idle minutes, to keep its prompt cache warm}
+    {--keep-warm-for= : With --keep-warm, stop once the session has been idle this many minutes}')]
 final class McpCommand extends Command
 {
     /**
@@ -87,6 +91,7 @@ final class McpCommand extends Command
             // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
             channel: $harness === 'claude',
             join: $join(...),
+            keepWarm: $this->keepWarm($service, $harness),
         );
 
         if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
@@ -149,6 +154,77 @@ final class McpCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * The keep-alive schedule `--keep-warm` asks for, or null (#279).
+     *
+     * **A value it cannot use is said and dropped, never fatal.** A bridge that dies at launch
+     * leaves one line on a stderr most harnesses bury, and the session without its fleet tools; one
+     * that carries on without keep-alives costs only what the option would have saved.
+     *
+     * **The turn-end mark is read from the sink the stop hook drains**, keyed the same way, which is
+     * why it can be built before anybody joins: the service, the harness and the project are known
+     * at launch.
+     *
+     * @param  string  $service  The service base URL.
+     * @param  string  $harness  Which harness this process is.
+     */
+    private function keepWarm(string $service, string $harness): ?KeepWarm
+    {
+        $interval = $this->stringOption('keep-warm');
+        $ceiling = $this->stringOption('keep-warm-for');
+
+        if ($interval === null) {
+            if ($ceiling !== null) {
+                $this->diagnostic('--keep-warm-for applies only with --keep-warm; keep-alives are off.');
+            }
+
+            return null;
+        }
+
+        if ($harness !== 'claude') {
+            // The one harness a bridge can wake: nothing else reads `claude/channel` (cli#197)
+            $this->diagnostic('--keep-warm applies only to Claude Code; keep-alives are off.');
+
+            return null;
+        }
+
+        $intervalMinutes = $this->minutes($interval);
+        $ceilingMinutes = $ceiling === null ? null : $this->minutes($ceiling);
+
+        if ($intervalMinutes === null || ($ceiling !== null && $ceilingMinutes === null)) {
+            $this->diagnostic('--keep-warm and --keep-warm-for take a whole number of minutes, at least 1; keep-alives are off.');
+
+            return null;
+        }
+
+        $pending = new PendingEvents($service, $harness, $this->stringOption('project'));
+
+        return new KeepWarm(
+            $intervalMinutes * 60,
+            $ceilingMinutes === null ? null : $ceilingMinutes * 60,
+            $pending->turnEndedAt(...),
+            time(...),
+        );
+    }
+
+    /**
+     * A positive whole number of minutes, or null.
+     *
+     * Digits only, so `55.5`, `-5` and `1e3` are refused rather than read as something else.
+     *
+     * @param  string  $given  What the option said.
+     */
+    private function minutes(string $given): ?int
+    {
+        if (preg_match('/^\d{1,6}$/', $given) !== 1) {
+            return null;
+        }
+
+        $minutes = (int) $given;
+
+        return $minutes >= 1 ? $minutes : null;
     }
 
     /**

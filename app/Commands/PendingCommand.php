@@ -65,7 +65,14 @@ final class PendingCommand extends Command
 
         $pending = new PendingEvents($service, $harness, $this->stringOption('project'));
 
-        $events = $this->option('peek') === true ? $pending->peek() : $pending->drain();
+        $peeking = $this->option('peek') === true;
+
+        $events = $peeking ? $pending->peek() : $pending->drain();
+
+        // A drain is a stop hook at a turn end; a peek is somebody looking, which is not a turn
+        if (! $peeking) {
+            $pending->markTurnEnded();
+        }
 
         foreach ($events as $event) {
             $this->line($this->describe($event));
