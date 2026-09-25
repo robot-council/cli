@@ -676,7 +676,7 @@ final class FleetFollower
         $meta = $event['meta'] ?? null;
         $targets = \is_array($meta) ? ($meta['targets'] ?? null) : null;
 
-        if (! \is_array($targets) || $targets === []) {
+        if (! \is_array($targets) || $targets === [] || ! array_is_list($targets)) {
             return null;
         }
 

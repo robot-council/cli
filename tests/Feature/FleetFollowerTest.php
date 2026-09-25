@@ -391,6 +391,7 @@ it('leaves a directive whose targets are not a list of session ids, rather than 
     ['strings', ['42']],
     ['a mix', [42, 'x']],
     ['not a list', 'everyone'],
+    ['a map', ['x' => 42]],
     ['null', null],
 ]);
 
