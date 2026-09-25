@@ -7,6 +7,10 @@
 # the pint job runs on ubuntu. text=auto leaves anything Git detects as binary alone.
 * text=auto eol=lf
 
+# Except the Windows launcher shim, which cmd.exe reads, and which is written with CRLF so a label
+# or a multi-line block in it is never misread.
+*.cmd text eol=crlf
+
 # Keep development-only files out of a source archive.
 /.claude            export-ignore
 /.editorconfig      export-ignore

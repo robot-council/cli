@@ -1,0 +1,68 @@
+<?php
+
+use Illuminate\Contracts\Console\Kernel;
+use Symfony\Component\Console\Input\ArgvInput;
+use Symfony\Component\Console\Output\ConsoleOutput;
+
+/*
+|--------------------------------------------------------------------------
+| The Command Line, Without Its Shebang
+|--------------------------------------------------------------------------
+|
+| `robot-council` is a shebang and a `require` of this file. The launcher a
+| versioned install puts on `PATH` requires this file directly, because a
+| `require`d file's `#!` line is printed as output, and the bridge's stdout
+| is a protocol stream (robot-council/cli#280).
+|
+*/
+
+define('LARAVEL_START', microtime(true));
+
+/*
+|--------------------------------------------------------------------------
+| Register The Auto Loader
+|--------------------------------------------------------------------------
+|
+| Composer provides a convenient, automatically generated class loader
+| for our application. We just need to utilize it! We'll require it
+| into the script here so that we do not have to worry about the
+| loading of any our classes "manually". Feels great to relax.
+|
+*/
+
+$autoloader = require file_exists(__DIR__.'/vendor/autoload.php') ? __DIR__.'/vendor/autoload.php' : __DIR__.'/../../autoload.php';
+
+$app = require_once __DIR__.'/bootstrap/app.php';
+
+/*
+|--------------------------------------------------------------------------
+| Run The Artisan Application
+|--------------------------------------------------------------------------
+|
+| When we run the console application, the current CLI command will be
+| executed in this console and the response sent back to a terminal
+| or another output device for the developers. Here goes nothing!
+|
+*/
+
+$kernel = $app->make(Kernel::class);
+
+$status = $kernel->handle(
+    $input = new ArgvInput,
+    new ConsoleOutput
+);
+
+/*
+|--------------------------------------------------------------------------
+| Shutdown The Application
+|--------------------------------------------------------------------------
+|
+| Once Artisan has finished running, we will fire off the shutdown events
+| so that any final work may be done by the application before we shut
+| down the process. This is the last thing to happen to the request.
+|
+*/
+
+$kernel->terminate($input, $status);
+
+exit($status);

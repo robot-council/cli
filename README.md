@@ -19,14 +19,39 @@ Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) a
 
 ## Installing
 
-Install it into a directory of its own:
+Install it into a directory of its own, as **versions side by side behind a launcher**, so upgrading never replaces a file a running bridge holds ([#280](https://github.com/robot-council/cli/issues/280)):
 
 ```bash
-mkdir -p ~/.local/robot-council
-composer require robot-council/cli --working-dir="$HOME/.local/robot-council"
+composer create-project robot-council/cli "$HOME/.robot-council-setup" --no-dev
+php "$HOME/.robot-council-setup/robot-council" upgrade --root="$HOME/.local/robot-council"
+rm -rf "$HOME/.robot-council-setup"
 ```
 
-Put `~/.local/robot-council/vendor/bin` on your `PATH`, or symlink `~/.local/robot-council/vendor/bin/robot-council` into a directory already on it, and `robot-council` is available everywhere, which is what the harness setups below assume. To upgrade, run `composer update robot-council/cli --working-dir="$HOME/.local/robot-council"`.
+That installs the newest release under `~/.local/robot-council/versions/<version>/`, and puts the launcher in `~/.local/robot-council/bin`. Put that directory on your `PATH`, and `robot-council` is available everywhere, which is what the harness setups below assume. The launcher starts the newest installed version each time a process starts.
+
+### Upgrading
+
+```bash
+robot-council upgrade
+```
+
+**It needs nobody at the machine, and it is safe with every session's bridge running**, including on Windows. It installs the new version into a directory of its own and removes nothing a running process holds: a running bridge keeps the version it started with, and each session picks up the new one the next time it starts. A session can run it unattended. An old version still in use is kept and removed by a later `upgrade`, once nothing runs it. `robot-council upgrade <version>` installs a particular one.
+
+**The layout, for reference:**
+
+| path | what it is |
+| --- | --- |
+| `bin/robot-council`, `bin/robot-council.cmd` | the shims on `PATH`, for macOS and Linux, and for Windows |
+| `bin/robot-council.php`, `bin/select.php` | the launcher, which a routine upgrade never replaces |
+| `versions/<version>/` | one installed version; `.in-use` in it is locked by every process running it |
+
+### Moving from a single-directory install
+
+Earlier instructions installed with `composer require robot-council/cli` into one directory, and upgraded with `composer update` in place. **On Windows, upgrading that way while any bridge is running breaks the install partway**: Windows will not delete a file a running process holds open, so Composer removes the old package, fails on the one locked file, and leaves `vendor/bin/robot-council` answering `Permission denied`. macOS and Linux allow it, which is why the same command looked safe there.
+
+To move to the versioned layout, run the three commands above with `--root` naming your existing install directory, then point `PATH` at its `bin`, in place of `vendor/bin`. The old files are not touched, so it is safe with bridges running; remove the old `vendor/` once no session is using it.
+
+**To recover an install already broken the old way:** close every session on the machine that runs a bridge from it, including the one that ran the upgrade, whose own bridge holds the lock too. Confirm no `php` process is still running `robot-council mcp`. Then, from a plain terminal, run `composer install -d <install directory>` -- the lock file already names the version you asked for -- check `robot-council --version`, and relaunch the sessions. Then move to the versioned layout, so it does not happen again.
 
 **Use `v0.4.2` or later.** Every release before it failed the first command that made an HTTP request -- `enroll`, `mcp`, and `api` all stopped at `Target class [Illuminate\Http\Client\Factory] does not exist.` -- because a package it needs arrived only through a development dependency ([#237](https://github.com/robot-council/cli/issues/237)).
 
@@ -57,7 +82,7 @@ That works until the next global tool with a Laravel ceiling brings the same fai
 
 A fresh global set resolved today -- `statamic/cli` 3.6.4 and `laravel/cloud-cli` 0.6.1 -- installs with a plain `composer global require`, exit 0.
 
-The install in a directory of its own was verified beside a global set holding `statamic/cli` 3.6.1, where a global install fails with exit 2: the commands above resolved `^0.4.2` and exited 0, `robot-council --version` printed `robot-council v0.4.2`, and `robot-council enroll -v` against an unreachable host failed at the network with `cURL error 6` rather than in the container. That last step is the one that shows the HTTP client resolved, which `list` alone does not.
+The install in a directory of its own was verified beside a global set holding `statamic/cli` 3.6.1, where a global install fails with exit 2: the single-directory form this section recommended then (`composer require robot-council/cli --working-dir=<directory>`) resolved `^0.4.2` and exited 0, `robot-council --version` printed `robot-council v0.4.2`, and `robot-council enroll -v` against an unreachable host failed at the network with `cURL error 6` rather than in the container. That last step is the one that shows the HTTP client resolved, which `list` alone does not.
 
 **The earlier record was narrower than it read.** Of `composer global require robot-council/cli`, this section said: *"**Verified 2026-09-22** on macOS 26.6.2 with PHP 8.4, into a throwaway `COMPOSER_HOME`: that line resolves `^0.2.0`, exits 0, writes `vendor/bin/robot-council`, and `robot-council list` shows `about`, `api`, `enroll`, `mcp`, `new`, and `pending`."* That was true. But an empty `COMPOSER_HOME` is the one place a conflict with another global tool cannot arise, and `list` never resolves the HTTP client, so the same run passed on a release that could not make a request. It showed the command installs where nothing else is installed, not that it works on a developer's machine ([#236](https://github.com/robot-council/cli/issues/236)).
 
