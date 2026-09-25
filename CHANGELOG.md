@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.24 — Reading the Feed Without a Stop Hook (2026-09-25)
+
+A Claude Code seat with no stop hook now hears the fleet. Before this, the bridge told every woken agent to end its turn and let the stop hook deliver the events, and on a machine with no hook nothing did. The bridge now checks for a hook at start. Without one, it tells the agent to read the feed itself and stops repeating a notice once the agent has. It logs which case applied.
+
+### What's fixed
+- Tell an idle Claude Code agent to read the feed itself when the bridge finds no stop hook [#307](https://github.com/robot-council/cli/pull/307)
+
 ## v0.4.23 — Each Checkout Its Own Sink (2026-09-25)
 
 Sessions on one machine no longer take each other's fleet events. Before this, every session launched from one user-level harness configuration shared one event sink, and the first stop hook to run took everyone's events. Each checkout now has its own sink. Events already waiting in the old shared sink are not delivered after upgrading. A seat that names `--project` keeps its sink as it was.
