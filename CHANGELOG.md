@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.23 — Each Checkout Its Own Sink (2026-09-25)
+
+Sessions on one machine no longer take each other's fleet events. Before this, every session launched from one user-level harness configuration shared one event sink, and the first stop hook to run took everyone's events. Each checkout now has its own sink. Events already waiting in the old shared sink are not delivered after upgrading. A seat that names `--project` keeps its sink as it was.
+
+### What's fixed
+- Give each checkout its own fleet-event sink, so sessions on one machine stop taking each other's events [#303](https://github.com/robot-council/cli/pull/303)
+
 ## v0.4.22 — Measuring the Secret Service Store (2026-09-25)
 
 The Secret Service credential store, used on Linux, now has measured answers to its two open questions, and neither needed a behavior change. Keys that differ only in case stay apart. And `secret-tool` cannot tell a missing credential from a failure, so a locked keyring reads as "not enrolled", which the store now says where it decides.
