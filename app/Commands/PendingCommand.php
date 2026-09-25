@@ -69,8 +69,10 @@ final class PendingCommand extends Command
 
         $events = $peeking ? $pending->peek() : $pending->drain();
 
-        // A drain is a stop hook at a turn end; a peek is somebody looking, which is not a turn
-        if (! $peeking) {
+        // A drain is a stop hook at a turn end; a peek is somebody looking, which is not a turn.
+        // Claude Code only, the one harness whose bridge can keep a cache warm, so no other
+        // harness's hook starts writing a file nothing reads
+        if (! $peeking && $harness === 'claude') {
             $pending->markTurnEnded();
         }
 

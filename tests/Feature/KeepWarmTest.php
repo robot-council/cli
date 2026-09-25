@@ -54,6 +54,20 @@ final class WarmWorld
 }
 
 /**
+ * The schedule two option values ask for, failing the test when they are refused.
+ */
+function warmFrom(WarmWorld $world, string $interval, ?string $ceiling): KeepWarm
+{
+    $keepWarm = KeepWarm::fromOptions($interval, $ceiling, fn (): ?int => $world->mark, fn (): int => $world->now);
+
+    if (\is_string($keepWarm)) {
+        throw new RuntimeException($keepWarm);
+    }
+
+    return $keepWarm;
+}
+
+/**
  * Run a Claude Code bridge over a handshake and return every message it wrote.
  *
  * @param  list<string>  $extra  Messages after the handshake.
@@ -295,6 +309,39 @@ describe('the schedule', function (): void {
     });
 });
 
+describe('the options, read', function (): void {
+    it('reads the interval in minutes', function (): void {
+        $world = new WarmWorld;
+        $keepWarm = warmFrom($world, '55', null);
+
+        $world->now += 55 * 60 - 1;
+        expect($keepWarm->due())->toBeFalse();
+
+        $world->now += 1;
+        expect($keepWarm->due())->toBeTrue();
+    });
+
+    it('reads the ceiling in minutes, and as the ceiling rather than the interval', function (): void {
+        $world = new WarmWorld;
+        $keepWarm = warmFrom($world, '55', '480');
+
+        $world->now += 480 * 60 - 1;
+        expect($keepWarm->due())->toBeTrue();
+
+        $world->now += 1;
+        expect($keepWarm->due())->toBeFalse();
+    });
+
+    it('refuses a ceiling that could never let a keep-alive through', function (string $ceiling): void {
+        expect(KeepWarm::fromOptions('55', $ceiling, fn (): ?int => null, time(...)))
+            ->toBe('--keep-warm-for must be longer than --keep-warm, or no keep-alive is ever sent; keep-alives are off.');
+    })->with(['55', '30']);
+
+    it('accepts a ceiling a minute longer than the interval', function (): void {
+        expect(KeepWarm::fromOptions('55', '56', fn (): ?int => null, time(...)))->toBeInstanceOf(KeepWarm::class);
+    });
+});
+
 describe('the turn-end mark', function (): void {
     it('is written when the stop hook drains the sink', function (): void {
         $sink = new PendingEvents(WARM_SERVICE, 'claude', 'probe');
@@ -305,6 +352,15 @@ describe('the turn-end mark', function (): void {
 
         expect($sink->turnEndedAt())->toBeInt()
             ->and(abs(time() - (int) $sink->turnEndedAt()))->toBeLessThan(5);
+    });
+
+    it('is not written by another harness, whose bridge cannot keep a cache warm', function (): void {
+        putenv('ROBOT_COUNCIL_HARNESS=cursor');
+
+        Artisan::call('pending', ['--project' => 'probe']);
+
+        expect(new PendingEvents(WARM_SERVICE, 'cursor', 'probe')->turnEndedAt())->toBeNull()
+            ->and(glob($this->stateDirectory.'/robot-council/pending/*.turn') ?: [])->toBeEmpty();
     });
 
     it('is not written by a peek, which is somebody looking rather than a turn ending', function (): void {
@@ -335,7 +391,7 @@ describe('the turn-end mark', function (): void {
         // so a writer run with `exec()` between the reads passes with the clear removed. The stop
         // hook is exactly this: another process, moving the mark while the bridge sits between reads.
         $writer = proc_open(
-            [PHP_BINARY, '-r', 'usleep(500000); touch($argv[1], (int) $argv[2]);', $sink->turnMarkPath(), (string) $moved],
+            [PHP_BINARY, '-r', 'usleep(300000); touch($argv[1], (int) $argv[2]);', $sink->turnMarkPath(), (string) $moved],
             [],
             $pipes
         );
@@ -346,7 +402,8 @@ describe('the turn-end mark', function (): void {
 
         $before = $sink->turnEndedAt();
 
-        usleep(1_500_000);
+        // Generous, for a loaded runner where the child PHP is slow to start
+        usleep(3_000_000);
 
         $after = $sink->turnEndedAt();
 
@@ -474,6 +531,22 @@ describe('the options', function (): void {
         Artisan::call('mcp', ['--service' => WARM_SERVICE, '--keep-warm' => '55', '--keep-warm-for' => '480'], $output);
 
         expect($output->stderr())->not->toContain('keep');
+    });
+
+    it('refuses a ceiling no longer than the interval, rather than sending nothing silently', function (): void {
+        $output = new TwoStreamOutput;
+
+        Artisan::call('mcp', ['--service' => WARM_SERVICE, '--keep-warm' => '55', '--keep-warm-for' => '55'], $output);
+
+        expect($output->stderr())->toContain('--keep-warm-for must be longer than --keep-warm');
+    });
+
+    it('says a bare --keep-warm needs a value', function (): void {
+        $output = new TwoStreamOutput;
+
+        Artisan::call('mcp', ['--service' => WARM_SERVICE, '--keep-warm' => null], $output);
+
+        expect($output->stderr())->toContain('--keep-warm takes a whole number of minutes');
     });
 
     it('says a ceiling alone does nothing', function (): void {

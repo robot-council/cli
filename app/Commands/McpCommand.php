@@ -176,7 +176,10 @@ final class McpCommand extends Command
         $ceiling = $this->stringOption('keep-warm-for');
 
         if ($interval === null) {
-            if ($ceiling !== null) {
+            if ($this->input->hasParameterOption('--keep-warm')) {
+                // Given with no value: Laravel reads a bare `--keep-warm` as null, not as an error
+                $this->diagnostic('--keep-warm takes a whole number of minutes, at least 1; keep-alives are off.');
+            } elseif ($ceiling !== null) {
                 $this->diagnostic('--keep-warm-for applies only with --keep-warm; keep-alives are off.');
             }
 
@@ -190,41 +193,17 @@ final class McpCommand extends Command
             return null;
         }
 
-        $intervalMinutes = $this->minutes($interval);
-        $ceilingMinutes = $ceiling === null ? null : $this->minutes($ceiling);
-
-        if ($intervalMinutes === null || ($ceiling !== null && $ceilingMinutes === null)) {
-            $this->diagnostic('--keep-warm and --keep-warm-for take a whole number of minutes, at least 1; keep-alives are off.');
-
-            return null;
-        }
-
         $pending = new PendingEvents($service, $harness, $this->stringOption('project'));
 
-        return new KeepWarm(
-            $intervalMinutes * 60,
-            $ceilingMinutes === null ? null : $ceilingMinutes * 60,
-            $pending->turnEndedAt(...),
-            time(...),
-        );
-    }
+        $keepWarm = KeepWarm::fromOptions($interval, $ceiling, $pending->turnEndedAt(...), time(...));
 
-    /**
-     * A positive whole number of minutes, or null.
-     *
-     * Digits only, so `55.5`, `-5` and `1e3` are refused rather than read as something else.
-     *
-     * @param  string  $given  What the option said.
-     */
-    private function minutes(string $given): ?int
-    {
-        if (preg_match('/^\d{1,6}$/', $given) !== 1) {
+        if (\is_string($keepWarm)) {
+            $this->diagnostic($keepWarm);
+
             return null;
         }
 
-        $minutes = (int) $given;
-
-        return $minutes >= 1 ? $minutes : null;
+        return $keepWarm;
     }
 
     /**

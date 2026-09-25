@@ -53,9 +53,14 @@ final class KeepWarm
      * What the server instructions add when keep-alives are on.
      *
      * Only then, so a bridge without the option sends exactly what it sent before it existed.
+     *
+     * **Conditional, because a keep-alive can land in a running turn.** A turn that only runs Bash
+     * and edits files moves nothing the bridge reads until it ends, so a long one looks idle. The
+     * instruction must not tell an agent in the middle of work to drop it.
      */
     public const string INSTRUCTIONS = ' A notice whose meta carries `keep_warm` has nothing behind it: it only keeps this '
-        ."session's prompt cache warm. End that turn at once, without tool calls.";
+        ."session's prompt cache warm. If nothing else is in progress, end that turn at once, without tool calls; "
+        .'if you are in the middle of a task, ignore it and carry on.';
 
     /**
      * When the session was last active, as a Unix timestamp.
@@ -93,6 +98,55 @@ final class KeepWarm
         private readonly Closure $clock,
     ) {
         $this->activeAt = ($this->clock)();
+    }
+
+    /**
+     * The schedule two option values ask for, or why there is none.
+     *
+     * Here rather than in the command, so the conversion and every refusal are testable over an
+     * injected clock: a `* 60` dropped, or the two values swapped, would otherwise pass every test.
+     *
+     * **A ceiling at or below the interval is refused**, because it can never let one keep-alive
+     * through, and silently sending none is the failure an operator cannot see.
+     *
+     * @param  string  $interval  What `--keep-warm` said.
+     * @param  string|null  $ceiling  What `--keep-warm-for` said, or null when it was not given.
+     * @param  Closure(): ?int  $turnEndedAt  When the stop hook last marked a turn end.
+     * @param  Closure(): int  $clock  The time now, as a Unix timestamp.
+     * @return self|string The schedule, or the sentence saying why keep-alives are off.
+     */
+    public static function fromOptions(string $interval, ?string $ceiling, Closure $turnEndedAt, Closure $clock): self|string
+    {
+        $intervalMinutes = self::minutes($interval);
+        $ceilingMinutes = $ceiling === null ? null : self::minutes($ceiling);
+
+        if ($intervalMinutes === null || ($ceiling !== null && $ceilingMinutes === null)) {
+            return '--keep-warm and --keep-warm-for take a whole number of minutes, at least 1; keep-alives are off.';
+        }
+
+        if ($ceilingMinutes !== null && $ceilingMinutes <= $intervalMinutes) {
+            return '--keep-warm-for must be longer than --keep-warm, or no keep-alive is ever sent; keep-alives are off.';
+        }
+
+        return new self($intervalMinutes * 60, $ceilingMinutes === null ? null : $ceilingMinutes * 60, $turnEndedAt, $clock);
+    }
+
+    /**
+     * A positive whole number of minutes, or null.
+     *
+     * Digits only, so `55.5`, `-5` and `1e3` are refused rather than read as something else.
+     *
+     * @param  string  $given  What the option said.
+     */
+    private static function minutes(string $given): ?int
+    {
+        if (preg_match('/^\d{1,6}$/', $given) !== 1) {
+            return null;
+        }
+
+        $minutes = (int) $given;
+
+        return $minutes >= 1 ? $minutes : null;
     }
 
     /**
