@@ -105,13 +105,19 @@ final class Session
      * **The platform rides along, read rather than configured** (#266): `Platform::report()`, on
      * every start, and dropped for a retry if the service refuses it.
      *
+     * **An ephemeral session is one the fleet is not told about** (#298): core omits its join and
+     * end events and leaves it out of the session list (`robot-council/core#424`). The flag is sent
+     * only when set, so every other session's request is byte-for-byte what it was, and a service
+     * that does not know the field drops it and starts an ordinary session.
+     *
      * @param  string|null  $projectId  The old single label, when the caller names one.
      * @param  string|null  $repository  The GitHub repository, as `owner/name`.
      * @param  string|null  $workLocation  Which working copy of it this is.
+     * @param  bool  $ephemeral  Whether to keep this session out of the feed and the session list.
      *
      * @throws RuntimeException When the service refuses.
      */
-    public function start(?string $projectId = null, ?string $repository = null, ?string $workLocation = null): void
+    public function start(?string $projectId = null, ?string $repository = null, ?string $workLocation = null, bool $ephemeral = false): void
     {
         // **Filtered on null rather than on falsiness.** A bare `array_filter` also drops `'0'`,
         // and `0` is a legal work location -- a worktree may be called that -- so a directory named
@@ -121,6 +127,11 @@ final class Session
             'repository' => $repository,
             'work_location' => $workLocation,
         ], static fn (?string $value): bool => $value !== null);
+
+        // Part of the identity rather than beside the platform, so the retry below keeps it
+        if ($ephemeral) {
+            $identity['ephemeral'] = true;
+        }
 
         $response = $this->post([...$identity, 'platform' => Platform::report()]);
 

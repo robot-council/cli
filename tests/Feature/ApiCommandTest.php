@@ -385,3 +385,57 @@ it('writes the response body and only the response body on a successful call', f
         ->and($output->stdout())->toBe('{"tasks":[]}'.PHP_EOL)
         ->and($output->stderr())->toBeEmpty();
 });
+
+/**
+ * The bodies of every session start the fake service received, decoded.
+ *
+ * @return list<array<array-key, mixed>>
+ */
+function apiSessionStarts(): array
+{
+    return array_values(Http::recorded(fn (Request $request): bool => $request->method() === 'POST' && str_ends_with($request->url(), '/api/sessions'))
+        ->map(fn (array $pair): array => $pair[0]->data())
+        ->all());
+}
+
+it('starts an ephemeral session for a read, and still ends it', function (): void {
+    enrolled();
+    fakeSession();
+
+    expect(Artisan::call('api', ['method' => 'get', 'path' => '/api/events', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0);
+
+    // Lower-case on purpose: the method is normalized before the decision, so `get` is a read too
+    expect(apiSessionStarts())->toHaveCount(1)
+        ->and(apiSessionStarts()[0]['ephemeral'] ?? null)->toBeTrue()
+        ->and(endCalls())->toBe(1);
+});
+
+it('starts an ordinary session for a call that can change something, and ends it', function (string $method): void {
+    enrolled();
+    fakeSession();
+
+    expect(Artisan::call('api', ['method' => $method, 'path' => '/api/tasks/1/claim', '--body' => '{}', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0);
+
+    // The control for the test above: the same command, a different method, and the key absent
+    // rather than false -- so the request is exactly what every core before #424 has been sent
+    expect(apiSessionStarts())->toHaveCount(1)
+        ->and(apiSessionStarts()[0])->not->toHaveKey('ephemeral')
+        ->and(endCalls())->toBe(1);
+})->with(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+it('keeps a read ephemeral when the service refuses the platform and the start is retried', function (): void {
+    enrolled();
+
+    Http::fake([
+        '*/api/sessions/*' => Http::response('', 204),
+        '*/api/sessions' => Http::sequence()
+            ->push(['message' => 'Invalid.', 'errors' => ['platform.os_family' => ['Unknown.']]], 422)
+            ->push(['session_id' => 42, 'token' => SESSION_TOKEN, 'expires_in' => 3600], 201),
+        '*' => Http::response('{"events":[]}', 200),
+    ]);
+
+    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/api/events', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0)
+        ->and(apiSessionStarts())->toHaveCount(2)
+        ->and(apiSessionStarts()[1])->not->toHaveKey('platform')
+        ->and(apiSessionStarts()[1]['ephemeral'] ?? null)->toBeTrue();
+});
