@@ -20,6 +20,26 @@ define('LARAVEL_START', microtime(true));
 
 /*
 |--------------------------------------------------------------------------
+| Mark This Version In Use
+|--------------------------------------------------------------------------
+|
+| A version installed side by side holds a shared lock on its `.in-use` for
+| this process's life, so `robot-council upgrade` never removes it while it
+| runs. Taken here rather than in the launcher, so a version started without
+| the launcher -- `php versions/<v>/robot-council mcp` -- is marked too.
+|
+*/
+
+if (basename(dirname(__DIR__)) === 'versions') {
+    $GLOBALS['robot_council_in_use'] = @fopen(__DIR__.'/.in-use', 'c');
+
+    if ($GLOBALS['robot_council_in_use'] === false || ! flock($GLOBALS['robot_council_in_use'], LOCK_SH)) {
+        fwrite(STDERR, 'robot-council: could not mark '.__DIR__.' in use, so an upgrade may remove it while this runs.'.PHP_EOL);
+    }
+}
+
+/*
+|--------------------------------------------------------------------------
 | Register The Auto Loader
 |--------------------------------------------------------------------------
 |

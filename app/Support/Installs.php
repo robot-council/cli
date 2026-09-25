@@ -45,9 +45,19 @@ final class Installs
      */
     public static function rootOf(string $basePath): ?string
     {
-        $parent = \dirname($basePath);
+        $parent = \dirname(self::normalize($basePath));
 
         return basename($parent) === 'versions' && is_dir(\dirname($parent).'/bin') ? \dirname($parent) : null;
+    }
+
+    /**
+     * A path with forward slashes and no trailing one, so two spellings of one directory compare equal.
+     *
+     * @param  string  $path  What to normalize.
+     */
+    public static function normalize(string $path): string
+    {
+        return rtrim(str_replace('\\', '/', $path), '/');
     }
 
     /**
@@ -60,6 +70,7 @@ final class Installs
      */
     public static function projectOf(string $basePath): ?string
     {
+        $basePath = self::normalize($basePath);
         $vendor = \dirname($basePath, 2);
 
         return basename($vendor) === 'vendor' && basename(\dirname($basePath)) === 'robot-council'
@@ -68,17 +79,22 @@ final class Installs
     }
 
     /**
-     * The installed versions under a root, oldest first.
+     * The complete versions under a root, oldest first.
+     *
+     * Only what the launcher could run: a directory it would skip is neither counted as the newest
+     * nor removed, because a cleanup that counted one once removed every version that could run.
      *
      * @param  string  $root  The versioned install's root.
      * @return list<string>
      */
     public static function versions(string $root): array
     {
+        self::selection();
+
         $versions = [];
 
         foreach (is_dir($root.'/versions') ? (scandir($root.'/versions') ?: []) : [] as $name) {
-            if (preg_match('/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/D', $name) === 1 && is_dir($root.'/versions/'.$name)) {
+            if (robot_council_is_version($name) && robot_council_complete($root.'/versions/'.$name)) {
                 $versions[] = $name;
             }
         }
@@ -122,46 +138,87 @@ final class Installs
     }
 
     /**
-     * Remove every version but the newest and the one running now, when nothing holds it.
+     * Remove every complete version but the chosen one, the newest and the one running now, when
+     * nothing holds it; and any staging directory an interrupted upgrade left behind.
      *
      * A version still in use is left, and a later run removes it once nothing does.
      *
      * @param  string  $root  The versioned install's root.
      * @param  string|null  $running  This process's own version directory, which is never removed.
-     * @return array{removed: list<string>, kept: list<string>} What was removed, and what was in use.
+     * @return array{removed: list<string>, kept: list<string>, failed: list<string>}
      */
     public static function removeUnused(string $root, ?string $running = null): array
     {
+        self::selection();
+
         $versions = self::versions($root);
-        $newest = array_pop($versions);
+        $keep = array_filter([robot_council_chosen($root), robot_council_newest($root.'/versions')]);
         $removed = [];
         $kept = [];
+        $failed = [];
 
         foreach ($versions as $version) {
             $directory = $root.'/versions/'.$version;
 
-            if ($newest === null || ($running !== null && realpath($directory) === realpath($running)) || self::inUse($directory)) {
+            if (\in_array($version, $keep, true)) {
+                continue;
+            }
+
+            if (($running !== null && self::normalize((string) realpath($directory)) === self::normalize((string) realpath($running))) || self::inUse($directory)) {
                 $kept[] = $version;
 
                 continue;
             }
 
             self::delete($directory);
-            $removed[] = $version;
+
+            // Reported from what is on disk, not from having tried: a file something holds is not
+            // deleted, and "removed" would then be false.
+            if (is_dir($directory)) {
+                $failed[] = $version;
+            } else {
+                $removed[] = $version;
+            }
         }
 
-        return ['removed' => $removed, 'kept' => $kept];
+        self::removeStaleStaging($root);
+
+        return ['removed' => $removed, 'kept' => $kept, 'failed' => $failed];
     }
 
     /**
-     * Put the launcher in `bin/`, unless one is already there.
+     * Remove staging directories older than any install could still be using.
      *
-     * **Never replaced by a routine upgrade**: a launcher already in place is left, because on
-     * Windows the one running this very command may be holding it open.
+     * An upgrade killed partway -- a session closed, a timeout -- leaves `versions/.installing-*`
+     * behind, and nothing else would ever remove it. One younger than twice the install timeout may
+     * belong to an upgrade still running, and is left.
+     *
+     * @param  string  $root  The versioned install's root.
+     * @param  int  $olderThan  How many seconds old a staging directory must be.
+     */
+    public static function removeStaleStaging(string $root, int $olderThan = 1200): void
+    {
+        foreach (glob($root.'/versions/.installing-*', GLOB_ONLYDIR) ?: [] as $staging) {
+            $modified = filemtime($staging);
+
+            if ($modified !== false && $modified < time() - $olderThan) {
+                self::delete($staging);
+            }
+        }
+    }
+
+    /**
+     * Put the launcher in `bin/`, and bring a file up to date where it differs and can be replaced.
+     *
+     * **A routine upgrade leaves the launcher alone**: it changes rarely, so its files are almost
+     * always identical and untouched. One that differs is replaced by writing beside it and renaming
+     * over it, which is atomic where it works; on Windows, where the file may be open because this
+     * very command was started through it, the rename fails and the old file stays, to be replaced
+     * by a later upgrade.
      *
      * @param  string  $root  The versioned install's root.
      * @param  string  $from  The `launcher/` directory of the version providing it.
-     * @return list<string> The files written.
+     * @return array{written: list<string>, left: list<string>} Files written or updated, and ones that could not be.
      */
     public static function installLauncher(string $root, string $from): array
     {
@@ -170,23 +227,45 @@ final class Installs
         }
 
         $written = [];
+        $left = [];
 
         foreach (self::LAUNCHER as $file) {
-            // A file already there is left; one the providing version lacks cannot be put there.
-            if (is_file($root.'/bin/'.$file) || ! is_file($from.'/'.$file)) {
+            $source = $from.'/'.$file;
+            $target = $root.'/bin/'.$file;
+
+            if (! is_file($source) || (is_file($target) && hash_file('sha256', $target) === hash_file('sha256', $source))) {
                 continue;
             }
 
-            copy($from.'/'.$file, $root.'/bin/'.$file);
+            $staged = $target.'.new';
 
-            if ($file === 'robot-council') {
-                @chmod($root.'/bin/'.$file, 0o755);
+            if (! @copy($source, $staged)) {
+                $left[] = $file;
+
+                continue;
             }
 
-            $written[] = $file;
+            if ($file === 'robot-council') {
+                @chmod($staged, 0o755);
+            }
+
+            if (@rename($staged, $target)) {
+                $written[] = $file;
+            } else {
+                @unlink($staged);
+                $left[] = $file;
+            }
         }
 
-        return $written;
+        return ['written' => $written, 'left' => $left];
+    }
+
+    /**
+     * Load the launcher's own selection functions, which decide what counts as a version.
+     */
+    private static function selection(): void
+    {
+        require_once \dirname(__DIR__, 2).'/launcher/select.php';
     }
 
     /**
@@ -196,6 +275,13 @@ final class Installs
      */
     public static function delete(string $directory): void
     {
+        // A link is removed, never followed: its target is not this install's to delete.
+        if (is_link($directory)) {
+            @unlink($directory);
+
+            return;
+        }
+
         if (! is_dir($directory)) {
             return;
         }

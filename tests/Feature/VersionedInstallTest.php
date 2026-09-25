@@ -120,7 +120,7 @@ it('chooses nothing when nothing is installed', function (): void {
         ->and(robot_council_newest($this->root.'/absent'))->toBeNull();
 });
 
-it('runs the newest version in process, with the arguments, the name, and the in-use lock held', function (): void {
+it('runs the newest version in process, with the arguments and the name', function (): void {
     fakeVersion($this->root, '0.4.9');
     fakeVersion($this->root, '0.4.10');
     installLauncherFor($this->root);
@@ -133,7 +133,9 @@ it('runs the newest version in process, with the arguments, the name, and the in
             'version' => '0.4.10',
             'argv' => ['pending', '--peek'],
             'binary' => 'robot-council',
-            'locked' => true,
+
+            // The fake entry takes no lock of its own; the real `entry.php` does, tested below.
+            'locked' => false,
         ]);
 });
 
@@ -200,19 +202,22 @@ it('removes old versions nothing holds, and keeps the newest, the running one, a
     flock($handle, LOCK_UN);
     fclose($handle);
 
-    expect($cleared)->toBe(['removed' => ['0.4.7'], 'kept' => ['0.4.8', '0.4.9']])
+    expect($cleared)->toBe(['removed' => ['0.4.7'], 'kept' => ['0.4.8', '0.4.9'], 'failed' => []])
         ->and(Installs::versions($this->root))->toBe(['0.4.8', '0.4.9', '0.4.10']);
 });
 
-it('puts the launcher in place, and never replaces one already there', function (): void {
+it('puts the launcher in place, and leaves a file that already matches untouched', function (): void {
+    expect(Installs::installLauncher($this->root, base_path('launcher'))['written'])->toBe(Installs::LAUNCHER)
+        ->and(Installs::installLauncher($this->root, base_path('launcher')))->toBe(['written' => [], 'left' => []]);
+});
+
+it('brings a launcher file that differs up to date, by a rename over it', function (): void {
     installLauncherFor($this->root);
+    file_put_contents($this->root.'/bin/robot-council.php', '<?php // an older launcher');
 
-    expect(scandir($this->root.'/bin'))->toContain('robot-council', 'robot-council.cmd', 'robot-council.php', 'select.php');
-
-    file_put_contents($this->root.'/bin/robot-council.php', '<?php // a launcher a running bridge holds');
-
-    expect(Installs::installLauncher($this->root, base_path('launcher')))->toBeEmpty()
-        ->and(file_get_contents($this->root.'/bin/robot-council.php'))->toBe('<?php // a launcher a running bridge holds');
+    expect(Installs::installLauncher($this->root, base_path('launcher')))->toBe(['written' => ['robot-council.php'], 'left' => []])
+        ->and(file_get_contents($this->root.'/bin/robot-council.php'))->toBe(file_get_contents(base_path('launcher/robot-council.php')))
+        ->and(glob($this->root.'/bin/*.new'))->toBe([]);
 });
 
 it('knows a versioned install and a single-directory one by their layout', function (): void {
@@ -319,3 +324,121 @@ it('refuses a version that is not one', function (): void {
 
     Process::assertNothingRan();
 });
+
+it('never counts a directory the launcher would skip as the newest, so it cannot remove every version that runs', function (): void {
+    // The review's reproduction: an empty `0.7.0/` above two complete versions.
+    fakeVersion($this->root, '0.5.0');
+    fakeVersion($this->root, '0.6.0');
+    fakeVersion($this->root, '0.7.0', complete: false);
+
+    Installs::removeUnused($this->root);
+
+    expect(Installs::versions($this->root))->toBe(['0.6.0'])
+        ->and(robot_council_chosen($this->root))->toBe('0.6.0')
+        ->and($this->root.'/versions/0.7.0')->toBeDirectory();
+});
+
+it('runs a pinned version rather than the newest, and keeps it through a cleanup', function (): void {
+    fakeVersion($this->root, '0.5.5');
+    fakeVersion($this->root, '0.6.0');
+    file_put_contents($this->root.'/pinned', "0.5.5\n");
+
+    Installs::removeUnused($this->root);
+
+    expect(robot_council_chosen($this->root))->toBe('0.5.5')
+        ->and(Installs::versions($this->root))->toBe(['0.5.5', '0.6.0']);
+});
+
+it('ignores a pin naming a version that is not installed', function (): void {
+    fakeVersion($this->root, '0.6.0');
+    file_put_contents($this->root.'/pinned', "0.5.5\n");
+
+    expect(robot_council_chosen($this->root))->toBe('0.6.0');
+});
+
+it('rolls back to a named older version, and returns to the newest without a name', function (): void {
+    Http::fake(['repo.packagist.org/*' => Http::response(['packages' => ['robot-council/cli' => [['version' => 'v0.6.0']]]], 200)]);
+    fakeComposer();
+    fakeVersion($this->root, '0.6.0');
+
+    // The review's reproduction: this used to install 0.5.5 and then remove it as unused.
+    expect(Artisan::call('upgrade', ['version' => '0.5.5', '--root' => $this->root]))->toBe(0)
+        ->and(Artisan::output())->toContain('Pinned 0.5.5')
+        ->and(robot_council_chosen($this->root))->toBe('0.5.5')
+        ->and(Installs::versions($this->root))->toBe(['0.5.5', '0.6.0']);
+
+    expect(Artisan::call('upgrade', ['--root' => $this->root]))->toBe(0)
+        ->and(Artisan::output())->toContain('Removed the pin')
+        ->and(robot_council_chosen($this->root))->toBe('0.6.0')
+        ->and(Installs::versions($this->root))->toBe(['0.6.0']);
+});
+
+it('removes a staging directory an interrupted upgrade left, and leaves one that may still be in use', function (): void {
+    fakeVersion($this->root, '0.6.0');
+    mkdir($this->root.'/versions/.installing-0.6.1-old');
+    mkdir($this->root.'/versions/.installing-0.6.2-new');
+    touch($this->root.'/versions/.installing-0.6.1-old', time() - 3600);
+
+    Installs::removeUnused($this->root);
+
+    expect($this->root.'/versions/.installing-0.6.1-old')->not->toBeDirectory()
+        ->and($this->root.'/versions/.installing-0.6.2-new')->toBeDirectory();
+});
+
+it('marks a version in use from entry.php itself, so a version started without the launcher is marked too', function (): void {
+    // The real entry.php, with an autoloader that reports whether the lock is held and stops.
+    $directory = $this->root.'/versions/0.6.0';
+    mkdir($directory.'/vendor', 0o777, true);
+    copy(base_path('entry.php'), $directory.'/entry.php');
+    file_put_contents($directory.'/vendor/autoload.php', <<<'PHP'
+        <?php
+        $probe = fopen(dirname(__DIR__).'/.in-use', 'c');
+        echo flock($probe, LOCK_EX | LOCK_NB) ? 'unlocked' : 'locked';
+        exit(0);
+        PHP);
+
+    $process = new SymfonyProcess([PHP_BINARY, $directory.'/entry.php', 'mcp']);
+    $process->run();
+
+    expect($process->getOutput())->toBe('locked')
+        ->and($process->getErrorOutput())->toBeEmpty();
+});
+
+it("passes the version's exit code back through the POSIX shim", function (): void {
+    $directory = fakeVersion($this->root, '0.6.0');
+    file_put_contents($directory.'/entry.php', '<?php exit(3);');
+    installLauncherFor($this->root);
+
+    $process = new SymfonyProcess(['sh', $this->root.'/bin/robot-council']);
+    $process->run();
+
+    expect($process->getExitCode())->toBe(3);
+})->skipOnWindows();
+
+it("passes the version's exit code back through the Windows shim", function (): void {
+    $directory = fakeVersion($this->root, '0.6.0');
+    file_put_contents($directory.'/entry.php', '<?php exit(3);');
+    installLauncherFor($this->root);
+
+    $process = new SymfonyProcess(['cmd', '/c', str_replace('/', '\\', $this->root.'/bin/robot-council.cmd')]);
+    $process->run();
+
+    expect($process->getExitCode())->toBe(3);
+})->skip(PHP_OS_FAMILY !== 'Windows', 'The .cmd shim runs only under cmd.exe.');
+
+it('reports a version it could not fully remove as failed, not removed', function (): void {
+    fakeVersion($this->root, '0.5.0');
+    fakeVersion($this->root, '0.6.0');
+
+    // A directory whose entries cannot be removed, as a file something holds cannot be on Windows.
+    mkdir($this->root.'/versions/0.5.0/stuck');
+    touch($this->root.'/versions/0.5.0/stuck/held');
+    chmod($this->root.'/versions/0.5.0/stuck', 0o555);
+
+    $cleared = Installs::removeUnused($this->root);
+
+    chmod($this->root.'/versions/0.5.0/stuck', 0o755);
+
+    expect($cleared['failed'])->toBe(['0.5.0'])
+        ->and($cleared['removed'])->toBeEmpty();
+})->skipOnWindows();

@@ -27,7 +27,17 @@ php "$HOME/.robot-council-setup/robot-council" upgrade --root="$HOME/.local/robo
 rm -rf "$HOME/.robot-council-setup"
 ```
 
+On Windows, in PowerShell:
+
+```powershell
+composer create-project robot-council/cli "$HOME\.robot-council-setup" --no-dev
+php "$HOME\.robot-council-setup\robot-council" upgrade --root="$HOME\.local\robot-council"
+Remove-Item -Recurse -Force "$HOME\.robot-council-setup"
+```
+
 That installs the newest release under `~/.local/robot-council/versions/<version>/`, and puts the launcher in `~/.local/robot-council/bin`. Put that directory on your `PATH`, and `robot-council` is available everywhere, which is what the harness setups below assume. The launcher starts the newest installed version each time a process starts.
+
+**On Windows, point a harness at the launcher through `php`**: `command` is `php`, and `args` start with the absolute path to `~\.local\robot-council\bin\robot-council.php`, then `mcp`. A harness that starts processes without a shell cannot run the `.cmd` shim. **Never point it at a file under `versions\`**: the harness would go on starting that one version, and fail to start at all once an upgrade has removed it.
 
 ### Upgrading
 
@@ -283,7 +293,7 @@ After enroll with `--harness=cursor`, Settings, then Tools & MCP, showed the ser
 
 Put the entry in the **global** file when the fleet URL is yours. A project `.cursor/mcp.json` is shared with whoever opens that checkout; this repository does not ship one, because the URL is per deployment rather than part of the CLI source.
 
-If `robot-council` is not on the `PATH` Cursor inherits, point `command` at `php` (absolute path to the binary) and put the absolute path to this repository's `robot-council` script, then `mcp`, in `args`. Measured on the same Windows run: without that, Windows offered "Select an app to open `robot-council`" instead of launching the bridge.
+If `robot-council` is not on the `PATH` Cursor inherits, point `command` at `php` (absolute path to the binary) and put the absolute path to the launcher -- `bin\robot-council.php` in a versioned install -- then `mcp`, in `args`. Measured on the same Windows run: without that, Windows offered "Select an app to open `robot-council`" instead of launching the bridge.
 
 ### Codex
 

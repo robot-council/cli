@@ -10,6 +10,7 @@ use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Sleep;
 use LaravelZero\Framework\Commands\Command;
 use Throwable;
 
@@ -72,13 +73,19 @@ final class UpgradeCommand extends Command
             return self::FAILURE;
         }
 
-        $written = Installs::installLauncher($root, $target.'/launcher');
+        $this->pin($root, $this->argument('version') !== null ? $version : null);
 
-        if ($written !== []) {
-            $this->components->info(sprintf('Put the launcher in %s/bin.', $root));
+        $launcher = Installs::installLauncher($root, $target.'/launcher');
+
+        if ($launcher['written'] !== []) {
+            $this->components->info(sprintf('Put the launcher in %s/bin: %s.', $root, implode(', ', $launcher['written'])));
         }
 
-        $running = Installs::rootOf(base_path()) === $root ? base_path() : null;
+        if ($launcher['left'] !== []) {
+            $this->line(sprintf('Left %s in %s/bin as they were, since they could not be replaced now; a later upgrade updates them.', implode(', ', $launcher['left']), $root));
+        }
+
+        $running = Installs::rootOf(base_path()) === Installs::normalize($root) ? base_path() : null;
         $cleared = Installs::removeUnused($root, $running);
 
         foreach ($cleared['removed'] as $removed) {
@@ -87,6 +94,10 @@ final class UpgradeCommand extends Command
 
         foreach ($cleared['kept'] as $kept) {
             $this->line(sprintf('Kept %s, which is still running; a later upgrade removes it.', $kept));
+        }
+
+        foreach ($cleared['failed'] as $failed) {
+            $this->line(sprintf('Could not fully remove %s; a later upgrade tries again.', $failed));
         }
 
         $this->pathAdvice($root);
@@ -102,7 +113,7 @@ final class UpgradeCommand extends Command
         $named = $this->option('root');
 
         if (\is_string($named) && $named !== '') {
-            return rtrim(str_replace('\\', '/', $named), '/');
+            return Installs::normalize($named);
         }
 
         return Installs::rootOf(base_path()) ?? Installs::projectOf(base_path());
@@ -194,7 +205,7 @@ final class UpgradeCommand extends Command
             return false;
         }
 
-        if (! @rename($staging, $root.'/versions/'.$version)) {
+        if (! $this->moveIntoPlace($staging, $root.'/versions/'.$version)) {
             Installs::delete($staging);
             $this->components->error(sprintf('Could not move %s into place.', $version));
 
@@ -204,6 +215,55 @@ final class UpgradeCommand extends Command
         $this->components->info(sprintf('Installed %s at %s/versions/%s.', $version, $root, $version));
 
         return true;
+    }
+
+    /**
+     * Rename the staged version into place, retrying for a moment.
+     *
+     * **Retried because Windows holds new files briefly**: an antivirus scanner or the search
+     * indexer opens what Composer just extracted, and a rename made then fails. Composer retries
+     * its own renames for the same reason.
+     *
+     * @param  string  $from  The staging directory.
+     * @param  string  $to  Where the version belongs.
+     */
+    private function moveIntoPlace(string $from, string $to): bool
+    {
+        for ($attempt = 1; $attempt <= 10; $attempt++) {
+            if (@rename($from, $to)) {
+                return true;
+            }
+
+            Sleep::for(500)->milliseconds();
+        }
+
+        return false;
+    }
+
+    /**
+     * Pin the launcher to a named version, or return it to the newest.
+     *
+     * **Naming a version is choosing it**, older than the newest included, which is how a bad
+     * release is rolled back. Without the pin the launcher would go on starting the newest, and the
+     * cleanup would remove the version just installed as unused.
+     *
+     * @param  string  $root  The versioned install's root.
+     * @param  string|null  $version  The version to pin, or null to remove the pin.
+     */
+    private function pin(string $root, ?string $version): void
+    {
+        $file = $root.'/pinned';
+
+        if ($version === null) {
+            if (is_file($file) && @unlink($file)) {
+                $this->line('Removed the pin, so the launcher starts the newest version again.');
+            }
+
+            return;
+        }
+
+        file_put_contents($file, $version.PHP_EOL);
+        $this->line(sprintf('Pinned %s, so the launcher starts it rather than the newest. `robot-council upgrade` with no version removes the pin.', $version));
     }
 
     /**

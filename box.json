@@ -7,7 +7,8 @@
         "vendor"
     ],
     "files": [
-        "composer.json"
+        "composer.json",
+        "entry.php"
     ],
     "exclude-composer-files": false,
     "compression": "GZ",
