@@ -18,7 +18,15 @@ use RuntimeException;
  *
  * **Keyed by the bridge's identity, not by its session id**, for the same reason: the hook cannot
  * know a session id, and it can know the service, the harness and the project because they are what
- * its own configuration already carries. One bridge runs per identity, so one sink does too.
+ * its own configuration already carries.
+ *
+ * **And by the checkout, when no project is named (#299).** Every session launched from one
+ * user-level harness configuration has the same service, harness and project, so with those alone
+ * all of a machine's sessions shared one sink, and the first stop hook to run took every session's
+ * events -- measured with three bridges on one Mac. The bridge and the hook both run in the
+ * project directory, so both can resolve the checkout's git directory, which differs per worktree
+ * and is the same from any subdirectory. Two sessions in ONE checkout still share (#300). A named
+ * project keeps the key it always had, so an install that passes `--project` loses nothing.
  *
  * Under `XDG_STATE_HOME` rather than beside the credential in `XDG_CONFIG_HOME`: this is transient
  * state a fresh run may discard, not configuration a person edits. Never the working directory,
@@ -68,14 +76,32 @@ final class PendingEvents
     public const int CLEAR_RETRY_MILLISECONDS = 50;
 
     /**
+     * How many times to ask git before keying by the directory itself for this one call.
+     */
+    public const int CHECKOUT_ATTEMPTS = 3;
+
+    /**
+     * Checkouts already resolved in this process, by the directory they were resolved from.
+     *
+     * **Only definite answers are kept**, and shared across instances, so a bridge's two sinks --
+     * the one the join opens and the one keep-alives read -- cannot come to different answers.
+     *
+     * @var array<string, string>
+     */
+    private static array $checkouts = [];
+
+    /**
      * @param  string  $service  The fleet's base URL.
      * @param  string  $harness  Which harness this bridge is.
      * @param  string|null  $projectId  The checkout this bridge is working, when one was named.
+     * @param  string|null  $checkoutDirectory  Where to resolve the checkout from when no project
+     *                                          is named; the current working directory by default.
      */
     public function __construct(
         private readonly string $service,
         private readonly string $harness,
-        private readonly ?string $projectId = null
+        private readonly ?string $projectId = null,
+        private readonly ?string $checkoutDirectory = null,
     ) {}
 
     /**
@@ -575,10 +601,65 @@ final class PendingEvents
      */
     private function key(): string
     {
-        return substr(hash('sha256', implode("\0", [
-            rtrim($this->service, '/'),
-            $this->harness,
-            $this->projectId ?? '',
-        ])), 0, 32);
+        $parts = [rtrim($this->service, '/'), $this->harness, $this->projectId ?? ''];
+
+        // Unchanged when a project is named, so its sink survives the upgrade. Otherwise a fourth
+        // part, which also keeps the new key from ever equalling the old shared one: joined, even an
+        // empty fourth part adds a separator the three-part key never had (#299).
+        if ($this->projectId === null) {
+            $parts[] = $this->checkout();
+        }
+
+        return substr(hash('sha256', implode("\0", $parts)), 0, 32);
+    }
+
+    /**
+     * The checkout, as both the bridge and its stop hook resolve it.
+     *
+     * The git directory where there is one, and the working directory itself where git says there
+     * is none. **Lower-cased on Windows**, where a drive letter or folder can arrive in either case
+     * from two processes started differently, and the file system treats the two as one.
+     *
+     * **A git that could not answer is asked again, and its silence is never kept.** Keyed by the
+     * directory instead, a bridge whose first `git` timed out under load would write every event
+     * for the rest of its life to a sink no hook reads. After `CHECKOUT_ATTEMPTS`, this one call
+     * falls back to the directory, and the next asks again.
+     */
+    private function checkout(): string
+    {
+        $directory = $this->checkoutDirectory ?? getcwd();
+        $directory = \is_string($directory) ? $directory : '';
+
+        if (isset(self::$checkouts[$directory])) {
+            return self::$checkouts[$directory];
+        }
+
+        for ($attempt = 0; $attempt < self::CHECKOUT_ATTEMPTS; $attempt++) {
+            $resolved = Checkout::resolveGitDirectory($directory === '' ? null : $directory);
+
+            if ($resolved !== null) {
+                return self::$checkouts[$directory] = $this->comparable($resolved === false ? $this->realDirectory($directory) : $resolved);
+            }
+        }
+
+        return $this->comparable($this->realDirectory($directory));
+    }
+
+    /**
+     * A directory with its links resolved, or as given when it cannot be.
+     */
+    private function realDirectory(string $directory): string
+    {
+        $real = $directory === '' ? false : realpath($directory);
+
+        return rtrim(str_replace('\\', '/', $real === false ? $directory : $real), '/');
+    }
+
+    /**
+     * One spelling for a path two processes may spell differently.
+     */
+    private function comparable(string $path): string
+    {
+        return PHP_OS_FAMILY === 'Windows' ? strtolower($path) : $path;
     }
 }
