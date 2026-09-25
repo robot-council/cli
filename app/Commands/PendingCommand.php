@@ -65,7 +65,7 @@ final class PendingCommand extends Command
             return self::FAILURE;
         }
 
-        $pending = new PendingEvents($service, $harness, $this->stringOption('project'));
+        $pending = new PendingEvents($service, $harness, $this->stringOption('project'), $this->projectDirectory());
 
         $peeking = $this->option('peek') === true;
 
@@ -128,6 +128,24 @@ final class PendingCommand extends Command
         return \is_array($actor) && \is_string($actor['github_login'] ?? null)
             ? $actor['github_login']
             : 'an unnamed session';
+    }
+
+    /**
+     * The directory the harness's session was launched in, when the harness says.
+     *
+     * **Not this process's working directory, which moves.** Claude Code starts a hook in the
+     * session's current directory, and an agent's `cd` into an added directory moves it there,
+     * while the bridge stays where it was launched. Measured on Claude Code 2.1.282: after `cd` into
+     * an `--add-dir` repository the `Stop` hook ran in that repository, with `CLAUDE_PROJECT_DIR`
+     * still naming the launch directory, which is also where the MCP server ran. So the hook
+     * resolves its checkout from `CLAUDE_PROJECT_DIR` and would otherwise drain another checkout's
+     * sink (#299). Other harnesses set no such variable, and fall back to the working directory.
+     */
+    private function projectDirectory(): ?string
+    {
+        $directory = getenv('CLAUDE_PROJECT_DIR');
+
+        return \is_string($directory) && $directory !== '' ? $directory : null;
     }
 
     /**

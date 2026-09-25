@@ -76,27 +76,32 @@ final class PendingEvents
     public const int CLEAR_RETRY_MILLISECONDS = 50;
 
     /**
-     * @param  string  $service  The fleet's base URL.
-     * @param  string  $harness  Which harness this bridge is.
-     * @param  string|null  $projectId  The checkout this bridge is working, when one was named.
+     * How many times to ask git before keying by the directory itself for this one call.
      */
+    public const int CHECKOUT_ATTEMPTS = 3;
+
     /**
-     * The checkout this sink belongs to, once resolved.
+     * Checkouts already resolved in this process, by the directory they were resolved from.
+     *
+     * **Only definite answers are kept**, and shared across instances, so a bridge's two sinks --
+     * the one the join opens and the one keep-alives read -- cannot come to different answers.
+     *
+     * @var array<string, string>
      */
-    private ?string $checkout = null;
+    private static array $checkouts = [];
 
     /**
      * @param  string  $service  The fleet's base URL.
      * @param  string  $harness  Which harness this bridge is.
      * @param  string|null  $projectId  The checkout this bridge is working, when one was named.
-     * @param  string|null  $directory  Where to resolve the checkout from when no project is named;
-     *                                  the current working directory by default.
+     * @param  string|null  $checkoutDirectory  Where to resolve the checkout from when no project
+     *                                          is named; the current working directory by default.
      */
     public function __construct(
         private readonly string $service,
         private readonly string $harness,
         private readonly ?string $projectId = null,
-        private readonly ?string $directory = null,
+        private readonly ?string $checkoutDirectory = null,
     ) {}
 
     /**
@@ -600,7 +605,7 @@ final class PendingEvents
 
         // Unchanged when a project is named, so its sink survives the upgrade. Otherwise a fourth
         // part, which also keeps the new key from ever equalling the old shared one: joined, even an
-        // empty fourth part adds a separator the three-part key never had (#299)
+        // empty fourth part adds a separator the three-part key never had (#299).
         if ($this->projectId === null) {
             $parts[] = $this->checkout();
         }
@@ -611,26 +616,50 @@ final class PendingEvents
     /**
      * The checkout, as both the bridge and its stop hook resolve it.
      *
-     * The git directory where there is one, and the working directory itself where there is not.
-     * **Lower-cased on Windows**, where a drive letter or folder can arrive in either case from two
-     * processes started differently, and the file system treats the two as one.
+     * The git directory where there is one, and the working directory itself where git says there
+     * is none. **Lower-cased on Windows**, where a drive letter or folder can arrive in either case
+     * from two processes started differently, and the file system treats the two as one.
+     *
+     * **A git that could not answer is asked again, and its silence is never kept.** Keyed by the
+     * directory instead, a bridge whose first `git` timed out under load would write every event
+     * for the rest of its life to a sink no hook reads. After `CHECKOUT_ATTEMPTS`, this one call
+     * falls back to the directory, and the next asks again.
      */
     private function checkout(): string
     {
-        if ($this->checkout !== null) {
-            return $this->checkout;
-        }
-
-        $directory = $this->directory ?? getcwd();
+        $directory = $this->checkoutDirectory ?? getcwd();
         $directory = \is_string($directory) ? $directory : '';
 
-        $resolved = Checkout::gitDirectory($directory === '' ? null : $directory);
-
-        if ($resolved === null) {
-            $real = $directory === '' ? false : realpath($directory);
-            $resolved = rtrim(str_replace('\\', '/', $real === false ? $directory : $real), '/');
+        if (isset(self::$checkouts[$directory])) {
+            return self::$checkouts[$directory];
         }
 
-        return $this->checkout = PHP_OS_FAMILY === 'Windows' ? strtolower($resolved) : $resolved;
+        for ($attempt = 0; $attempt < self::CHECKOUT_ATTEMPTS; $attempt++) {
+            $resolved = Checkout::resolveGitDirectory($directory === '' ? null : $directory);
+
+            if ($resolved !== null) {
+                return self::$checkouts[$directory] = $this->comparable($resolved === false ? $this->realDirectory($directory) : $resolved);
+            }
+        }
+
+        return $this->comparable($this->realDirectory($directory));
+    }
+
+    /**
+     * A directory with its links resolved, or as given when it cannot be.
+     */
+    private function realDirectory(string $directory): string
+    {
+        $real = $directory === '' ? false : realpath($directory);
+
+        return rtrim(str_replace('\\', '/', $real === false ? $directory : $real), '/');
+    }
+
+    /**
+     * One spelling for a path two processes may spell differently.
+     */
+    private function comparable(string $path): string
+    {
+        return PHP_OS_FAMILY === 'Windows' ? strtolower($path) : $path;
     }
 }

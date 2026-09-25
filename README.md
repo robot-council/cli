@@ -554,23 +554,29 @@ content. The script is also the only one of the two places that all three harnes
 Cursor's `stop` entry has no `env` key at all, and the MCP block's `env` configures the bridge's
 process rather than the hook's.
 
-**The sink is keyed by the service, the harness and the project, and, when no project is named, by
+**The sink is keyed by the service, the harness, and the project, and, when no project is named, by
 the checkout** ([#299](https://github.com/robot-council/cli/issues/299)). A hook that resolves any
 of them differently from the bridge beside it reads an empty sink and reports a quiet fleet.
 Uncomment `ROBOT_COUNCIL_PROJECT` wherever the bridge was given `--project`.
 
-**The checkout is the git directory of the folder a process runs in**, or the folder itself outside
-a repository. It is what keeps sessions in different checkouts apart: before it, every session
-launched from one user-level configuration shared one sink, and the first stop hook to run took
-every session's events. It works because the bridge and the hook run in the same folder. Measured on
-Claude Code 2.1.282, the MCP server and the `Stop` hook both started in the folder Claude Code was
-launched from. It is unmeasured for Cursor and Codex. Each worktree has its own git directory, so
-each slot gets its own sink, and a subfolder of a checkout finds its checkout's sink. **Two sessions
-in one checkout still share a sink**, so run one seat per checkout
+**The checkout is the git directory of the folder the session was launched in**, or that folder
+itself outside a repository. It is what keeps sessions in different checkouts apart: before it,
+every session launched from one user-level configuration shared one sink, and the first stop hook to
+run took every session's events. Each worktree has its own git directory, so each slot gets its own
+sink. **Two sessions in one checkout still share a sink**, so run one seat per checkout
 ([#300](https://github.com/robot-council/cli/issues/300) asks whether that can change).
 
+**The bridge and the hook have to agree on that folder, and they do not start in the same one.**
+Measured on Claude Code 2.1.282: the MCP server runs in the folder Claude Code was launched from,
+but a `Stop` hook runs in the session's current folder, which an agent's `cd` moves. After a `cd`
+into an `--add-dir` repository, the hook ran in that repository. What stays put is
+`CLAUDE_PROJECT_DIR`: set for the hook, it still named the launch folder. So `robot-council pending`
+resolves the checkout from `CLAUDE_PROJECT_DIR` when it is set, and from its own folder otherwise.
+The MCP server does not receive that variable (measured), and needs none, since it stays where it
+started. **Cursor and Codex are unmeasured**, and fall back to the hook's own folder.
+
 **Upgrading past this drops events already waiting under the old shared key.** A seat without
-`--project` starts reading its checkout's sink, and nothing reads the old shared one again.  Those
+`--project` starts reading its checkout's sink, and nothing reads the old shared one again. Those
 events are not delivered again. They are the ones no session had read, often addressed to a session
 that has since ended.
 

@@ -64,12 +64,19 @@ function sinkEvent(string $body): array
 /**
  * Run `robot-council pending` the way a stop hook does: its own process, in a directory.
  */
-function sinkHook(string $directory, string $state): string
+function sinkHook(string $directory, string $state, ?string $projectDirectory = null): string
 {
     $hook = new Process(
         [PHP_BINARY, base_path('robot-council'), 'pending'],
         $directory,
-        ['XDG_STATE_HOME' => $state, 'ROBOT_COUNCIL_SERVICE' => SINK_SERVICE, 'ROBOT_COUNCIL_HARNESS' => 'claude'],
+        [
+            'XDG_STATE_HOME' => $state,
+            'ROBOT_COUNCIL_SERVICE' => SINK_SERVICE,
+            'ROBOT_COUNCIL_HARNESS' => 'claude',
+
+            // Unset unless given: this suite may itself run inside a Claude Code session
+            'CLAUDE_PROJECT_DIR' => $projectDirectory ?? false,
+        ],
     );
 
     $hook->mustRun();
@@ -112,13 +119,17 @@ it('gives a linked worktree a sink apart from its main checkout', function (): v
         ->not->toBe(new PendingEvents(SINK_SERVICE, 'claude', null, $this->root.'/slot')->path());
 });
 
-it('finds the same sink from a subdirectory of the checkout', function (): void {
+it('finds the same sink from a subdirectory of the checkout, and no other checkout does', function (): void {
     $repository = sinkRepository($this->root.'/repo');
+    $sibling = sinkRepository($this->root.'/sibling');
     File::ensureDirectoryExists($repository.'/src/deep');
 
     new PendingEvents(SINK_SERVICE, 'claude', null, $repository)->add([sinkEvent('written at the root')]);
 
-    expect(sinkHook($repository.'/src/deep', $this->state))->toContain('written at the root');
+    // The sibling first: with one shared sink it would take the event, and the subdirectory would
+    // then read nothing
+    expect(sinkHook($sibling, $this->state))->toBeEmpty()
+        ->and(sinkHook($repository.'/src/deep', $this->state))->toContain('written at the root');
 });
 
 it('keys a directory outside any repository by the directory itself', function (): void {
@@ -127,8 +138,9 @@ it('keys a directory outside any repository by the directory itself', function (
 
     new PendingEvents(SINK_SERVICE, 'claude', null, $this->root.'/plain-a')->add([sinkEvent('for plain a')]);
 
-    expect(sinkHook($this->root.'/plain-a', $this->state))->toContain('for plain a')
-        ->and(sinkHook($this->root.'/plain-b', $this->state))->toBeEmpty();
+    // The other directory first, for the same reason as the sibling above
+    expect(sinkHook($this->root.'/plain-b', $this->state))->toBeEmpty()
+        ->and(sinkHook($this->root.'/plain-a', $this->state))->toContain('for plain a');
 })->skip(fn (): bool => new Process(['git', 'rev-parse', '--absolute-git-dir'], sys_get_temp_dir())->run() === 0, 'The temporary directory is inside a git repository here.');
 
 it('keeps the key a named project always had, so its sink survives the upgrade', function (): void {
@@ -159,4 +171,33 @@ it("keeps the turn-end mark per checkout too, so one session cannot restart anot
 
     expect(new PendingEvents(SINK_SERVICE, 'claude', null, $two)->turnEndedAt())->toBeNull()
         ->and(new PendingEvents(SINK_SERVICE, 'claude', null, $one)->turnEndedAt())->toBeInt();
+});
+
+it("resolves the hook's checkout from where Claude Code launched the session, not where the agent moved", function (): void {
+    $launched = sinkRepository($this->root.'/launched');
+    $moved = sinkRepository($this->root.'/moved');
+
+    new PendingEvents(SINK_SERVICE, 'claude', null, $launched)->add([sinkEvent('for the launched checkout')]);
+    new PendingEvents(SINK_SERVICE, 'claude', null, $moved)->add([sinkEvent('for the other checkout')]);
+
+    // The agent ran `cd` into an added directory, so the hook starts there, while
+    // `CLAUDE_PROJECT_DIR` still names the directory the session and its bridge were launched in
+    $read = sinkHook($moved, $this->state, $launched);
+
+    expect($read)->toContain('for the launched checkout')->not->toContain('for the other checkout');
+});
+
+it('asks git again after it could not answer, rather than keeping the fallback', function (): void {
+    $later = $this->root.'/later';
+
+    // A directory that does not exist yet: git cannot even start in it, which is the same
+    // no-answer a timeout gives, so the key falls back to the directory for this call only
+    $whileGitCouldNotAnswer = new PendingEvents(SINK_SERVICE, 'claude', null, $later)->path();
+
+    sinkRepository($later);
+
+    $once = new PendingEvents(SINK_SERVICE, 'claude', null, $later)->path();
+
+    expect($whileGitCouldNotAnswer)->not->toBe($once)
+        ->and($once)->toBe(new PendingEvents(SINK_SERVICE, 'claude', null, $later.'/.')->path());
 });

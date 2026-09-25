@@ -38,6 +38,14 @@ final class Checkout
     public const int TIMEOUT_SECONDS = 2;
 
     /**
+     * What `git rev-parse` exits with in a directory outside any repository.
+     *
+     * Measured on git 2.39.5: `fatal: not a git repository (or any of the parent directories)`,
+     * exit 128.
+     */
+    public const int NOT_A_REPOSITORY = 128;
+
+    /**
      * What the main working copy of a repository calls itself.
      *
      * A checkout that is not a linked worktree has no name of its own -- git does not give it one
@@ -180,9 +188,47 @@ final class Checkout
      */
     public static function gitDirectory(?string $directory = null): ?string
     {
-        $gitDir = self::git(['rev-parse', '--absolute-git-dir'], $directory);
+        $gitDir = self::resolveGitDirectory($directory);
 
-        return $gitDir === null ? null : self::normalize($gitDir);
+        return \is_string($gitDir) ? $gitDir : null;
+    }
+
+    /**
+     * The git directory, or whether there definitely is none.
+     *
+     * **Three answers, because two processes must agree on the third (#299).** A directory git
+     * says is not in a repository (exit 128) has no git directory, and that is final. A git that
+     * timed out, is missing, or could not start has said nothing, and a caller that treated that as
+     * "no repository" would key a sink one way while a process that asked a moment later keyed it
+     * another.
+     *
+     * @param  string|null  $directory  Where to ask from; the current working directory by default.
+     * @return string|false|null The git directory; false when this is not a repository; null when
+     *                           git could not answer.
+     */
+    public static function resolveGitDirectory(?string $directory = null): string|false|null
+    {
+        $directory ??= getcwd();
+
+        if (! \is_string($directory) || $directory === '') {
+            return null;
+        }
+
+        try {
+            $result = Process::path($directory)
+                ->timeout(self::TIMEOUT_SECONDS)
+                ->run(['git', 'rev-parse', '--absolute-git-dir']);
+        } catch (Throwable) {
+            return null;
+        }
+
+        if ($result->successful()) {
+            $output = trim($result->output());
+
+            return $output === '' ? null : self::normalize($output);
+        }
+
+        return $result->exitCode() === self::NOT_A_REPOSITORY ? false : null;
     }
 
     /**
