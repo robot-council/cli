@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.19 — The Launcher Knows Its Version (2026-09-25)
+
+A versioned install now reports its own version, and `robot-council upgrade` works through the launcher. `v0.4.18` printed `unreleased`, and its `upgrade` failed when started through the launcher. To reach this release from `v0.4.18`, run `php ~/.local/robot-council/versions/0.4.18/robot-council upgrade` once.
+
+### What's fixed
+- Report a versioned install's version, and let `upgrade` run through the launcher [#286](https://github.com/robot-council/cli/pull/286)
+
 ## v0.4.18 — Upgrading With Bridges Running (2026-09-25)
 
 Upgrading no longer replaces a file a running bridge holds: each version installs beside the others, behind a launcher, and `robot-council upgrade` needs nobody at the machine.
