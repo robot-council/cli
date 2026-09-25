@@ -368,6 +368,32 @@ it("does not hand a coordinator another developer's narration", function (): voi
     ], ['coordinator:direct']))->toBeEmpty();
 });
 
+it('leaves a directive that names this session among its targets', function (): void {
+    expect(followed([feedEvent('directive', meta: ['targets' => [42, MINE]])]))->toHaveCount(1);
+});
+
+it('discards a directive that names only other sessions, so it does not wake this one', function (): void {
+    // #269: a coordinator addressing one session used to wake every idle session on the fleet.
+    // This one still reads the directive through `events_read`; it is only not interrupted for it.
+    expect(followed([feedEvent('directive', meta: ['targets' => [42]])]))->toBeEmpty();
+});
+
+it("discards a directive naming others for a coordinator too, which hears about work and not about others' instructions", function (): void {
+    expect(followed([feedEvent('directive', meta: ['targets' => [42]])], ['coordinator:direct']))->toBeEmpty();
+});
+
+it('leaves a directive whose targets are not a list of session ids, rather than losing it', function (string $label, mixed $targets): void {
+    // Core never writes these. A service that did is one this was not written against, and an
+    // extra wake-up costs less than a directive nobody hears.
+    expect(followed([feedEvent('directive', meta: ['targets' => $targets])]))->toHaveCount(1);
+})->with([
+    ['an empty list', []],
+    ['strings', ['42']],
+    ['a mix', [42, 'x']],
+    ['not a list', 'everyone'],
+    ['null', null],
+]);
+
 it('still hands a coordinator a directive, which needed no ability to receive', function (): void {
     // Receiving a directive never depended on holding anything, and must not start.
     expect(followed([feedEvent('directive')], ['coordinator:direct']))->toHaveCount(1);
@@ -411,4 +437,28 @@ it('holds nothing when the service names no abilities, rather than holding every
     $session->start();
 
     expect($session->allows('coordinator:direct'))->toBeFalse();
+});
+
+it('counts only a directive it wrote to the sink as delivered, which is all a channel notice announces', function (): void {
+    // `Bridge::announce()` notifies from `delivered()`, so a directive naming somebody else must
+    // not count, or the session it skipped would still be woken by the notice (#269).
+    Http::fake([
+        '*/api/sessions' => Http::response(['session_id' => MINE, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => []], 201),
+        '*/api/events*' => Http::response(['events' => [
+            feedEvent('directive', meta: ['targets' => [42]], body: 'for somebody else'),
+            feedEvent('directive', meta: ['targets' => [MINE]], body: 'for this session'),
+        ], 'cursor' => 99], 200),
+    ]);
+
+    $session = new Session(app(Factory::class), FOLLOW_SERVICE, new Credential(FOLLOW_INSTALLATION));
+    $session->start();
+
+    $follower = new FleetFollower($session, FOLLOW_SERVICE, sinkFor());
+    $follower->tick(function (string $m): void {});
+
+    $waiting = sinkFor()->drain();
+
+    expect($follower->delivered())->toBe(1)
+        ->and($waiting)->toHaveCount(1)
+        ->and($waiting[0]['body'])->toBe('for this session');
 });
