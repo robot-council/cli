@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.13 — Waking Only Whom a Directive Names (2026-09-25)
+
+A directive that names its `targets` now wakes only the sessions it names, rather than every idle session on the fleet.
+
+### What's fixed
+- Wake only the sessions a directive names in its `targets` [#271](https://github.com/robot-council/cli/pull/271)
+
 ## v0.4.12 — Reporting the Branch Later (2026-09-24)
 
 The README now says how a lane reports the branch a task is built on: the agent calls the fleet's `task_branch` once the branch exists.
