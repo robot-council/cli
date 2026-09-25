@@ -23,7 +23,7 @@ it('writes to the error stream of a console, and nothing to its output', functio
     Stderr::say($console, 'the bridge stopped');
     Stderr::say($stdout, 'never on a single buffer either');
 
-    expect($stderr->fetch())->toBe("robot-council: the bridge stopped\n")
+    expect($stderr->fetch())->toBe('robot-council: the bridge stopped'.PHP_EOL)
 
         // An output with no error stream gets nothing: the fallback writes to the process's own
         // stderr instead, which is what keeps a test harness's single buffer clean.
