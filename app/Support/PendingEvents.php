@@ -18,7 +18,15 @@ use RuntimeException;
  *
  * **Keyed by the bridge's identity, not by its session id**, for the same reason: the hook cannot
  * know a session id, and it can know the service, the harness and the project because they are what
- * its own configuration already carries. One bridge runs per identity, so one sink does too.
+ * its own configuration already carries.
+ *
+ * **And by the checkout, when no project is named (#299).** Every session launched from one
+ * user-level harness configuration has the same service, harness and project, so with those alone
+ * all of a machine's sessions shared one sink, and the first stop hook to run took every session's
+ * events -- measured with three bridges on one Mac. The bridge and the hook both run in the
+ * project directory, so both can resolve the checkout's git directory, which differs per worktree
+ * and is the same from any subdirectory. Two sessions in ONE checkout still share (#300). A named
+ * project keeps the key it always had, so an install that passes `--project` loses nothing.
  *
  * Under `XDG_STATE_HOME` rather than beside the credential in `XDG_CONFIG_HOME`: this is transient
  * state a fresh run may discard, not configuration a person edits. Never the working directory,
@@ -72,10 +80,23 @@ final class PendingEvents
      * @param  string  $harness  Which harness this bridge is.
      * @param  string|null  $projectId  The checkout this bridge is working, when one was named.
      */
+    /**
+     * The checkout this sink belongs to, once resolved.
+     */
+    private ?string $checkout = null;
+
+    /**
+     * @param  string  $service  The fleet's base URL.
+     * @param  string  $harness  Which harness this bridge is.
+     * @param  string|null  $projectId  The checkout this bridge is working, when one was named.
+     * @param  string|null  $directory  Where to resolve the checkout from when no project is named;
+     *                                  the current working directory by default.
+     */
     public function __construct(
         private readonly string $service,
         private readonly string $harness,
-        private readonly ?string $projectId = null
+        private readonly ?string $projectId = null,
+        private readonly ?string $directory = null,
     ) {}
 
     /**
@@ -575,10 +596,41 @@ final class PendingEvents
      */
     private function key(): string
     {
-        return substr(hash('sha256', implode("\0", [
-            rtrim($this->service, '/'),
-            $this->harness,
-            $this->projectId ?? '',
-        ])), 0, 32);
+        $parts = [rtrim($this->service, '/'), $this->harness, $this->projectId ?? ''];
+
+        // Unchanged when a project is named, so its sink survives the upgrade. Otherwise a fourth
+        // part, which also keeps the new key from ever equalling the old shared one: joined, even an
+        // empty fourth part adds a separator the three-part key never had (#299)
+        if ($this->projectId === null) {
+            $parts[] = $this->checkout();
+        }
+
+        return substr(hash('sha256', implode("\0", $parts)), 0, 32);
+    }
+
+    /**
+     * The checkout, as both the bridge and its stop hook resolve it.
+     *
+     * The git directory where there is one, and the working directory itself where there is not.
+     * **Lower-cased on Windows**, where a drive letter or folder can arrive in either case from two
+     * processes started differently, and the file system treats the two as one.
+     */
+    private function checkout(): string
+    {
+        if ($this->checkout !== null) {
+            return $this->checkout;
+        }
+
+        $directory = $this->directory ?? getcwd();
+        $directory = \is_string($directory) ? $directory : '';
+
+        $resolved = Checkout::gitDirectory($directory === '' ? null : $directory);
+
+        if ($resolved === null) {
+            $real = $directory === '' ? false : realpath($directory);
+            $resolved = rtrim(str_replace('\\', '/', $real === false ? $directory : $real), '/');
+        }
+
+        return $this->checkout = PHP_OS_FAMILY === 'Windows' ? strtolower($resolved) : $resolved;
     }
 }

@@ -49,9 +49,11 @@ final class PendingCommand extends Command
             return self::FAILURE;
         }
 
-        // The same three that identify a bridge, resolved the same way, because the sink is keyed
-        // by them. A hook that passes what its harness configuration already carries finds the
-        // sink the bridge beside it is writing.
+        // What identifies a bridge, resolved the same way, because the sink is keyed by it. A hook
+        // that passes what its harness configuration already carries, run in the same checkout,
+        // finds the sink the bridge beside it is writing: with no project named, the checkout is
+        // resolved from this process's working directory, as the bridge resolves it from its own
+        // (#299).
         $harness = MachineIdentity::resolveHarness($this->stringOption('harness'));
 
         if ($harness === null) {

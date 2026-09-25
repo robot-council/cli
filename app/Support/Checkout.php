@@ -170,6 +170,22 @@ final class Checkout
     }
 
     /**
+     * The git directory of the checkout a directory belongs to, or null outside a repository.
+     *
+     * Distinct per worktree -- `.git` for a main checkout, `.git/worktrees/<name>` for a linked
+     * one -- and the same from any subdirectory, which is what lets two processes started in one
+     * checkout agree on it without being told (#299).
+     *
+     * @param  string|null  $directory  Where to ask from; the current working directory by default.
+     */
+    public static function gitDirectory(?string $directory = null): ?string
+    {
+        $gitDir = self::git(['rev-parse', '--absolute-git-dir'], $directory);
+
+        return $gitDir === null ? null : self::normalize($gitDir);
+    }
+
+    /**
      * Reduce one remote URL to `owner/name`.
      *
      * Kept separate from the git invocation so every remote form can be asserted without a

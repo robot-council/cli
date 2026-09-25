@@ -483,7 +483,7 @@ claude mcp add -s user robot-council \
 - **A long turn that calls no fleet tool looks idle until it ends**, hook or no hook: running Bash and editing files moves nothing the bridge reads. So a turn longer than the interval can receive a keep-alive while it runs. The server instructions tell the agent to ignore one that arrives mid-task and carry on, and the turn folds it in. Without the hook, every turn is like this.
 - **A keep-alive's own turn end is not activity**, or the ceiling could never arrive: the first turn end within two minutes of a keep-alive is taken as that keep-alive's. A tool call in between means the agent did something, and the turn end after it counts. The cost is the case above: a real turn that folded a keep-alive in, and ended within two minutes of it without calling a fleet tool, is taken for the keep-alive's, and the ceiling arrives that much early.
 - **A continued turn's end is not recorded.** The script's loop guard exits before `pending` runs when Claude Code has already continued the turn, so the clock runs from the first end, and a long continuation can be followed by a keep-alive sooner than the interval.
-- **The record has the sink's identity**: the service, the harness and the project. Two Claude Code sessions sharing all three share one record, as they already share one sink.
+- **The record has the sink's identity**: the service, the harness, and the project or the checkout. Two Claude Code sessions in one checkout share one record, as they share one sink.
 
 **What the woken turn does has not been measured yet.** The server instructions tell the agent that a notice carrying `keep_warm` has nothing behind it, and to end the turn without tool calls unless it is in the middle of a task; whether a live session does, and that the cache stays warm, are open on [#279](https://github.com/robot-council/cli/issues/279).
 
@@ -554,9 +554,25 @@ content. The script is also the only one of the two places that all three harnes
 Cursor's `stop` entry has no `env` key at all, and the MCP block's `env` configures the bridge's
 process rather than the hook's.
 
-**The sink is keyed by the service, the harness and the project**, so a hook that resolves any of
-the three differently from the bridge beside it reads an empty sink and reports a quiet fleet.
+**The sink is keyed by the service, the harness and the project, and, when no project is named, by
+the checkout** ([#299](https://github.com/robot-council/cli/issues/299)). A hook that resolves any
+of them differently from the bridge beside it reads an empty sink and reports a quiet fleet.
 Uncomment `ROBOT_COUNCIL_PROJECT` wherever the bridge was given `--project`.
+
+**The checkout is the git directory of the folder a process runs in**, or the folder itself outside
+a repository. It is what keeps sessions in different checkouts apart: before it, every session
+launched from one user-level configuration shared one sink, and the first stop hook to run took
+every session's events. It works because the bridge and the hook run in the same folder. Measured on
+Claude Code 2.1.282, the MCP server and the `Stop` hook both started in the folder Claude Code was
+launched from. It is unmeasured for Cursor and Codex. Each worktree has its own git directory, so
+each slot gets its own sink, and a subfolder of a checkout finds its checkout's sink. **Two sessions
+in one checkout still share a sink**, so run one seat per checkout
+([#300](https://github.com/robot-council/cli/issues/300) asks whether that can change).
+
+**Upgrading past this drops events already waiting under the old shared key.** A seat without
+`--project` starts reading its checkout's sink, and nothing reads the old shared one again.  Those
+events are not delivered again. They are the ones no session had read, often addressed to a session
+that has since ended.
 
 **The script fails open, on purpose and invisibly.** `|| exit 0` means a missing `robot-council`, an
 unset `ROBOT_COUNCIL_SERVICE`, or a harness it cannot name all end the turn normally rather than
