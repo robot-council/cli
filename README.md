@@ -297,6 +297,8 @@ Put the entry in the **global** file when the fleet URL is yours. A project `.cu
 
 If `robot-council` is not on the `PATH` Cursor inherits, point `command` at `php` (absolute path to the binary) and put the absolute path to the launcher -- `bin\robot-council.php` in a versioned install -- then `mcp`, in `args`. Measured on the same Windows run: without that, Windows offered "Select an app to open `robot-council`" instead of launching the bridge.
 
+**On macOS, the launcher needs `php` on that `PATH` too,** because the shim ends in `exec php`. Where `php` comes from a user-level install such as Laravel Herd (`~/Library/Application Support/Herd/bin`), a Cursor started from the Dock may not inherit the `PATH` your shell sets. The Cursor seat added on 2026-09-25 put `"PATH"` in this block's `env`, and set it in its stop-hook script, as a precaution ([#308](https://github.com/robot-council/cli/issues/308)). **Whether that was needed was not measured.** Pointing `command` at the absolute path to `php`, as on Windows, avoids the question.
+
 ### Codex
 
 ```toml
