@@ -12,21 +12,22 @@ jobs:
         with:
           php-version: '8.4'
           coverage: none
-      - run: composer install --no-dev --no-scripts --no-interaction --no-progress
-      - name: Environment
-        run: |
-          uname -a; php -v | head -1; . /etc/os-release; echo "$PRETTY_NAME"
-      - name: 'cli#141: stream_select over a quiet pipe'
-        run: php .github/probes/probe141.php 10
+      - run: composer install --no-interaction --no-progress
       - name: Install a Secret Service
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gnome-keyring libsecret-tools dbus-x11 >/dev/null
-      - name: 'cli#40 then cli#85: secret-tool'
+      - name: 'cli#40: the Pest test, as written and against a store that collapses case'
         run: |
-          dbus-run-session -- bash -c '
-            printf "probe-password" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-            gnome-keyring-daemon --start --components=secrets >/dev/null
-            sleep 1
-            echo "secret-tool at $(command -v secret-tool)"
-            echo "===== cli#40"; php .github/probes/probe40.php; echo "probe40 rc=$?"
-            echo "===== cli#85"; bash .github/probes/probe85.sh
-          '
+          cat > /tmp/run.sh <<'SH'
+          printf "probe-password" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+          gnome-keyring-daemon --start --components=secrets >/dev/null
+          sleep 1
+          echo "===== as written"
+          vendor/bin/pest tests/Feature/SecretToolStoreTest.php; echo "as-written rc=$?"
+          cp app/Support/Credentials/SecretToolStore.php /tmp/store.orig
+          perl -pi -e 's/self::ATTRIBUTE, \$service\]/self::ATTRIBUTE, strtolower(\$service)]/g' app/Support/Credentials/SecretToolStore.php
+          echo "mutated lines: $(grep -c 'strtolower(\$service)' app/Support/Credentials/SecretToolStore.php)"
+          echo "===== collapsing store (must fail)"
+          vendor/bin/pest tests/Feature/SecretToolStoreTest.php; echo "collapsing rc=$?"
+          cp /tmp/store.orig app/Support/Credentials/SecretToolStore.php
+          SH
+          dbus-run-session -- bash /tmp/run.sh
