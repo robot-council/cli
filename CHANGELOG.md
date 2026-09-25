@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.18 — Upgrading With Bridges Running (2026-09-25)
+
+Upgrading no longer replaces a file a running bridge holds: each version installs beside the others, behind a launcher, and `robot-council upgrade` needs nobody at the machine.
+
+### What's new
+- Install versions side by side behind a launcher, so upgrading never replaces a file a running bridge holds [#282](https://github.com/robot-council/cli/pull/282)
+
 ## v0.4.17 — An Operator Guide (2026-09-25)
 
 The README now says a Claude Code seat can be woken, and links the new operator's guide on the wiki.
