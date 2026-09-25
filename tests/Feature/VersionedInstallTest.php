@@ -442,3 +442,24 @@ it('reports a version it could not fully remove as failed, not removed', functio
     expect($cleared['failed'])->toBe(['0.5.0'])
         ->and($cleared['removed'])->toBeEmpty();
 })->skipOnWindows();
+
+it('reads the installed versions in a process the launcher started, where select.php is already loaded from bin', function (): void {
+    // #280, measured on the released v0.4.18: the launcher loads `bin/select.php`, and `upgrade`
+    // then loaded the version's own `launcher/select.php` -- a different path -- and died with
+    // "Cannot redeclare function robot_council_complete()".
+    fakeVersion($this->root, '0.6.0');
+    installLauncherFor($this->root);
+
+    $code = sprintf(
+        'require %s; require %s; echo implode(",", '.Installs::class.'::versions(%s));',
+        var_export($this->root.'/bin/select.php', true),
+        var_export(base_path('vendor/autoload.php'), true),
+        var_export($this->root, true),
+    );
+
+    $process = new SymfonyProcess([PHP_BINARY, '-r', $code]);
+    $process->run();
+
+    expect($process->getExitCode())->toBe(0)
+        ->and($process->getOutput())->toBe('0.6.0');
+});

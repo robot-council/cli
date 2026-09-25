@@ -64,7 +64,9 @@ final class Version
         // a guard here is dead code the analyzer refuses. `resolve()` still accepts null, because
         // it is a pure function documenting what it does with one rather than a claim that this
         // caller can produce one.
-        return self::resolve($root['name'], $installed, \is_string($fromGit) ? $fromGit : null);
+        $fromLayout = Installs::rootOf(base_path()) !== null ? basename(base_path()) : null;
+
+        return self::resolve($root['name'], $installed, \is_string($fromGit) ? $fromGit : null, $fromLayout);
     }
 
     /**
@@ -81,10 +83,19 @@ final class Version
      *                                  package is not among the installed ones.
      * @param  string|null  $fromGit  What the git service reports, which is `UNKNOWN` where there
      *                                is no working tree to read.
+     * @param  string|null  $fromLayout  This version's directory name in a versioned install, or null.
      * @return string The version to report.
      */
-    public static function resolve(?string $rootPackage, ?string $installed, ?string $fromGit): string
+    public static function resolve(?string $rootPackage, ?string $installed, ?string $fromGit, ?string $fromLayout = null): string
     {
+        // **A versioned install names its version in its directory** (#280), and nothing else can:
+        // `composer create-project` makes this package the root, so Composer reports no version for
+        // it, and an archive has no `.git` for the tags. The directory is the one it was installed
+        // into by version, so it is exact.
+        if (self::nonEmpty($fromLayout) !== null) {
+            return 'v'.ltrim((string) $fromLayout, 'v');
+        }
+
         // A checkout of this repository: the git service reads its tags, and Composer would answer
         // with the branch. Preferred even when it says `unreleased`, which is what a checkout with
         // no tags honestly is.

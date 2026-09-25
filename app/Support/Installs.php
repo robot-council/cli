@@ -265,7 +265,13 @@ final class Installs
      */
     private static function selection(): void
     {
-        require_once \dirname(__DIR__, 2).'/launcher/select.php';
+        // **Already loaded when this process came through the launcher**, from `bin/select.php` --
+        // a different path, so `require_once` would load the version's own copy too, and PHP
+        // refuses to declare a function twice. Measured on the released v0.4.18: `robot-council
+        // upgrade` run through the launcher died on exactly that (#280).
+        if (! \function_exists('robot_council_chosen')) {
+            require_once \dirname(__DIR__, 2).'/launcher/select.php';
+        }
     }
 
     /**
