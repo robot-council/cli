@@ -232,7 +232,9 @@ it('leaves the Claude Code key exactly as #299 made it: the service, the harness
     $repository = sinkRepository($this->root.'/repo');
     $gitDirectory = Checkout::gitDirectory($repository);
 
-    $expected = substr(hash('sha256', implode("\0", [SINK_SERVICE, 'claude', '', $gitDirectory])), 0, 32);
+    // Lower-cased on Windows, where the key does so to make one folder's spellings agree
+    $checkout = PHP_OS_FAMILY === 'Windows' ? strtolower((string) $gitDirectory) : $gitDirectory;
+    $expected = substr(hash('sha256', implode("\0", [SINK_SERVICE, 'claude', '', $checkout])), 0, 32);
 
     expect($gitDirectory)->toBeString()
         ->and(basename(new PendingEvents(SINK_SERVICE, 'claude', null, $repository)->path(), '.json'))->toBe($expected);
