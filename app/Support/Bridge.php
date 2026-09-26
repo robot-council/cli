@@ -198,6 +198,16 @@ final class Bridge
         .'the turn. If you are in the middle of a task, finish the step you are on first.';
 
     /**
+     * What a second bridge in one checkout says, with the other bridge's pid (#320).
+     *
+     * One seat per checkout is the supported arrangement (#300), so this names the consequence and
+     * the remedy, in words an agent can relay to its operator. It warns rather than refuses,
+     * because an operator may be mid-handover.
+     */
+    public const string SHARED_SINK_WARNING = 'another bridge is running in this checkout (%s); its stop hook and this one '
+        ."share one sink, so either session can take the other's events. Run one seat per checkout.";
+
+    /**
      * The fleet tool an agent reads the feed with, which settles a notice when no hook will (#306).
      */
     public const string FEED_READ_TOOL = 'events_read';
@@ -216,6 +226,8 @@ final class Bridge
      *                                   null for never, which is the default (#279).
      * @param  bool  $stopHook  Whether a stop hook will deliver events at the end of a turn, which
      *                          decides what a channel notice tells the agent to do (#306).
+     * @param  string|null  $sharedSink  The warning to repeat when another bridge holds this sink's
+     *                                   seat, or null when this bridge holds it (#320).
      *
      * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -242,6 +254,7 @@ final class Bridge
         private readonly int $reannounceSeconds = self::REANNOUNCE_SECONDS,
         private readonly ?KeepWarm $keepWarm = null,
         private readonly bool $stopHook = true,
+        private readonly ?string $sharedSink = null,
     ) {}
 
     /**
@@ -1073,6 +1086,11 @@ final class Bridge
                 .($this->keepWarm instanceof KeepWarm ? KeepWarm::INSTRUCTIONS : '');
         }
 
+        // Whether or not anybody has joined, since the agent is what tells its operator (#320)
+        if ($this->sharedSink !== null) {
+            $instructions[] = 'Tell your operator: '.$this->sharedSink;
+        }
+
         return [
             // The harness's own version when it is one this bridge knows: `2025-11-25` from both
             // Claude Code and Cursor
@@ -1208,9 +1226,16 @@ final class Bridge
 
         $this->fleetInstructions = $this->readFleetInstructions($joined->session);
 
-        return ['joined' => true, 'text' => $this->fleetInstructions === null
+        $text = $this->fleetInstructions === null
             ? $joined->summary
-            : $joined->summary."\n\nThe fleet's instructions:\n".$this->fleetInstructions];
+            : $joined->summary."\n\nThe fleet's instructions:\n".$this->fleetInstructions;
+
+        // Said again at the join, the moment the shared sink starts to matter (#320)
+        if ($this->sharedSink !== null) {
+            $text .= "\n\nWarning: ".$this->sharedSink;
+        }
+
+        return ['joined' => true, 'text' => $text];
     }
 
     /**

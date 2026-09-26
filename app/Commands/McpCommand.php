@@ -83,6 +83,11 @@ final class McpCommand extends Command
             $this->diagnostic(...),
         );
 
+        // **Held for the life of this process**, which is what makes it a seat: the lock goes when
+        // the process does, however it goes (#320)
+        $seat = new PendingEvents($service, $harness, $this->stringOption('project'));
+        $sharedSink = $this->sharedSinkWarning($seat);
+
         $bridge = new Bridge(
             null,
             $service,
@@ -94,6 +99,7 @@ final class McpCommand extends Command
             join: $join(...),
             keepWarm: $this->keepWarm($service, $harness),
             stopHook: $this->stopHookDelivers($harness),
+            sharedSink: $sharedSink,
         );
 
         if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
@@ -156,6 +162,29 @@ final class McpCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Take this checkout's seat, or say that another bridge already has it (#320).
+     *
+     * Said once on stderr, which Claude Code keeps as the server's log, and handed to the bridge so
+     * the agent hears it at connect and at the join.
+     *
+     * @param  PendingEvents  $seat  The sink this bridge will write, keyed as the join keys it.
+     * @return string|null The warning, or null when this bridge holds the seat.
+     */
+    private function sharedSinkWarning(PendingEvents $seat): ?string
+    {
+        if ($seat->claimSeat()) {
+            return null;
+        }
+
+        $holder = $seat->seatHolder();
+        $warning = \sprintf(Bridge::SHARED_SINK_WARNING, $holder === null ? 'pid unknown' : 'pid '.$holder);
+
+        $this->diagnostic($warning);
+
+        return $warning;
     }
 
     /**
