@@ -267,17 +267,30 @@ every change, so the tag must point at a commit that already carries the entry.
    done.
 
 3. **Tag the merge and publish the release**, after confirming that `origin/main` is the changelog
-   merge and nothing else landed after it:
+   merge and nothing else landed after it, **and that `ci-passed` succeeded on that exact commit**:
 
    ```
    git fetch origin
    git log --oneline -1 origin/main
-   git tag -a vX.Y.Z origin/main -m 'vX.Y.Z — <Theme>'
+   SHA=$(git rev-parse origin/main)
+   gh api "repos/{owner}/{repo}/commits/$SHA/check-runs?check_name=ci-passed" \
+     --jq '.total_count, (.check_runs[] | "\(.status) \(.conclusion)")'
+   git tag -a vX.Y.Z "$SHA" -m 'vX.Y.Z — <Theme>'
    git push origin vX.Y.Z
    jq -n --rawfile body body.md --arg tag vX.Y.Z --arg name 'vX.Y.Z — <Theme>' \
      '{tag_name: $tag, name: $name, body: $body, prerelease: true}' |
      gh api -X POST repos/{owner}/{repo}/releases --input - --jq .html_url
    ```
+
+   **The check that gates the tag is `ci-passed` on the commit being tagged, not on the pull
+   request.** The ruleset requires `ci-passed` on the pull request's head, but merges are squashes,
+   so the commit that lands on `main` is a new commit that no pull-request run has validated.
+   `ci.yml` runs again on every push to `main`, so a result for that exact commit arrives a few
+   minutes after the merge. Wait for it: tag only when the read above reports a `ci-passed` run
+   that is `completed success`. **A `total_count` of `0` is not a pass**: while the push run is
+   still in progress its `ci-passed` job has not been created yet, so the read comes back empty
+   (observed on `8974dd0` on 2026-09-26, while `v0.7.0`'s tagged commit read `completed success`).
+   If it concludes anything but `success`, do not tag; treat it like any red `main`.
 
    **Publish through REST, not `gh release create`,** per
    [`github-api-budget`](../../rules/github-api-budget.md): `gh release create` spends the GraphQL
