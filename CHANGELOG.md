@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.29 — The Wiki Becomes the Documentation (2026-09-26)
+
+The wiki becomes the documentation for the command line, and the README an overview that links to it.
+
+### Maintenance and tooling
+- Cut the README to an overview, now that the wiki holds the documentation [#331](https://github.com/robot-council/cli/pull/331)
+
 ## v0.4.28 — A Cursor Seat Hears the Fleet Again (2026-09-25)
 
 A Cursor seat hears the fleet again. From v0.4.23, its stop hook read a different sink from the one its bridge wrote, so a Cursor seat received no fleet events at all. This release also adds two things. A bridge started in a checkout that already has one now warns. And a session can declare how many tasks it will hold at once.
