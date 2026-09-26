@@ -519,57 +519,17 @@ claude mcp add -s user robot-council \
 One script serves all three harnesses. Fill in the two values at the top and give the path to
 whichever configuration below matches the harness.
 
+The script is [`resources/stop-hook/robot-council-stop-hook`](resources/stop-hook/robot-council-stop-hook), committed and tested by `tests/Feature/StopHookScriptTest.php` rather than printed here, so the copy you download is the copy the suite runs ([#318](https://github.com/robot-council/cli/issues/318)). Download it:
+
 ```bash
-#!/usr/bin/env bash
-# Hand waiting fleet events to the agent at a turn boundary.
-set -u
-
-export ROBOT_COUNCIL_SERVICE=https://your-fleet.example.com
-export ROBOT_COUNCIL_HARNESS=claude          # claude, codex or cursor
-# export ROBOT_COUNCIL_PROJECT=org/repo      # only if the bridge was given --project
-
-payload=$(cat)
-
-# Cursor's payload arrives with a UTF-8 BOM before the `{` (measured; see the Cursor section).
-# Inert when there is none. The substring matching below survives a BOM either way, but `php`
-# refuses a BOMed document -- and `php` is already a dependency of the last block, so it is what
-# an author who replaces the matching with parsing reaches for first.
-payload=${payload#$'\xef\xbb\xbf'}
-
-# The loop guard. Claude Code and Codex set `stop_hook_active` once they have continued a turn;
-# Cursor counts instead and is capped by `loop_limit` in its own configuration.
-case "$payload" in
-  *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
-esac
-
-# **Which shape to answer with is read from the payload, never passed in.** A wrong argument would
-# be unrecoverable: `pending` clears the sink as it reads, so by the time a harness discards an
-# answer it does not understand, the events are already gone and nothing reports it. Cursor's stop
-# payload carries `loop_count`; Claude Code's and Codex's carry `stop_hook_active`.
-case "$payload" in
-  *'"loop_count"'*) shape=cursor ;;
-  *) shape=block ;;
-esac
-
-# Nothing below this line runs until the shape is decided, so a payload this script cannot read
-# ends the turn with the sink untouched.
-waiting=$(robot-council pending ${ROBOT_COUNCIL_PROJECT:+--project="$ROBOT_COUNCIL_PROJECT"}) || exit 0
-
-# Quiet ends the turn. This line is the whole difference between a hook and a session that
-# never stops.
-[ -z "$waiting" ] && exit 0
-
-# Encoded rather than interpolated: an event body is another developer's agent's words, and it
-# carries quotes and newlines. `php` is on any machine this command line runs on.
-RC_NEWS="Robot Council has news:
-$waiting" php -r '$m = getenv("RC_NEWS"); echo json_encode(
-    $argv[1] === "cursor"
-        ? ["followup_message" => $m]
-        : ["decision" => "block", "reason" => $m]
-);' -- "$shape"
+curl -fsSL -o ~/bin/robot-council-stop-hook \
+  https://raw.githubusercontent.com/robot-council/cli/main/resources/stop-hook/robot-council-stop-hook
+chmod +x ~/bin/robot-council-stop-hook
 ```
 
-Save it as `robot-council-stop-hook`, make it executable, and put it where the harness can run it.
+From the first release that carries it, a Composer install has it too, at `resources/stop-hook/robot-council-stop-hook` inside the installed package.
+
+Put it where the harness can run it.
 `robot-council` has to be on the `PATH` the harness hands the hook, or the script needs an absolute
 path in place of it -- and that path needs quoting if it contains a space, for the reason the Claude
 Code MCP section above records.
