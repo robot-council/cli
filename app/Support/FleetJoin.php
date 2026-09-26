@@ -55,7 +55,7 @@ final class FleetJoin
      * **A session that started is ended if anything after it fails**, so a join that reports
      * failure never leaves a session behind it on the fleet.
      *
-     * @param  array{role: string|null, repository: string|null, work_location: string|null}  $arguments  What `join` was given.
+     * @param  array{role: string|null, repository: string|null, work_location: string|null, capacity?: int|null}  $arguments  What `join` was given.
      * @return Joined The started session and its follower.
      *
      * @throws RuntimeException With a sentence for the agent, when joining failed.
@@ -88,7 +88,7 @@ final class FleetJoin
         }
 
         try {
-            $session->start($this->project, $repository, $workLocation);
+            $session->start($this->project, $repository, $workLocation, capacity: $arguments['capacity'] ?? null);
         } catch (RuntimeException $runtimeException) {
             throw $runtimeException;
         } catch (Throwable) {
@@ -137,7 +137,9 @@ final class FleetJoin
             $repository === null ? '' : \sprintf(', working in %s%s', $repository, $workLocation === null ? '' : ' at '.$workLocation)
         );
 
-        return new Joined($session, $follower, implode(' ', [$summary, ...$notes]));
+        $capacity = $this->capacityNote($arguments['capacity'] ?? null, $session);
+
+        return new Joined($session, $follower, implode(' ', array_filter([$summary, ...$notes, $capacity])));
     }
 
     /**
@@ -146,6 +148,48 @@ final class FleetJoin
     public function pending(): ?PendingEvents
     {
         return $this->pending;
+    }
+
+    /**
+     * What came of a declared capacity, in a sentence, or null when none was declared (#302).
+     *
+     * **Said most plainly when it differs from what was asked**, because that is the seat's cap
+     * applying, and an agent planning parallel work needs the number it actually has.
+     *
+     * @param  int|null  $asked  What `--capacity` or the `join` tool declared.
+     */
+    private function capacityNote(?int $asked, Session $session): ?string
+    {
+        if ($asked === null) {
+            return null;
+        }
+
+        $inEffect = $session->capacity();
+
+        if ($inEffect === null) {
+            return \sprintf('It declared a capacity of %d, and the fleet reported none, so it may not support capacity; plan on one task at a time.', $asked);
+        }
+
+        $holds = \sprintf('it holds up to %d %s at once.', $inEffect, $inEffect === 1 ? 'task' : 'tasks');
+
+        if ($inEffect === $asked) {
+            return 'It '.substr($holds, 3);
+        }
+
+        // **Which limit applied**, from what the fleet recorded as declared: core clamps a
+        // declaration to its own maximum before storing it, and the seat's cap applies after that
+        $declared = $session->declaredCapacity() ?? $asked;
+        $reasons = [];
+
+        if ($declared < $asked) {
+            $reasons[] = \sprintf('the fleet takes at most %d', $declared);
+        }
+
+        if ($inEffect < $declared) {
+            $reasons[] = \sprintf('its seat caps it at %d', $inEffect);
+        }
+
+        return \sprintf('It declared a capacity of %d; %s, so %s', $asked, implode(', and ', $reasons), $holds);
     }
 
     /**

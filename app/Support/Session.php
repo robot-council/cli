@@ -76,6 +76,16 @@ final class Session
     private ?int $expiresAt = null;
 
     /**
+     * The capacity in effect, as the service reported it at start, or null (#302).
+     */
+    private ?int $capacity = null;
+
+    /**
+     * The capacity this session declared, as the service reported it at start, or null (#302).
+     */
+    private ?int $declaredCapacity = null;
+
+    /**
      * What this session's token is allowed to do.
      *
      * **Re-read on every renewal rather than captured once**, because an admin may narrow a
@@ -114,10 +124,12 @@ final class Session
      * @param  string|null  $repository  The GitHub repository, as `owner/name`.
      * @param  string|null  $workLocation  Which working copy of it this is.
      * @param  bool  $ephemeral  Whether to keep this session out of the feed and the session list.
+     * @param  int|null  $capacity  How many tasks this session declares it will hold at once, or
+     *                              null to leave the service's default of 1 (#302).
      *
      * @throws RuntimeException When the service refuses.
      */
-    public function start(?string $projectId = null, ?string $repository = null, ?string $workLocation = null, bool $ephemeral = false): void
+    public function start(?string $projectId = null, ?string $repository = null, ?string $workLocation = null, bool $ephemeral = false, ?int $capacity = null): void
     {
         // **Filtered on null rather than on falsiness.** A bare `array_filter` also drops `'0'`,
         // and `0` is a legal work location -- a worktree may be called that -- so a directory named
@@ -131,6 +143,12 @@ final class Session
         // Part of the identity rather than beside the platform, so the retry below keeps it
         if ($ephemeral) {
             $identity['ephemeral'] = true;
+        }
+
+        // **Sent only when declared** (#302), so every other start is byte-for-byte what it was.
+        // `robot-council/core` v0.7.0 takes 1 to 16, stores more as 16, and refuses 0 or less
+        if ($capacity !== null) {
+            $identity['capacity'] = $capacity;
         }
 
         $response = $this->post([...$identity, 'platform' => Platform::report()]);
@@ -163,6 +181,27 @@ final class Session
 
         $this->expiresAt = \is_int($body['expires_in'] ?? null) ? time() + $body['expires_in'] : null;
         $this->abilities = $this->abilitiesIn($body);
+
+        // What the service holds this session to, and what was declared, which differ when the
+        // seat's cap applied. Null from a service that predates capacity
+        $this->capacity = \is_int($body['capacity'] ?? null) ? $body['capacity'] : null;
+        $this->declaredCapacity = \is_int($body['declared_capacity'] ?? null) ? $body['declared_capacity'] : null;
+    }
+
+    /**
+     * How many tasks the service lets this session hold at once, as the start reported it (#302).
+     */
+    public function capacity(): ?int
+    {
+        return $this->capacity;
+    }
+
+    /**
+     * How many tasks this session declared it would hold, as the start reported it (#302).
+     */
+    public function declaredCapacity(): ?int
+    {
+        return $this->declaredCapacity;
     }
 
     /**
