@@ -3,15 +3,16 @@
 declare(strict_types=1);
 
 /**
- * The stop-hook script the README hands to every harness.
+ * The stop-hook script every harness runs, `resources/stop-hook/robot-council-stop-hook`.
  *
- * **That block is product surface, not an illustration.** The README says to save it as
- * `robot-council-stop-hook`, make it executable, and point a hook at it, and the three harness
- * configurations below it all reference that one file. Before #88 nothing in this suite read
- * `README.md` at all, so the script could stop working and no run would report it.
+ * **That file is product surface, not an illustration.** The documentation says to download it,
+ * make it executable, and point a hook at it, and all three harness configurations reference that
+ * one file. It lived as a fenced block in `README.md` until #318 made the wiki the documentation's
+ * source of truth: CI cannot read a wiki, so the script moved into the repository, where this suite
+ * reads the very bytes an operator downloads. Before #88 nothing tested it at all.
  *
- * **The script is extracted from the README rather than retyped**, because a copy tests the copy.
- * An edit to the documented block is exactly what these tests exist to fail on.
+ * **The script is read from the file rather than retyped**, because a copy tests the copy. An edit
+ * to the shipped file is exactly what these tests exist to fail on.
  *
  * **The failure being guarded is the quiet one.** By the script's own design a payload it cannot
  * read ends the turn with the sink untouched, which is indistinguishable from a fleet with nothing
@@ -35,9 +36,9 @@ const CLAUDE_PAYLOAD = '{"session_id":"s1","hook_event_name":"Stop","stop_hook_a
 const CLAUDE_CONTINUED_PAYLOAD = '{"session_id":"s1","hook_event_name":"Stop","stop_hook_active":true}';
 
 /**
- * The line whose whole job is to be inert, quoted exactly as the README writes it.
+ * The line whose whole job is to be inert, quoted exactly as the script writes it.
  *
- * A nowdoc, so the `$` and the backslash escapes are the bytes the README holds rather than
+ * A nowdoc, so the `$` and the backslash escapes are the bytes the script holds rather than
  * anything PHP interprets.
  */
 const BOM_STRIP_LINE = <<<'TXT'
@@ -45,28 +46,29 @@ payload=${payload#$'\xef\xbb\xbf'}
 TXT;
 
 /**
- * The stop-hook script, read out of the README.
+ * Where the stop-hook script lives in the repository.
+ */
+function stopHookPath(): string
+{
+    return \dirname(__DIR__, 2).'/resources/stop-hook/robot-council-stop-hook';
+}
+
+/**
+ * The stop-hook script, read from the committed file.
  *
- * @return string The shell source of the documented block.
+ * @return string The script's shell source.
  */
 function stopHookScript(): string
 {
-    $readme = file_get_contents(\dirname(__DIR__, 2).'/README.md');
+    $script = @file_get_contents(stopHookPath());
 
-    if ($readme === false) {
-        throw new RuntimeException('README.md could not be read.');
+    // A missing or emptied file fails here, rather than quietly testing an empty string -- which
+    // would pass every assertion below about what the script does NOT print.
+    if ($script === false || ! str_starts_with($script, "#!/usr/bin/env bash\n")) {
+        throw new RuntimeException('resources/stop-hook/robot-council-stop-hook is missing, or no longer opens with the shebang.');
     }
 
-    // Anchored on both fences, so a later fenced block cannot extend the match. A README edit that
-    // renames the fence or drops the shebang fails here, rather than quietly testing an empty
-    // string -- which would pass every assertion below about what the script does NOT print.
-    $found = preg_match('/^```bash\R(#!\/usr\/bin\/env bash\R.*?)^```$/ms', $readme, $matches);
-
-    if ($found !== 1) {
-        throw new RuntimeException('README.md no longer holds exactly one fenced bash block opening with the shebang.');
-    }
-
-    return $matches[1];
+    return $script;
 }
 
 /**
@@ -74,7 +76,7 @@ function stopHookScript(): string
  *
  * **Gated on the capability rather than on the platform**, the way `hasWindowsPowerShell()` is: the
  * question is whether the documented script can run here, and `PHP_OS_FAMILY` answers a different
- * one. Windows is deliberately included rather than skipped -- the README's `.cmd` shim runs this
+ * one. Windows is deliberately included rather than skipped -- the documented `.cmd` shim runs this
  * very script through Git Bash in production, so a blanket Windows skip would leave the wiring most
  * likely to break as the only wiring nothing checks.
  *
@@ -198,14 +200,35 @@ it('finds a bash to run the documented script with', function (): void {
     expect(bashBinary())->not->toBeNull();
 });
 
-it('holds exactly one stop-hook script, and it is the documented one', function (): void {
+it('is committed executable, so a download or a Composer install can run it as it lands', function (): void {
+    // The mode in git's index, not on disk: Windows checkouts do not keep the bit, and the index is
+    // what a tag, a raw download's source and Packagist's archive are all built from.
+    $process = new Process(['git', 'ls-files', '--stage', '--', 'resources/stop-hook/robot-council-stop-hook'], \dirname(__DIR__, 2), timeout: 30);
+    $process->run();
+
+    expect($process->getExitCode())->toBe(0)
+        ->and($process->getOutput())->toStartWith('100755 ');
+});
+
+it('leaves no copy of the script in the README, where it would go untested', function (): void {
+    $readme = file_get_contents(\dirname(__DIR__, 2).'/README.md');
+
+    // The control: the file this suite reads carries the line, so its absence below is the README
+    // not holding one, rather than a line that no longer exists anywhere.
+    expect(stopHookScript())->toContain(BOM_STRIP_LINE)
+        ->and($readme)->toBeString()
+        ->and((string) $readme)->not->toContain(BOM_STRIP_LINE)
+        ->and((string) $readme)->not->toContain('#!/usr/bin/env bash');
+});
+
+it('carries the lines the hooks depend on', function (): void {
     $script = stopHookScript();
 
     expect($script)->toContain('robot-council pending')
         ->and($script)->toContain('followup_message')
         ->and($script)->toContain('"decision" => "block"')
-        // The line #84 added. Its absence is caught behaviorally further down; this catches a
-        // README edit that drops it, which is the way it would actually go.
+        // The line #84 added. Its absence is caught behaviorally further down; this catches an
+        // edit to the file that drops it, which is the way it would actually go.
         ->and($script)->toContain(BOM_STRIP_LINE);
 });
 
@@ -224,7 +247,7 @@ it('is syntactically valid shell', function (): void {
 
     unlink($script);
 
-    expect($code)->toBe(0, 'bash -n rejected the documented script: '.firstLineOf($error));
+    expect($code)->toBe(0, 'bash -n rejected the shipped script: '.firstLineOf($error));
 })->skip(fn (): bool => bashBinary() === null, 'No bash on this machine to check the script with.');
 
 it('answers a Cursor payload with followup_message, BOM and all', function (): void {
