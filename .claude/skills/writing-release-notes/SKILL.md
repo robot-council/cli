@@ -34,7 +34,7 @@ Security heading**, which `robot-council/cli#78` changed for a reason that does 
 
 **These tags are resolved as a Composer constraint.** Published to Packagist on 2026-09-22,
 decided on `robot-council/cli#75`, with `composer.json` declaring `"type": "library"` to match
-`statamic/cli` and `laravel/installer`. The install the README documents and has verified is:
+`statamic/cli` and `laravel/installer`. The install verified when it was published is:
 
 ```bash
 composer global require robot-council/cli
