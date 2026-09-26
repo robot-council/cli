@@ -606,8 +606,14 @@ but a `Stop` hook runs in the session's current folder, which an agent's `cd` mo
 into an `--add-dir` repository, the hook ran in that repository. What stays put is
 `CLAUDE_PROJECT_DIR`: set for the hook, it still named the launch folder. So `robot-council pending`
 resolves the checkout from `CLAUDE_PROJECT_DIR` when it is set, and from its own folder otherwise.
-The MCP server does not receive that variable (measured), and needs none, since it stays where it
-started. **Cursor and Codex are unmeasured**, and fall back to the hook's own folder.
+The MCP server receives it too (an earlier note here said it did not; that probe was wrong, because
+Claude Code expands `${VAR}` in `.mcp.json` itself), and needs none, since it stays where it started.
+
+**Cursor's sink has no checkout in its key** ([#327](https://github.com/robot-council/cli/issues/327)).
+Measured on Cursor 3.17.19: Cursor runs one bridge for the whole application, in the home folder,
+and runs its stop hook in `~/.cursor`, so neither side can see the project, and from v0.4.23 to the
+fix the two keys never matched and a Cursor seat received nothing. One bridge per application means
+one sink per application is the right match. **Codex is unmeasured**, and keeps the checkout key.
 
 **Upgrading past this drops events already waiting under the old shared key.** A seat without
 `--project` starts reading its checkout's sink, and nothing reads the old shared one again. Those

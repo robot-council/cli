@@ -76,6 +76,11 @@ final class PendingEvents
     public const int CLEAR_RETRY_MILLISECONDS = 50;
 
     /**
+     * The harness that runs one bridge for the whole application, whose sink has no checkout (#327).
+     */
+    public const string APP_WIDE_HARNESS = 'cursor';
+
+    /**
      * How many times to ask git before keying by the directory itself for this one call.
      */
     public const int CHECKOUT_ATTEMPTS = 3;
@@ -700,7 +705,13 @@ final class PendingEvents
         // Unchanged when a project is named, so its sink survives the upgrade. Otherwise a fourth
         // part, which also keeps the new key from ever equalling the old shared one: joined, even an
         // empty fourth part adds a separator the three-part key never had (#299).
-        if ($this->projectId === null) {
+        //
+        // **Not for Cursor** (#327). Cursor runs one bridge for the whole app, in the home folder,
+        // and runs its stop hook in `~/.cursor`, so neither folder is the project and the two keys
+        // never matched: a Cursor seat's hook drained an empty sink while its bridge's filled.
+        // Measured on Cursor 3.17.19. One bridge per app means one sink per app is the right match,
+        // which is the key it had before #299
+        if ($this->projectId === null && $this->harness !== self::APP_WIDE_HARNESS) {
             $parts[] = $this->checkout();
         }
 
