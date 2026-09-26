@@ -16,7 +16,7 @@ declare(strict_types=1);
  *
  * @command  vendor/bin/pest --compact tests/Feature/SinkPerCheckoutTest.php
  */
-
+use App\Support\Checkout;
 use App\Support\PendingEvents;
 use Illuminate\Support\Facades\File;
 use Symfony\Component\Process\Process;
@@ -64,7 +64,7 @@ function sinkEvent(string $body): array
 /**
  * Run `robot-council pending` the way a stop hook does: its own process, in a directory.
  */
-function sinkHook(string $directory, string $state, ?string $projectDirectory = null): string
+function sinkHook(string $directory, string $state, ?string $projectDirectory = null, string $harness = 'claude'): string
 {
     $hook = new Process(
         [PHP_BINARY, base_path('robot-council'), 'pending'],
@@ -72,7 +72,7 @@ function sinkHook(string $directory, string $state, ?string $projectDirectory = 
         [
             'XDG_STATE_HOME' => $state,
             'ROBOT_COUNCIL_SERVICE' => SINK_SERVICE,
-            'ROBOT_COUNCIL_HARNESS' => 'claude',
+            'ROBOT_COUNCIL_HARNESS' => $harness,
 
             // Unset unless given: this suite may itself run inside a Claude Code session
             'CLAUDE_PROJECT_DIR' => $projectDirectory ?? false,
@@ -200,4 +200,42 @@ it('asks git again after it could not answer, rather than keeping the fallback',
 
     expect($whileGitCouldNotAnswer)->not->toBe($once)
         ->and($once)->toBe(new PendingEvents(SINK_SERVICE, 'claude', null, $later.'/.')->path());
+});
+
+it('gives a Cursor bridge and its hook one sink, whatever folders Cursor runs them in', function (): void {
+    // #327, as measured on Cursor 3.17.19: the one app-wide bridge runs in the home folder and the
+    // stop hook in `~/.cursor`, neither of them the project
+    $home = $this->root.'/home';
+    $config = $this->root.'/home/.cursor';
+    File::ensureDirectoryExists($config);
+
+    new PendingEvents(SINK_SERVICE, 'cursor', null, $home)->add([sinkEvent('for the cursor seat')]);
+
+    expect(sinkHook($config, $this->state, harness: 'cursor'))->toContain('for the cursor seat');
+});
+
+it('keys a Cursor sink as it was before #299, so both sides agree with no checkout in it', function (): void {
+    $before = substr(hash('sha256', implode("\0", [SINK_SERVICE, 'cursor', ''])), 0, 32);
+
+    expect(basename(new PendingEvents(SINK_SERVICE, 'cursor', null, $this->root)->path(), '.json'))->toBe($before);
+});
+
+it('still keeps Claude Code seats in different folders apart', function (): void {
+    $one = sinkRepository($this->root.'/one');
+    $two = sinkRepository($this->root.'/two');
+
+    expect(new PendingEvents(SINK_SERVICE, 'claude', null, $one)->path())
+        ->not->toBe(new PendingEvents(SINK_SERVICE, 'claude', null, $two)->path());
+});
+
+it('leaves the Claude Code key exactly as #299 made it: the service, the harness, no project, and the checkout', function (): void {
+    $repository = sinkRepository($this->root.'/repo');
+    $gitDirectory = Checkout::gitDirectory($repository);
+
+    // Lower-cased on Windows, where the key does so to make one folder's spellings agree
+    $checkout = PHP_OS_FAMILY === 'Windows' ? strtolower((string) $gitDirectory) : $gitDirectory;
+    $expected = substr(hash('sha256', implode("\0", [SINK_SERVICE, 'claude', '', $checkout])), 0, 32);
+
+    expect($gitDirectory)->toBeString()
+        ->and(basename(new PendingEvents(SINK_SERVICE, 'claude', null, $repository)->path(), '.json'))->toBe($expected);
 });
