@@ -83,26 +83,6 @@ final class McpCommand extends Command
             $this->diagnostic(...),
         );
 
-        $bridge = new Bridge(
-            null,
-            $service,
-            Bridge::HEARTBEAT_SECONDS,
-
-            // **Claude Code only**, the one harness that reads `claude/channel`. A session started
-            // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
-            channel: $harness === 'claude',
-            join: $join(...),
-            keepWarm: $this->keepWarm($service, $harness),
-            stopHook: $this->stopHookDelivers($harness),
-        );
-
-        if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
-            // A role is asked for at the join, and without `--auto-join` this process does not join
-            $this->diagnostic('--role applies only with --auto-join; pass the role to the `join` tool instead.');
-        }
-
-        $this->listenForSignals($bridge);
-
         // **The bridge reads a socket, not stdin.** A child does the blocking read, because
         // `stream_select()` does not honor its timeout on a Windows pipe and the loop would then
         // only turn over when the harness sends a frame -- so an idle agent would get no heartbeat,
@@ -114,6 +94,35 @@ final class McpCommand extends Command
 
             return self::FAILURE;
         }
+
+        // **Held for the life of this process**, which is what makes it a seat: the lock goes when
+        // the process does, however it goes (#320). **Taken after the reader starts**, so the
+        // long-lived child never holds a copy of the lock: a child that inherited it would keep
+        // the seat held after this process was killed, for as long as the harness kept stdin open.
+        // Close-on-exec covers this on POSIX (`SeatTest`); the order is what covers Windows
+        $seat = new PendingEvents($service, $harness, $this->stringOption('project'));
+        $sharedSink = $this->sharedSinkWarning($seat);
+
+        $bridge = new Bridge(
+            null,
+            $service,
+            Bridge::HEARTBEAT_SECONDS,
+
+            // **Claude Code only**, the one harness that reads `claude/channel`. A session started
+            // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
+            channel: $harness === 'claude',
+            join: $join(...),
+            keepWarm: $this->keepWarm($service, $harness),
+            stopHook: $this->stopHookDelivers($harness),
+            sharedSink: $sharedSink,
+        );
+
+        if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
+            // A role is asked for at the join, and without `--auto-join` this process does not join
+            $this->diagnostic('--role applies only with --auto-join; pass the role to the `join` tool instead.');
+        }
+
+        $this->listenForSignals($bridge);
 
         try {
             // After the signal handlers, so a `SIGTERM` arriving during the join's network calls
@@ -156,6 +165,29 @@ final class McpCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Take this checkout's seat, or say that another bridge already has it (#320).
+     *
+     * Said once on stderr, which Claude Code keeps as the server's log, and handed to the bridge so
+     * the agent hears it at connect and at the join.
+     *
+     * @param  PendingEvents  $seat  The sink this bridge will write, keyed as the join keys it.
+     * @return string|null The warning, or null when this bridge holds the seat.
+     */
+    private function sharedSinkWarning(PendingEvents $seat): ?string
+    {
+        if ($seat->claimSeat()) {
+            return null;
+        }
+
+        $holder = $seat->seatHolder();
+        $warning = \sprintf(Bridge::SHARED_SINK_WARNING, $holder === null ? 'pid unknown' : 'pid '.$holder);
+
+        $this->diagnostic($warning);
+
+        return $warning;
     }
 
     /**

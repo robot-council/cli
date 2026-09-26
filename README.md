@@ -589,7 +589,14 @@ itself outside a repository. It is what keeps sessions in different checkouts ap
 every session launched from one user-level configuration shared one sink, and the first stop hook to
 run took every session's events. Each worktree has its own git directory, so each slot gets its own
 sink. **Two sessions in one checkout still share a sink**, so run one seat per checkout
-([#300](https://github.com/robot-council/cli/issues/300) asks whether that can change).
+([#300](https://github.com/robot-council/cli/issues/300) decided that, and keeps the research
+into separating them open). **A second bridge started in a checkout that already has one says
+so** ([#320](https://github.com/robot-council/cli/issues/320)): it keeps running, since an operator
+may be mid-handover, but writes `robot-council: another bridge is running in this checkout (pid N)`
+to stderr and repeats the warning in what the agent reads at connect and in the `join` result, so
+the agent can tell its operator. A bridge given `--project` checks that project instead, so two
+checkouts sharing one project warn too. The check is an operating-system lock on the sink, released
+when the bridge exits however it exits, so a killed bridge leaves nothing behind to warn about.
 
 **The bridge and the hook have to agree on that folder, and they do not start in the same one.**
 Measured on Claude Code 2.1.282: the MCP server runs in the folder Claude Code was launched from,

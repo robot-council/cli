@@ -396,6 +396,100 @@ final class PendingEvents
     }
 
     /**
+     * The seat lock this bridge holds for the life of the process, once taken.
+     *
+     * @var resource|null
+     */
+    private mixed $seat = null;
+
+    /**
+     * Take this sink's seat for as long as this process runs, or report that another bridge has it (#320).
+     *
+     * **One seat per checkout, enforced by a warning rather than a refusal.** Two sessions in one
+     * checkout share one sink (#299), so whichever stop hook runs first takes both sessions'
+     * events, and nothing reports it. This lock is how a second bridge finds out.
+     *
+     * **An advisory `flock`, which the operating system releases when the holder exits**, however
+     * it exits -- so a bridge that was killed leaves no stale lock behind, which a lock FILE whose
+     * existence meant "held" would. The holder's pid is written to a separate file, because a lock
+     * on Windows is mandatory and another process cannot read the locked file itself.
+     *
+     * Best-effort: when the lock cannot be opened or taken for any reason but another holder, this
+     * answers true, since a bridge that cannot tell must not warn about a sibling it has not seen.
+     *
+     * **The key is resolved at this moment.** If git cannot answer at launch, the seat keys by the
+     * folder while the sink, resolved again at the join, may key by the git directory; a second
+     * bridge then takes a different seat and is not warned. Accepted: it needs git to fail three
+     * times at launch.
+     *
+     * @return bool True when this process now holds the seat, false when another does.
+     */
+    public function claimSeat(): bool
+    {
+        if ($this->seat !== null) {
+            return true;
+        }
+
+        $directory = $this->directory();
+
+        if (! is_dir($directory) && ! @mkdir($directory, 0o700, true) && ! is_dir($directory)) {
+            return true;
+        }
+
+        // `e` sets close-on-exec where the platform has it, so no child this process starts holds a
+        // copy of the lock and keeps it after this process is killed. Windows has no such flag;
+        // there, `mcp` takes the seat after starting its one long-lived child
+        $handle = @fopen($this->seatPath(), PHP_OS_FAMILY === 'Windows' ? 'c' : 'ce');
+
+        if ($handle === false) {
+            return true;
+        }
+
+        @chmod($this->seatPath(), 0o600);
+
+        if (! flock($handle, LOCK_EX | LOCK_NB, $wouldBlock)) {
+            fclose($handle);
+
+            // Held by someone else only when the lock WOULD have blocked. A file system that cannot
+            // lock at all (some network homes) fails the same call, and must not warn every bridge.
+            // No test reaches that second case, since it needs a file system without locking; the
+            // held case is `SeatTest`'s
+            return $wouldBlock !== 1;
+        }
+
+        $this->seat = $handle;
+
+        // Written aside and renamed into place, so a second bridge reading it never sees it empty
+        $pidPath = $this->seatPath().'.pid';
+        $staging = $pidPath.'.'.getmypid();
+
+        if (@file_put_contents($staging, (string) getmypid()) !== false) {
+            @chmod($staging, 0o600);
+            @rename($staging, $pidPath);
+        }
+
+        return true;
+    }
+
+    /**
+     * The pid of the bridge holding this sink's seat, as it recorded it, or null when unknown.
+     */
+    public function seatHolder(): ?int
+    {
+        $recorded = @file_get_contents($this->seatPath().'.pid');
+
+        return \is_string($recorded) && preg_match('/^\d+$/', trim($recorded)) === 1 ? (int) trim($recorded) : null;
+    }
+
+    /**
+     * Where this sink's seat lock lives.
+     */
+    public function seatPath(): string
+    {
+        return $this->directory().'/'.$this->key().'.seat';
+    }
+
+    /**
      * Record that a turn has just ended, for a bridge keeping the session's cache warm (#279).
      *
      * **The stop hook is the one thing that sees every turn end**, and this is how it tells the

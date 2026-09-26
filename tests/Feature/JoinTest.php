@@ -100,7 +100,7 @@ function joinFunction(array &$calls): Closure
  * @param  list<array<string, string|null>>  $calls  Every join's arguments, appended to.
  * @return list<array<array-key, mixed>> What the bridge wrote, in order.
  */
-function joinRun(array $lines, ?Closure $join = null, array &$calls = []): array
+function joinRun(array $lines, ?Closure $join = null, array &$calls = [], ?string $sharedSink = null): array
 {
     $in = tmpfile();
     fwrite($in, implode("\n", $lines)."\n");
@@ -108,7 +108,7 @@ function joinRun(array $lines, ?Closure $join = null, array &$calls = []): array
 
     $out = tmpfile();
 
-    new Bridge(null, JOIN_SERVICE, heartbeatSeconds: 0, join: $join ?? joinFunction($calls))
+    new Bridge(null, JOIN_SERVICE, heartbeatSeconds: 0, join: $join ?? joinFunction($calls), sharedSink: $sharedSink)
         ->run($in, $out, fn (string $m): null => null);
 
     rewind($out);
@@ -455,3 +455,41 @@ it('sends the notice only once the harness has said it finished initializing', f
 
     expect(array_column($written, 'method'))->not->toContain('notifications/tools/list_changed');
 });
+
+/**
+ * A value that must be a string, or the test fails saying what it was.
+ */
+function joinText(mixed $value): string
+{
+    if (! is_string($value)) {
+        throw new RuntimeException(sprintf('Expected a string, got %s.', get_debug_type($value)));
+    }
+
+    return $value;
+}
+
+it('repeats a shared-sink warning in the join result and in the instructions, and says nothing without one', function (?string $warning): void {
+    // #320: the agent is what tells its operator, so it hears the warning at connect and at the join
+    joinService();
+
+    $written = joinRun([
+        '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}',
+        joinCall(1),
+    ], sharedSink: $warning);
+
+    $instructions = joinText(data_get($written[0], 'result.instructions'));
+    $joined = joinText(data_get(joinReplyTo($written, 1), 'result.content.0.text'));
+
+    expect($joined)->toStartWith('Joined the fleet as session 41.');
+
+    if ($warning === null) {
+        expect($instructions)->not->toContain('Run one seat per checkout')
+            ->and($joined)->not->toContain('Run one seat per checkout');
+    } else {
+        expect($instructions)->toContain('Tell your operator: '.$warning)
+            ->and($joined)->toContain('Warning: '.$warning);
+    }
+})->with([
+    'another bridge holds the seat' => [sprintf(Bridge::SHARED_SINK_WARNING, 'pid 4242')],
+    'this bridge holds it' => [null],
+]);
