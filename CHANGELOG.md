@@ -4,6 +4,19 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.28 — A Cursor Seat Hears the Fleet Again (2026-09-25)
+
+A Cursor seat hears the fleet again. From v0.4.23, its stop hook read a different sink from the one its bridge wrote, so a Cursor seat received no fleet events at all. This release also adds two things. A bridge started in a checkout that already has one now warns. And a session can declare how many tasks it will hold at once.
+
+**Upgrading a Cursor seat:** run `robot-council upgrade`, then reload Cursor's MCP servers. Events a Cursor bridge had already written to the old sink are not delivered: both the bridge and its hook move to the new key, and the old file stays where it is.
+
+### What's new
+- Warn when a second bridge starts in a checkout whose event sink is already held [#322](https://github.com/robot-council/cli/pull/322)
+- Declare a parallel capacity on join, from `--capacity` and the `join` tool [#325](https://github.com/robot-council/cli/pull/325)
+
+### What's fixed
+- Key a Cursor seat's sink without the checkout, so its stop hook finds its bridge's events [#328](https://github.com/robot-council/cli/pull/328)
+
 ## v0.4.27 — Addressed Narration Reaches Its Seat (2026-09-25)
 
 A narration addressed to a session now reaches it. The fleet's coordinator answers a seat with a narration addressed to it by `meta.to` or `meta.to_tasks`, and until now the bridge discarded every narration, so those replies went unseen until the seat happened to read the feed itself. Narration addressed to nobody, or to other sessions, is still kept out.
