@@ -83,8 +83,23 @@ final class McpCommand extends Command
             $this->diagnostic(...),
         );
 
+        // **The bridge reads a socket, not stdin.** A child does the blocking read, because
+        // `stream_select()` does not honor its timeout on a Windows pipe and the loop would then
+        // only turn over when the harness sends a frame -- so an idle agent would get no heartbeat,
+        // no renewal and no directives, which is the agent all three exist for (#131).
+        try {
+            $reader = new StdinReader;
+        } catch (RuntimeException $runtimeException) {
+            $this->diagnostic($runtimeException->getMessage());
+
+            return self::FAILURE;
+        }
+
         // **Held for the life of this process**, which is what makes it a seat: the lock goes when
-        // the process does, however it goes (#320)
+        // the process does, however it goes (#320). **Taken after the reader starts**, so the
+        // long-lived child never holds a copy of the lock: a child that inherited it would keep
+        // the seat held after this process was killed, for as long as the harness kept stdin open.
+        // Close-on-exec covers this on POSIX (`SeatTest`); the order is what covers Windows
         $seat = new PendingEvents($service, $harness, $this->stringOption('project'));
         $sharedSink = $this->sharedSinkWarning($seat);
 
@@ -108,18 +123,6 @@ final class McpCommand extends Command
         }
 
         $this->listenForSignals($bridge);
-
-        // **The bridge reads a socket, not stdin.** A child does the blocking read, because
-        // `stream_select()` does not honor its timeout on a Windows pipe and the loop would then
-        // only turn over when the harness sends a frame -- so an idle agent would get no heartbeat,
-        // no renewal and no directives, which is the agent all three exist for (#131).
-        try {
-            $reader = new StdinReader;
-        } catch (RuntimeException $runtimeException) {
-            $this->diagnostic($runtimeException->getMessage());
-
-            return self::FAILURE;
-        }
 
         try {
             // After the signal handlers, so a `SIGTERM` arriving during the join's network calls

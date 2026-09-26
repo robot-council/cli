@@ -130,6 +130,36 @@ it('frees the seat when the bridge holding it is killed, leaving no stale lock',
     expect(new PendingEvents(SEAT_SERVICE, 'claude', null, $this->root.'/one')->claimSeat())->toBeTrue();
 });
 
+it('frees the seat when its holder is killed, even though a child it started lives on', function (): void {
+    // The bridge's own shape: a long-lived child (the stdin reader) outlives a killed parent. A child
+    // holding a copy of the lock kept the seat held, so the next bridge warned about a dead one
+    $holder = new Process(
+        [PHP_BINARY, '-r', 'require $argv[1]; $s = new App\\Support\\PendingEvents($argv[2], "claude", null, $argv[3]); $ok = $s->claimSeat(); $c = proc_open([PHP_BINARY, "-r", "sleep(30);"], [], $pipes, null, null, ["bypass_shell" => true]); echo ($ok ? "held " : "refused ").proc_get_status($c)["pid"]."\n"; fgets(STDIN);',
+            base_path('vendor/autoload.php'), SEAT_SERVICE, $this->root.'/one'],
+        null,
+        ['XDG_STATE_HOME' => $this->state],
+    );
+    $holder->setInput(new InputStream);
+    $holder->start();
+    $holder->waitUntil(fn (string $type, string $output): bool => str_contains($output, "\n"));
+
+    $child = (int) trim(substr($holder->getOutput(), (int) strpos($holder->getOutput(), ' ') + 1));
+
+    try {
+        expect($holder->getOutput())->toStartWith('held')
+            ->and(posix_kill($child, 0))->toBeTrue();
+
+        $holder->signal(SIGKILL);
+        $holder->wait();
+
+        // The child is still alive, and the seat is free anyway
+        expect(posix_kill($child, 0))->toBeTrue()
+            ->and(new PendingEvents(SEAT_SERVICE, 'claude', null, $this->root.'/one')->claimSeat())->toBeTrue();
+    } finally {
+        posix_kill($child, SIGKILL);
+    }
+})->skip(PHP_OS_FAMILY === 'Windows' || ! function_exists('posix_kill'), 'Close-on-exec is POSIX; on Windows `mcp` takes the seat after starting its long-lived child.');
+
 it('warns a second bridge started in a held checkout, on stderr and in what the agent reads', function (): void {
     // This test's own process holds the seat of the checkout the bridge starts in
     $seat = new PendingEvents(SEAT_SERVICE, 'claude', null, $this->root.'/one');

@@ -414,8 +414,13 @@ final class PendingEvents
      * existence meant "held" would. The holder's pid is written to a separate file, because a lock
      * on Windows is mandatory and another process cannot read the locked file itself.
      *
-     * Best-effort: when the lock cannot even be opened, this answers true, since a bridge that
-     * cannot tell must not warn about a sibling it has not seen.
+     * Best-effort: when the lock cannot be opened or taken for any reason but another holder, this
+     * answers true, since a bridge that cannot tell must not warn about a sibling it has not seen.
+     *
+     * **The key is resolved at this moment.** If git cannot answer at launch, the seat keys by the
+     * folder while the sink, resolved again at the join, may key by the git directory; a second
+     * bridge then takes a different seat and is not warned. Accepted: it needs git to fail three
+     * times at launch.
      *
      * @return bool True when this process now holds the seat, false when another does.
      */
@@ -431,7 +436,10 @@ final class PendingEvents
             return true;
         }
 
-        $handle = @fopen($this->seatPath(), 'c');
+        // `e` sets close-on-exec where the platform has it, so no child this process starts holds a
+        // copy of the lock and keeps it after this process is killed. Windows has no such flag;
+        // there, `mcp` takes the seat after starting its one long-lived child
+        $handle = @fopen($this->seatPath(), PHP_OS_FAMILY === 'Windows' ? 'c' : 'ce');
 
         if ($handle === false) {
             return true;
@@ -439,16 +447,26 @@ final class PendingEvents
 
         @chmod($this->seatPath(), 0o600);
 
-        if (! flock($handle, LOCK_EX | LOCK_NB)) {
+        if (! flock($handle, LOCK_EX | LOCK_NB, $wouldBlock)) {
             fclose($handle);
 
-            return false;
+            // Held by someone else only when the lock WOULD have blocked. A file system that cannot
+            // lock at all (some network homes) fails the same call, and must not warn every bridge.
+            // No test reaches that second case, since it needs a file system without locking; the
+            // held case is `SeatTest`'s
+            return $wouldBlock !== 1;
         }
 
         $this->seat = $handle;
 
-        @file_put_contents($this->seatPath().'.pid', (string) getmypid());
-        @chmod($this->seatPath().'.pid', 0o600);
+        // Written aside and renamed into place, so a second bridge reading it never sees it empty
+        $pidPath = $this->seatPath().'.pid';
+        $staging = $pidPath.'.'.getmypid();
+
+        if (@file_put_contents($staging, (string) getmypid()) !== false) {
+            @chmod($staging, 0o600);
+            @rename($staging, $pidPath);
+        }
 
         return true;
     }
