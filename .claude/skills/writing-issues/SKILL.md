@@ -272,7 +272,7 @@ title and, where available, the `Bug` issue type.
 
 Every open issue also carries **exactly one** of these, and it decides the order work is taken in: **`fleet-facing` comes first, `housekeeping` last.**
 
-- **`fleet-facing`** — changes what an agent or operator on the fleet experiences: the service's API and behavior, the bridge and its follower, enrollment and credential storage, the tool list a harness sees, the messages a session reads, and the README steps a fleet user follows. A measurement that decides whether one of those works on a platform counts too.
+- **`fleet-facing`** — changes what an agent or operator on the fleet experiences: the service's API and behavior, the bridge and its follower, enrollment and credential storage, the tool list a harness sees, the messages a session reads, and the documented steps a fleet user follows. A measurement that decides whether one of those works on a platform counts too.
 - **`housekeeping`** — repository upkeep with no direct effect on the fleet: CI wiring, the release-notes generator, skills and rules, a test flake, or a measurement of code that has already been replaced.
 
 **Classify by who notices if it never ships.** If only people working in the repository would, it is `housekeeping`, even when it changes shipped code or carries `security`. A cleanup of the service's API is `fleet-facing`, because the deployed bridge talks to it. An `epic` carries the label its slices mostly share. Still file `housekeeping` residue per [`closing-a-ticket`](../../rules/closing-a-ticket.md); the label lowers its priority, not its right to a ticket.
