@@ -63,10 +63,11 @@ it('sends nothing when no capacity is declared, so the service default applies',
 });
 
 it('reads back the capacity in effect and the one declared', function (): void {
-    $session = capacitySession(20, ['capacity' => 16, 'declared_capacity' => 20]);
+    // Core stores a declaration past its maximum of 16 as 16, and reads it back that way
+    $session = capacitySession(20, ['capacity' => 1, 'declared_capacity' => 16]);
 
-    expect($session->capacity())->toBe(16)
-        ->and($session->declaredCapacity())->toBe(20);
+    expect($session->capacity())->toBe(1)
+        ->and($session->declaredCapacity())->toBe(16);
 });
 
 it('reads no capacity from a service that predates it', function (): void {

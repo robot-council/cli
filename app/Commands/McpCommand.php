@@ -123,13 +123,14 @@ final class McpCommand extends Command
             $this->diagnostic('--role applies only with --auto-join; pass the role to the `join` tool instead.');
         }
 
-        if ($this->stringOption('capacity') !== null && $this->option('auto-join') !== true) {
+        if ($this->input->hasParameterOption('--capacity') && $this->option('auto-join') !== true) {
             $this->diagnostic('--capacity applies only with --auto-join; pass the capacity to the `join` tool instead.');
         }
 
         // **Refused before any request** (#302), and the automatic join with it, since joining
-        // with a different capacity than asked is worse than not joining: `join` still works
-        $capacity = $this->capacityOption();
+        // with a different capacity than asked is worse than not joining: `join` still works.
+        // Read only for an automatic join, the one thing it applies to
+        $capacity = $this->option('auto-join') === true ? $this->capacityOption() : null;
 
         $this->listenForSignals($bridge);
 
@@ -180,7 +181,7 @@ final class McpCommand extends Command
     /**
      * The capacity `--capacity` declares: null when omitted, false when it is not usable (#302).
      *
-     * Digits only, at least 1. Above 16 is passed on as given: the service stores it as 16 and
+     * A whole number, at least 1. Above 16 is passed on as given: the service stores it as 16 and
      * the join result says what is in effect.
      */
     private function capacityOption(): int|false|null
@@ -197,13 +198,15 @@ final class McpCommand extends Command
             return null;
         }
 
-        if (preg_match('/^\d{1,6}$/', $given) !== 1 || (int) $given < 1) {
+        $capacity = preg_match('/^\d+$/', $given) === 1 ? filter_var($given, FILTER_VALIDATE_INT) : false;
+
+        if (! \is_int($capacity) || $capacity < 1) {
             $this->diagnostic('--capacity takes a whole number, 1 or more; not joining automatically.');
 
             return false;
         }
 
-        return (int) $given;
+        return $capacity;
     }
 
     /**

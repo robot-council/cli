@@ -166,11 +166,30 @@ final class FleetJoin
 
         $inEffect = $session->capacity();
 
-        return match (true) {
-            $inEffect === null => \sprintf('It declared a capacity of %d, and the fleet reported none, so it may not support capacity; plan on one task at a time.', $asked),
-            $inEffect !== $asked => \sprintf('It declared a capacity of %d; its seat caps it at %d, so it holds up to %d tasks at once.', $asked, $inEffect, $inEffect),
-            default => \sprintf('It holds up to %d tasks at once.', $inEffect),
-        };
+        if ($inEffect === null) {
+            return \sprintf('It declared a capacity of %d, and the fleet reported none, so it may not support capacity; plan on one task at a time.', $asked);
+        }
+
+        $holds = \sprintf('it holds up to %d %s at once.', $inEffect, $inEffect === 1 ? 'task' : 'tasks');
+
+        if ($inEffect === $asked) {
+            return 'It '.substr($holds, 3);
+        }
+
+        // **Which limit applied**, from what the fleet recorded as declared: core clamps a
+        // declaration to its own maximum before storing it, and the seat's cap applies after that
+        $declared = $session->declaredCapacity() ?? $asked;
+        $reasons = [];
+
+        if ($declared < $asked) {
+            $reasons[] = \sprintf('the fleet takes at most %d', $declared);
+        }
+
+        if ($inEffect < $declared) {
+            $reasons[] = \sprintf('its seat caps it at %d', $inEffect);
+        }
+
+        return \sprintf('It declared a capacity of %d; %s, so %s', $asked, implode(', and ', $reasons), $holds);
     }
 
     /**

@@ -1102,6 +1102,23 @@ final class Bridge
     }
 
     /**
+     * A tool argument as a whole number: null when absent, false when it is not one (#302).
+     *
+     * **Generous about the JSON it arrives as**, since a model or client may send `3` as `"3"` or
+     * `3.0`, and each is the whole number 3. Anything else, `1.5` or `"many"`, is not.
+     */
+    private function wholeNumber(mixed $value): int|false|null
+    {
+        return match (true) {
+            $value === null => null,
+            \is_int($value) => $value,
+            \is_float($value) => floor($value) === $value && abs($value) <= PHP_INT_MAX ? (int) $value : false,
+            \is_string($value) => preg_match('/^\d+$/', $value) === 1 && \is_int(filter_var($value, FILTER_VALIDATE_INT)) ? (int) $value : false,
+            default => false,
+        };
+    }
+
+    /**
      * The one tool an unjoined bridge offers.
      *
      * @return array<string, mixed> The tool, as `tools/list` describes it.
@@ -1177,9 +1194,9 @@ final class Bridge
 
         // **Refused here, before any request** (#302): a capacity is a positive whole number, and
         // the service would refuse anything else only after a session had started
-        $capacity = $arguments['capacity'] ?? null;
+        $capacity = $this->wholeNumber($arguments['capacity'] ?? null);
 
-        if ($capacity !== null && (! \is_int($capacity) || $capacity < 1)) {
+        if ($capacity === false || ($capacity !== null && $capacity < 1)) {
             $this->toolResult($out, $id, 'The capacity must be a whole number, 1 or more. Omit it to hold one task at a time.', true);
 
             return;

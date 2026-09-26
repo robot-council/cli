@@ -366,21 +366,27 @@ function bridgeStartCapacity(): mixed
     return $start === null ? null : ($start[0]->data()['capacity'] ?? null);
 }
 
-it('joins with a declared capacity and says what is in effect', function (array $answer, string $says): void {
+it('joins with a declared capacity and says what is in effect', function (int $asked, array $answer, string $says): void {
     bridgeEnrolled();
     bridgeCapacityService($answer);
 
     $output = new TwoStreamOutput;
 
-    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true, '--capacity' => '3'], $output);
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true, '--capacity' => (string) $asked], $output);
 
-    expect(bridgeStartCapacity())->toBe(3)
+    expect(bridgeStartCapacity())->toBe($asked)
         ->and($output->stderr())->toContain($says)
         ->and($output->stdout())->toBeEmpty();
 })->with([
-    'as asked' => [['capacity' => 3, 'declared_capacity' => 3], 'It holds up to 3 tasks at once.'],
-    'capped by the seat' => [['capacity' => 2, 'declared_capacity' => 3], 'its seat caps it at 2, so it holds up to 2 tasks at once'],
-    'from a service that predates capacity' => [[], 'the fleet reported none'],
+    'as asked' => [3, ['capacity' => 3, 'declared_capacity' => 3], 'It holds up to 3 tasks at once.'],
+    'one, as asked' => [1, ['capacity' => 1, 'declared_capacity' => 1], 'It holds up to 1 task at once.'],
+    'capped by the seat' => [3, ['capacity' => 2, 'declared_capacity' => 3], 'It declared a capacity of 3; its seat caps it at 2, so it holds up to 2 tasks at once.'],
+    // A new seat's cap is 1, so this is the common first answer
+    'capped by a new seat' => [3, ['capacity' => 1, 'declared_capacity' => 3], 'its seat caps it at 1, so it holds up to 1 task at once.'],
+    'past the fleet limit' => [20, ['capacity' => 16, 'declared_capacity' => 16], 'It declared a capacity of 20; the fleet takes at most 16, so it holds up to 16 tasks at once.'],
+    'past both' => [20, ['capacity' => 1, 'declared_capacity' => 16], 'the fleet takes at most 16, and its seat caps it at 1, so it holds up to 1 task at once.'],
+    'from a service that predates capacity' => [3, [], 'the fleet reported none'],
+    'a whole number of any size' => [1000000, ['capacity' => 16, 'declared_capacity' => 16], 'the fleet takes at most 16'],
 ]);
 
 it('sends no capacity when none is declared', function (): void {
@@ -408,14 +414,17 @@ it('refuses an unusable capacity before any request, and does not join', functio
         ->and($output->stderr())->not->toContain('Could not join the fleet');
 })->with(['zero' => ['0'], 'negative' => ['-2'], 'a fraction' => ['1.5'], 'a word' => ['many'], 'bare' => [null]]);
 
-it('says a capacity without --auto-join does nothing', function (): void {
+it('says a capacity without --auto-join does nothing, whatever it is', function (?string $given): void {
     bridgeEnrolled();
     bridgeCapacityService([]);
 
     $output = new TwoStreamOutput;
 
-    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--capacity' => '3'], $output);
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--capacity' => $given], $output);
 
     expect($output->stderr())->toContain('--capacity applies only with --auto-join')
+
+        // Nothing was going to join automatically, so nothing was skipped
+        ->and($output->stderr())->not->toContain('not joining automatically')
         ->and(bridgeStartCalls())->toBe(0);
-});
+})->with(['usable' => ['3'], 'unusable' => ['0'], 'bare' => [null]]);

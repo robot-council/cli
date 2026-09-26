@@ -494,14 +494,15 @@ it('repeats a shared-sink warning in the join result and in the instructions, an
     'this bridge holds it' => [null],
 ]);
 
-it('passes a declared capacity from the join tool to the join', function (): void {
+it('passes a declared capacity from the join tool to the join, however the whole number arrives', function (string $given): void {
     joinService();
     $calls = [];
 
-    joinRun([joinCall(1, ['capacity' => 2])], calls: $calls);
+    // Written out rather than encoded: `json_encode` writes 2.0 as 2, which would test nothing
+    joinRun(['{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"join","arguments":{"capacity":'.$given.'}}}'], calls: $calls);
 
     expect($calls[0]['capacity'] ?? null)->toBe(2);
-});
+})->with(['an integer' => ['2'], 'a string of digits' => ['"2"'], 'a whole float' => ['2.0']]);
 
 it('refuses an unusable capacity from the join tool before any request', function (mixed $capacity): void {
     joinService();
@@ -513,7 +514,7 @@ it('refuses an unusable capacity from the join tool before any request', functio
         ->and(joinStarts())->toBe(0)
         ->and(data_get(joinReplyTo($written, 1), 'result.isError'))->toBeTrue()
         ->and(joinText(data_get(joinReplyTo($written, 1), 'result.content.0.text')))->toContain('The capacity must be a whole number, 1 or more');
-})->with(['zero' => [0], 'negative' => [-1], 'a string' => ['3'], 'a fraction' => [1.5]]);
+})->with(['zero' => [0], 'negative' => [-1], 'zero as a string' => ['0'], 'a fraction' => [1.5], 'a word' => ['many'], 'digits then letters' => ['3x'], 'a list' => [[3]]]);
 
 it('offers a capacity in the join tool, as a positive integer', function (): void {
     $written = joinRun(['{"jsonrpc":"2.0","id":1,"method":"tools/list"}']);
