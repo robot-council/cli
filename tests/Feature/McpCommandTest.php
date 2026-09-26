@@ -16,7 +16,6 @@ declare(strict_types=1);
  *
  * @command  vendor/bin/pest --compact tests/Feature/McpCommandTest.php
  */
-
 use App\Support\Bridge;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
@@ -25,6 +24,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
 use Tests\Fixtures\RecordingStore;
+use Tests\Fixtures\TwoStreamOutput;
 
 const MCP_SERVICE = 'https://bridge.example.test';
 const MCP_INSTALLATION = 'rcouncil_1|INSTALLATION-FOR-THE-BRIDGE';
@@ -339,4 +339,83 @@ it('leaves the sink alone when nobody joined, because it opened none', function 
 
     expect(Artisan::call('mcp', ['--service' => MCP_SERVICE, '--project' => 'probe']))->toBe(0)
         ->and(bridgeSink()->peek())->toHaveCount(1);
+});
+
+/**
+ * A fake service whose session start answers with the given capacity fields (#302).
+ *
+ * @param  array<array-key, mixed>  $answer  What the start response adds.
+ */
+function bridgeCapacityService(array $answer): void
+{
+    Http::fake([
+        '*/api/sessions/*' => Http::response('', 204),
+        '*/api/sessions' => Http::response(array_merge(['session_id' => MCP_SESSION, 'token' => 'rcouncil_2|SESSION-TOKEN', 'abilities' => [], 'expires_in' => 3600], $answer), 201),
+        '*/api/agent/session' => Http::response(['fleet_can_direct' => true], 200),
+        '*' => Http::response('', 200),
+    ]);
+}
+
+/**
+ * The capacity the one session start sent, or null.
+ */
+function bridgeStartCapacity(): mixed
+{
+    $start = Http::recorded(fn (Request $request): bool => $request->method() === 'POST' && str_ends_with($request->url(), '/api/sessions'))->first();
+
+    return $start === null ? null : ($start[0]->data()['capacity'] ?? null);
+}
+
+it('joins with a declared capacity and says what is in effect', function (array $answer, string $says): void {
+    bridgeEnrolled();
+    bridgeCapacityService($answer);
+
+    $output = new TwoStreamOutput;
+
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true, '--capacity' => '3'], $output);
+
+    expect(bridgeStartCapacity())->toBe(3)
+        ->and($output->stderr())->toContain($says)
+        ->and($output->stdout())->toBeEmpty();
+})->with([
+    'as asked' => [['capacity' => 3, 'declared_capacity' => 3], 'It holds up to 3 tasks at once.'],
+    'capped by the seat' => [['capacity' => 2, 'declared_capacity' => 3], 'its seat caps it at 2, so it holds up to 2 tasks at once'],
+    'from a service that predates capacity' => [[], 'the fleet reported none'],
+]);
+
+it('sends no capacity when none is declared', function (): void {
+    bridgeEnrolled();
+    bridgeCapacityService([]);
+
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true]);
+
+    expect(bridgeStartCalls())->toBe(1)
+        ->and(bridgeStartCapacity())->toBeNull();
+});
+
+it('refuses an unusable capacity before any request, and does not join', function (?string $given): void {
+    bridgeEnrolled();
+    bridgeCapacityService([]);
+
+    $output = new TwoStreamOutput;
+
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true, '--capacity' => $given], $output);
+
+    expect(bridgeStartCalls())->toBe(0)
+        ->and($output->stderr())->toContain('--capacity takes a whole number, 1 or more')
+
+        // Not joining at all, rather than a join that failed for some other reason
+        ->and($output->stderr())->not->toContain('Could not join the fleet');
+})->with(['zero' => ['0'], 'negative' => ['-2'], 'a fraction' => ['1.5'], 'a word' => ['many'], 'bare' => [null]]);
+
+it('says a capacity without --auto-join does nothing', function (): void {
+    bridgeEnrolled();
+    bridgeCapacityService([]);
+
+    $output = new TwoStreamOutput;
+
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--capacity' => '3'], $output);
+
+    expect($output->stderr())->toContain('--capacity applies only with --auto-join')
+        ->and(bridgeStartCalls())->toBe(0);
 });

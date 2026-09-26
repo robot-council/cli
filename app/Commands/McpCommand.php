@@ -40,6 +40,7 @@ use Throwable;
     {--harness= : Which enrolled harness this process is, when detection cannot tell}
     {--auto-join : Join the fleet at launch, for a checkout that should join every time it starts}
     {--role= : With --auto-join, the role to ask for: build, ci or coordinator}
+    {--capacity= : With --auto-join, how many tasks this session will hold at once, up to its seat cap}
     {--keep-warm= : Claude Code only: wake the session after this many idle minutes, to keep its prompt cache warm}
     {--keep-warm-for= : With --keep-warm, stop once the session has been idle this many minutes}')]
 final class McpCommand extends Command
@@ -122,16 +123,25 @@ final class McpCommand extends Command
             $this->diagnostic('--role applies only with --auto-join; pass the role to the `join` tool instead.');
         }
 
+        if ($this->stringOption('capacity') !== null && $this->option('auto-join') !== true) {
+            $this->diagnostic('--capacity applies only with --auto-join; pass the capacity to the `join` tool instead.');
+        }
+
+        // **Refused before any request** (#302), and the automatic join with it, since joining
+        // with a different capacity than asked is worse than not joining: `join` still works
+        $capacity = $this->capacityOption();
+
         $this->listenForSignals($bridge);
 
         try {
             // After the signal handlers, so a `SIGTERM` arriving during the join's network calls
             // is caught and the session it started is still ended below
-            if ($this->option('auto-join') === true) {
+            if ($this->option('auto-join') === true && $capacity !== false) {
                 $bridge->joinNow([
                     'role' => $this->stringOption('role'),
                     'repository' => null,
                     'work_location' => null,
+                    'capacity' => $capacity,
                 ], $this->diagnostic(...));
             }
 
@@ -165,6 +175,35 @@ final class McpCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * The capacity `--capacity` declares: null when omitted, false when it is not usable (#302).
+     *
+     * Digits only, at least 1. Above 16 is passed on as given: the service stores it as 16 and
+     * the join result says what is in effect.
+     */
+    private function capacityOption(): int|false|null
+    {
+        $given = $this->stringOption('capacity');
+
+        if ($given === null) {
+            if ($this->input->hasParameterOption('--capacity')) {
+                $this->diagnostic('--capacity takes a whole number, 1 or more; not joining automatically.');
+
+                return false;
+            }
+
+            return null;
+        }
+
+        if (preg_match('/^\d{1,6}$/', $given) !== 1 || (int) $given < 1) {
+            $this->diagnostic('--capacity takes a whole number, 1 or more; not joining automatically.');
+
+            return false;
+        }
+
+        return (int) $given;
     }
 
     /**

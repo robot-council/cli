@@ -219,8 +219,8 @@ final class Bridge
      * @param  int  $heartbeatSeconds  How long to wait between heartbeats.
      * @param  int  $renewRetrySeconds  How long a refused renewal waits before another is tried.
      * @param  bool  $channel  Whether to act as a Claude Code channel (cli#62).
-     * @param  (Closure(array{role: string|null, repository: string|null, work_location: string|null}): Joined)|null  $join
-     *                                                                                                                       What the `join` tool does. It throws a `RuntimeException` carrying what to tell the agent when joining fails.
+     * @param  (Closure(array{role: string|null, repository: string|null, work_location: string|null, capacity?: int|null}): Joined)|null  $join
+     *                                                                                                                                            What the `join` tool does. It throws a `RuntimeException` carrying what to tell the agent when joining fails.
      * @param  int  $reannounceSeconds  How long a notice is given to be acted on before it is first sent again.
      * @param  KeepWarm|null  $keepWarm  When to wake an idle session to keep its prompt cache warm, or
      *                                   null for never, which is the default (#279).
@@ -473,7 +473,7 @@ final class Bridge
      * `join` exactly as if nothing had been tried, because an agent can relay a tool result and an
      * operator rarely reads a harness's server log.
      *
-     * @param  array{role: string|null, repository: string|null, work_location: string|null}  $arguments  What to join with.
+     * @param  array{role: string|null, repository: string|null, work_location: string|null, capacity?: int|null}  $arguments  What to join with.
      * @param  callable(string):void  $diagnostic  Where the outcome is said.
      */
     public function joinNow(array $arguments, callable $diagnostic): void
@@ -1130,6 +1130,12 @@ final class Bridge
                         'type' => 'string',
                         'description' => 'Which working copy of that repository this is. Read from the checkout when omitted.',
                     ],
+                    'capacity' => [
+                        'type' => 'integer',
+                        'minimum' => 1,
+                        'description' => 'How many tasks this session will hold at once, if it runs parallel work through '
+                            ."subagents. Omit it for one. The seat's own cap applies, and the result says what is in effect.",
+                    ],
                 ],
                 'additionalProperties' => false,
             ],
@@ -1169,10 +1175,21 @@ final class Bridge
             return;
         }
 
+        // **Refused here, before any request** (#302): a capacity is a positive whole number, and
+        // the service would refuse anything else only after a session had started
+        $capacity = $arguments['capacity'] ?? null;
+
+        if ($capacity !== null && (! \is_int($capacity) || $capacity < 1)) {
+            $this->toolResult($out, $id, 'The capacity must be a whole number, 1 or more. Omit it to hold one task at a time.', true);
+
+            return;
+        }
+
         $outcome = $this->attemptJoin([
             'role' => $this->argument($arguments, 'role'),
             'repository' => $this->argument($arguments, 'repository'),
             'work_location' => $this->argument($arguments, 'work_location'),
+            'capacity' => $capacity,
         ]);
 
         if ($outcome['joined']) {
@@ -1195,7 +1212,7 @@ final class Bridge
     /**
      * Join, and say what happened in a sentence an agent can relay.
      *
-     * @param  array{role: string|null, repository: string|null, work_location: string|null}  $arguments  What to join with.
+     * @param  array{role: string|null, repository: string|null, work_location: string|null, capacity?: int|null}  $arguments  What to join with.
      * @return array{joined: bool, text: string} Whether a session now exists, and what to say.
      */
     private function attemptJoin(array $arguments): array
