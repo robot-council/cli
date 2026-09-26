@@ -16,7 +16,7 @@ declare(strict_types=1);
  *
  * @command  vendor/bin/pest --compact tests/Feature/SinkPerCheckoutTest.php
  */
-
+use App\Support\Checkout;
 use App\Support\PendingEvents;
 use Illuminate\Support\Facades\File;
 use Symfony\Component\Process\Process;
@@ -226,4 +226,14 @@ it('still keeps Claude Code seats in different folders apart', function (): void
 
     expect(new PendingEvents(SINK_SERVICE, 'claude', null, $one)->path())
         ->not->toBe(new PendingEvents(SINK_SERVICE, 'claude', null, $two)->path());
+});
+
+it('leaves the Claude Code key exactly as #299 made it: the service, the harness, no project, and the checkout', function (): void {
+    $repository = sinkRepository($this->root.'/repo');
+    $gitDirectory = Checkout::gitDirectory($repository);
+
+    $expected = substr(hash('sha256', implode("\0", [SINK_SERVICE, 'claude', '', $gitDirectory])), 0, 32);
+
+    expect($gitDirectory)->toBeString()
+        ->and(basename(new PendingEvents(SINK_SERVICE, 'claude', null, $repository)->path(), '.json'))->toBe($expected);
 });
