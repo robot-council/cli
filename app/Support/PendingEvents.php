@@ -547,6 +547,14 @@ final class PendingEvents
     }
 
     /**
+     * Where the record of this sink's last join lives, for a restarted Cursor bridge (#333).
+     */
+    public function joinRecordPath(): string
+    {
+        return $this->directory().'/'.$this->key().'.joined';
+    }
+
+    /**
      * Where the turn-end mark lives.
      */
     public function turnMarkPath(): string

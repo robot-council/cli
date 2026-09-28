@@ -7,9 +7,12 @@ namespace App\Commands;
 use App\Support\Bridge;
 use App\Support\Credentials\Credentials;
 use App\Support\FleetJoin;
+use App\Support\JoinRecord;
 use App\Support\KeepWarm;
 use App\Support\MachineIdentity;
+use App\Support\ParentProcess;
 use App\Support\PendingEvents;
+use App\Support\Session;
 use App\Support\Stderr;
 use App\Support\StdinReader;
 use App\Support\StopHooks;
@@ -46,6 +49,14 @@ use Throwable;
 final class McpCommand extends Command
 {
     /**
+     * What the agent reads at connect when a restarted Cursor bridge has rejoined by itself (#333).
+     */
+    public const string REJOINED_NOTICE = 'This Cursor application was on the Robot Council fleet before Cursor '
+        .'restarted its bridge, and the bridge has rejoined it as it was, with the repository, work location, role '
+        .'and capacity of the earlier join. It is a new fleet session: tasks and locks the earlier one held were released. '
+        .'Tell your operator on your next turn.';
+
+    /**
      * Run the bridge until stdin closes or a signal arrives.
      *
      * **No session until somebody joins (cli#127).** The bridge comes up, answers the handshake,
@@ -58,7 +69,7 @@ final class McpCommand extends Command
      * @param  Credentials  $credentials  Where the installation credential lives.
      * @return int The exit code.
      */
-    public function handle(Factory $http, Credentials $credentials): int
+    public function handle(Factory $http, Credentials $credentials, ParentProcess $parent): int
     {
         $service = $this->resolveService();
 
@@ -104,6 +115,11 @@ final class McpCommand extends Command
         $seat = new PendingEvents($service, $harness, $this->stringOption('project'));
         $sharedSink = $this->sharedSinkWarning($seat);
 
+        // **Cursor only** (#333). Cursor restarts its MCP servers by itself and each stop ends the
+        // session, so a Cursor seat needs a record to rejoin from. No other harness restarts the
+        // bridge under a live session, and none gets one: joining stays the agent's act there.
+        $record = $harness === 'cursor' ? new JoinRecord($seat->joinRecordPath(), $parent->identity()) : null;
+
         $bridge = new Bridge(
             null,
             $service,
@@ -116,7 +132,21 @@ final class McpCommand extends Command
             keepWarm: $this->keepWarm($service, $harness),
             stopHook: $this->stopHookDelivers($harness),
             sharedSink: $sharedSink,
+            joinRecord: $record,
         );
+
+        // Not with `--auto-join`, which joins anyway and with what its own options say
+        $recalled = $this->option('auto-join') === true ? null : $record?->recall();
+        $rejoin = null;
+
+        if ($record instanceof JoinRecord && $recalled !== null) {
+            if ($record->sameParent($recalled['parent'])) {
+                $rejoin = $recalled['arguments'];
+            } else {
+                // A quit and relaunch, or another Cursor: tell, and never join (#321's option A)
+                $bridge->tellAtConnect($this->droppedNotice($recalled['joined_at']));
+            }
+        }
 
         if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
             // A role is asked for at the join, and without `--auto-join` this process does not join
@@ -144,6 +174,14 @@ final class McpCommand extends Command
                     'work_location' => null,
                     'capacity' => $capacity,
                 ], $this->diagnostic(...));
+            } elseif ($rejoin !== null) {
+                $this->diagnostic('rejoining the fleet: this Cursor application joined before its bridge was restarted.');
+
+                $bridge->joinNow($rejoin, $this->diagnostic(...));
+
+                $bridge->tellAtConnect($bridge->session() instanceof Session
+                    ? self::REJOINED_NOTICE
+                    : $this->droppedNotice($recalled['joined_at'] ?? time()));
             }
 
             $bridge->run($reader->stream(), STDOUT, $this->diagnostic(...));
@@ -343,6 +381,23 @@ final class McpCommand extends Command
      *
      * @param  string  $message  What to say.
      */
+    /**
+     * What the agent reads at connect when its application was on the fleet and has not rejoined (#333).
+     *
+     * @param  int  $joinedAt  When the earlier join was recorded, as a Unix timestamp.
+     */
+    private function droppedNotice(int $joinedAt): string
+    {
+        $minutes = intdiv(max(0, time() - $joinedAt), 60);
+
+        return \sprintf(
+            'A Cursor bridge joined the Robot Council fleet from this machine %s, and this bridge has not '
+            .'rejoined: either Cursor was restarted since, or the rejoin failed. Tell your operator on your next '
+            .'turn, and if they want this application back on the fleet, call `join`.',
+            $minutes === 0 ? 'less than a minute ago' : ($minutes === 1 ? '1 minute ago' : $minutes.' minutes ago'),
+        );
+    }
+
     private function diagnostic(string $message): void
     {
         Stderr::say($this->output->getOutput(), $message);
