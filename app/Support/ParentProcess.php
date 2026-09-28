@@ -62,7 +62,7 @@ final readonly class ParentProcess
     }
 
     /**
-     * When the process started, in clock ticks after boot, from `/proc/<pid>/stat`.
+     * When the process started, as this boot's id and the clock ticks after it, from `/proc`.
      */
     private function linuxStart(int $pid): ?string
     {
@@ -82,7 +82,15 @@ final readonly class ParentProcess
 
         $fields = explode(' ', trim(substr($stat, $closing + 2)));
 
-        return isset($fields[19]) && preg_match('/^\d+$/', $fields[19]) === 1 ? $fields[19] : null;
+        if (! isset($fields[19]) || preg_match('/^\d+$/', $fields[19]) !== 1) {
+            return null;
+        }
+
+        // **With the boot it counts from**, since ticks since boot restart at every boot: a helper
+        // that came back after a reboot with its old pid at the same tick would otherwise match
+        $boot = @file_get_contents('/proc/sys/kernel/random/boot_id');
+
+        return \is_string($boot) && trim($boot) !== '' ? trim($boot).':'.$fields[19] : null;
     }
 
     /**

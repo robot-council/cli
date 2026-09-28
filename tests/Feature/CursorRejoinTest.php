@@ -63,9 +63,22 @@ function rejoinSeed(?array $parent = REJOIN_PARENT, string $harness = 'cursor'):
 }
 
 /**
+ * Leave a record made the given number of seconds ago, under a parent other than the fixed one.
+ */
+function rejoinSeedAged(int $secondsAgo): void
+{
+    File::ensureDirectoryExists(dirname(rejoinRecordPath()));
+    File::put(rejoinRecordPath(), (string) json_encode([
+        'role' => null, 'repository' => 'org/repo', 'work_location' => 'repo-c', 'capacity' => 2,
+        'parent' => ['pid' => 4243, 'started' => REJOIN_PARENT['started']],
+        'joined_at' => time() - $secondsAgo,
+    ]));
+}
+
+/**
  * Enroll this harness, and fake a service that starts, describes and ends a session.
  */
-function rejoinService(string $harness = 'cursor'): void
+function rejoinService(string $harness = 'cursor', int $startStatus = 201): void
 {
     $store = new RecordingStore;
     $store->put(REJOIN_SERVICE.'|'.$harness, new Credential('rcouncil_1|REJOIN-INSTALLATION'));
@@ -74,7 +87,9 @@ function rejoinService(string $harness = 'cursor'): void
 
     Http::fake([
         '*/api/sessions/*' => Http::response('', 204),
-        '*/api/sessions' => Http::response(['session_id' => REJOIN_SESSION, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'abilities' => []], 201),
+        '*/api/sessions' => $startStatus === 201
+            ? Http::response(['session_id' => REJOIN_SESSION, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'abilities' => []], 201)
+            : Http::response(['message' => 'no'], $startStatus),
         '*/api/agent/session' => Http::response(['fleet_can_direct' => true], 200),
         '*' => Http::response('', 200),
     ]);
@@ -187,7 +202,20 @@ it('rejoins with the recorded values under the same parent, and says so', functi
         ->and($starts[0]['repository'] ?? null)->toBe('org/repo')
         ->and($starts[0]['work_location'] ?? null)->toBe('repo-c')
         ->and($starts[0]['capacity'] ?? null)->toBe(2)
-        ->and($said)->toContain('robot-council: rejoining the fleet: this Cursor application joined before its bridge was restarted.');
+        ->and($said)->toContain('robot-council: rejoining the fleet: this Cursor application joined before its bridge was restarted.')
+        ->and($said)->toContain(McpCommand::REJOINED_NOTICE);
+});
+
+it('says it did not rejoin when the rejoin itself fails', function (): void {
+    rejoinService(startStatus: 500);
+    rejoinSeed();
+
+    $said = rejoinRun();
+
+    // The control is the attempt: it was made, so the notice is the failure's and not a mismatch's
+    expect(rejoinStarts())->toHaveCount(1)
+        ->and($said)->toContain('this bridge has not rejoined')
+        ->and($said)->not->toContain(McpCommand::REJOINED_NOTICE);
 });
 
 it('keeps the record through a harness stop, which ends the session it rejoined', function (): void {
@@ -208,7 +236,8 @@ it('does not rejoin under a different parent', function (int $pid, string $start
     $said = rejoinRun(parent: ['pid' => $pid, 'started' => $started]);
 
     expect(rejoinStarts())->toBeEmpty()
-        ->and($said)->not->toContain('rejoining');
+        ->and($said)->not->toContain('rejoining')
+        ->and($said)->toContain('A Cursor bridge joined the Robot Council fleet from this machine less than a minute ago, and this bridge has not rejoined');
 })->with([
     'another pid' => [4243, REJOIN_PARENT['started']],
     'another start time' => [4242, 'Mon Sep 28 10:00:01 2026'],
@@ -385,4 +414,62 @@ it('rejoins under the process that started it, end to end, and not under a stran
 
     expect($said)->not->toContain('rejoining')
         ->and($instructions)->toContain('A Cursor bridge joined the Robot Council fleet from this machine less than a minute ago');
+})->skipOnWindows();
+
+it('says how long ago the application was on the fleet', function (int $secondsAgo, string $says): void {
+    rejoinService();
+    rejoinSeedAged($secondsAgo);
+
+    expect(rejoinRun())->toContain('from this machine '.$says.', and this bridge has not rejoined');
+})->with([
+    'a minute' => [90, '1 minute ago'],
+    'several' => [5 * 60 + 10, '5 minutes ago'],
+    'just under a day' => [McpCommand::DROPPED_NOTICE_SECONDS - 60, '1439 minutes ago'],
+]);
+
+it('stops telling an application that has not rejoined for a day, and drops its record', function (): void {
+    rejoinService();
+    rejoinSeedAged(McpCommand::DROPPED_NOTICE_SECONDS + 60);
+
+    $said = rejoinRun();
+
+    expect($said)->not->toContain('this bridge has not rejoined')
+        ->and(rejoinRecordPath())->not->toBeFile();
+});
+
+it('does not rejoin beside a bridge that keeps its seat', function (): void {
+    rejoinService();
+    rejoinSeed();
+
+    // Another bridge of this application holding the seat, and not letting go
+    $holder = new PendingEvents(REJOIN_SERVICE, 'cursor');
+    expect($holder->claimSeat())->toBeTrue();
+
+    $said = rejoinRun();
+
+    expect(rejoinStarts())->toBeEmpty()
+        ->and($said)->toContain('another bridge is running')
+        ->and($said)->toContain('this bridge has not rejoined');
+});
+
+it('waits for the bridge it replaces to let go of the seat, then rejoins without a warning', function (): void {
+    rejoinService();
+    rejoinSeed();
+
+    // The bridge being replaced: it holds the seat for a moment, as a reload overlaps, then exits
+    $leaving = new Process(
+        [PHP_BINARY, '-r', 'require $argv[1]; $s = new App\Support\PendingEvents($argv[2], "cursor", null); echo $s->claimSeat() ? "held\n" : "refused\n"; usleep(500000);', base_path('vendor/autoload.php'), REJOIN_SERVICE],
+        null,
+        ['XDG_STATE_HOME' => $this->state],
+    );
+    $leaving->start();
+    $leaving->waitUntil(fn (string $type, string $output): bool => str_contains($output, 'held') || str_contains($output, 'refused'));
+
+    expect($leaving->getOutput())->toContain('held');
+
+    $said = rejoinRun();
+    $leaving->wait();
+
+    expect(rejoinStarts())->toHaveCount(1)
+        ->and($said)->not->toContain('another bridge is running');
 })->skipOnWindows();
