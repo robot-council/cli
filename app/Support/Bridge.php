@@ -141,7 +141,7 @@ final class Bridge
     /**
      * The type of the record left when this session's capacity moves after the join (#324).
      */
-    public const string CAPACITY_CHANGED = PendingEvents::LOCAL_PREFIX.'capacity-changed';
+    public const string CAPACITY_CHANGED = PendingEvents::CAPACITY_CHANGED;
 
     /**
      * How often to ask the service for this session's capacity, in seconds (#324).
@@ -1300,8 +1300,6 @@ final class Bridge
         // The schedules start at the join, since nothing was due while there was no session
         $this->nextHeartbeat = time() + $this->heartbeatSeconds;
         $this->nextCapacityCheck = time() + $this->capacitySeconds;
-        $this->reportedCapacity = null;
-        $this->unreadFrom = null;
 
         $this->fleetInstructions = $this->readFleetInstructions($joined->session);
 
@@ -1606,6 +1604,43 @@ final class Bridge
      *
      * @param  callable(string):void  $diagnostic  Where failures go.
      */
+    private function watcherHeartbeat(Session $session, callable $diagnostic): void
+    {
+        if (! $this->follower instanceof FleetFollower || $this->watcherUnsupported || time() < $this->nextWatcherBeat) {
+            return;
+        }
+
+        $this->nextWatcherBeat = time() + $this->heartbeatSeconds;
+
+        $status = $session->watcherHeartbeat();
+
+        if ($status === 404) {
+            $this->watcherUnsupported = true;
+
+            $diagnostic('This fleet does not accept a watcher heartbeat yet (robot-council/core#337), so its lane board will read this watcher as absent.');
+
+            return;
+        }
+
+        // **A 401 is not the watcher's to report; it is the renewal's to explain.** It means the
+        // session's token is refused, so it asks for the renewal the presence heartbeat would ask
+        // for -- the two are not always due in the same pass -- and the renewal says what happened.
+        // Saying it here too would put a status code in front of the reason (#165).
+        if ($status === 401) {
+            $this->renewalDue = true;
+        }
+
+        $failed = ($status < 200 || $status >= 300) && $status !== 401;
+
+        if ($failed && ! $this->watcherFailing) {
+            $diagnostic($status === 0
+                ? 'The watcher heartbeat could not be sent; the lane board will read this watcher as stale until one lands.'
+                : sprintf('The watcher heartbeat was refused (HTTP %d); the lane board will read this watcher as stale until one lands.', $status));
+        }
+
+        $this->watcherFailing = $failed;
+    }
+
     /**
      * Tell the agent when its capacity has moved since it was last told (#324).
      *
@@ -1615,7 +1650,8 @@ final class Bridge
      *
      * **A sink entry, like the session-ended record, rather than stderr alone**, because the agent
      * reads the sink and an operator rarely reads a harness's server log. `leaveNotice()` replaces
-     * an unread entry of the same type, so two changes between turns reach the agent as the latest.
+     * an unread entry of the same type, so two changes between turns reach the agent as one entry,
+     * from the value it last saw. The entry ends with the session (`PendingEvents::CAPACITY_CHANGED`).
      *
      * @param  callable(string):void  $diagnostic  Where anything else goes.
      */
@@ -1678,43 +1714,6 @@ final class Bridge
         $diagnostic($sentence);
 
         $this->reportedCapacity = $live;
-    }
-
-    private function watcherHeartbeat(Session $session, callable $diagnostic): void
-    {
-        if (! $this->follower instanceof FleetFollower || $this->watcherUnsupported || time() < $this->nextWatcherBeat) {
-            return;
-        }
-
-        $this->nextWatcherBeat = time() + $this->heartbeatSeconds;
-
-        $status = $session->watcherHeartbeat();
-
-        if ($status === 404) {
-            $this->watcherUnsupported = true;
-
-            $diagnostic('This fleet does not accept a watcher heartbeat yet (robot-council/core#337), so its lane board will read this watcher as absent.');
-
-            return;
-        }
-
-        // **A 401 is not the watcher's to report; it is the renewal's to explain.** It means the
-        // session's token is refused, so it asks for the renewal the presence heartbeat would ask
-        // for -- the two are not always due in the same pass -- and the renewal says what happened.
-        // Saying it here too would put a status code in front of the reason (#165).
-        if ($status === 401) {
-            $this->renewalDue = true;
-        }
-
-        $failed = ($status < 200 || $status >= 300) && $status !== 401;
-
-        if ($failed && ! $this->watcherFailing) {
-            $diagnostic($status === 0
-                ? 'The watcher heartbeat could not be sent; the lane board will read this watcher as stale until one lands.'
-                : sprintf('The watcher heartbeat was refused (HTTP %d); the lane board will read this watcher as stale until one lands.', $status));
-        }
-
-        $this->watcherFailing = $failed;
     }
 
     /**

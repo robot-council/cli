@@ -513,6 +513,9 @@ final class Session
      */
     public function liveCapacity(): ?int
     {
+        // Equivalent to no guard at all, for the reason `fleetCanDirect()` gives: without it,
+        // `request()` throws, the catch below answers the same null, and no request is sent.
+        // @pest-mutate-ignore: InstanceOfToTrue, RemoveEarlyReturn
         if (! $this->token instanceof Credential) {
             return null;
         }

@@ -27,10 +27,10 @@ use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
 
-const CAPACITY_SERVICE = 'https://fleet.example.test';
-const CAPACITY_INSTALLATION = 'rcouncil_1|CAPACITY-INSTALLATION-0123456789';
-const CAPACITY_INITIALIZE = '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}';
-const CAPACITY_INITIALIZED = '{"jsonrpc":"2.0","method":"notifications/initialized"}';
+const CAPACITY_CHANGE_SERVICE = 'https://fleet.example.test';
+const CAPACITY_CHANGE_INSTALLATION = 'rcouncil_1|CAPACITY-INSTALLATION-0123456789';
+const CAPACITY_CHANGE_INITIALIZE = '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}';
+const CAPACITY_CHANGE_INITIALIZED = '{"jsonrpc":"2.0","method":"notifications/initialized"}';
 
 /**
  * Fake the service, with the session starting at one capacity and `agent/session` answering others.
@@ -74,13 +74,13 @@ function capacityService(?int $atStart, array $live): void
  */
 function capacityBridge(int $capacitySeconds = 0, bool $channel = false): array
 {
-    $session = new Session(app(Factory::class), CAPACITY_SERVICE, new Credential(CAPACITY_INSTALLATION));
+    $session = new Session(app(Factory::class), CAPACITY_CHANGE_SERVICE, new Credential(CAPACITY_CHANGE_INSTALLATION));
     $session->start();
 
-    $pending = new PendingEvents(CAPACITY_SERVICE, 'claude', 'capacity-probe');
+    $pending = new PendingEvents(CAPACITY_CHANGE_SERVICE, 'claude', 'capacity-probe');
 
     return [
-        new Bridge($session, CAPACITY_SERVICE, follower: new FleetFollower($session, CAPACITY_SERVICE, $pending, 0), channel: $channel, capacitySeconds: $capacitySeconds),
+        new Bridge($session, CAPACITY_CHANGE_SERVICE, follower: new FleetFollower($session, CAPACITY_CHANGE_SERVICE, $pending, 0), channel: $channel, capacitySeconds: $capacitySeconds),
         $pending,
     ];
 }
@@ -202,8 +202,10 @@ it('reports each move once, from the value the agent last read', function (): vo
     capacityRun($bridge, $said);
     capacityRun($bridge, $said);
 
-    // One entry for one move, although the second read found the raised value again
-    expect(capacityEntries($pending))->toHaveCount(1);
+    // One report for one move, although the second read found the raised value again. Counted on
+    // stderr, because the sink could not tell: a second entry would have replaced the first.
+    expect(array_filter($said, fn (string $m): bool => str_contains($m, 'capacity')))->toHaveCount(1)
+        ->and(capacityEntries($pending))->toHaveCount(1);
 
     // The agent reads it, as the stop hook would
     $pending->drain();
@@ -286,10 +288,59 @@ it('wakes an idle Claude Code agent with a channel notice when the capacity move
     [$bridge] = capacityBridge(channel: true);
     $said = [];
 
-    $written = capacityRun($bridge, $said, [CAPACITY_INITIALIZE, CAPACITY_INITIALIZED]);
+    $written = capacityRun($bridge, $said, [CAPACITY_CHANGE_INITIALIZE, CAPACITY_CHANGE_INITIALIZED]);
 
     $notices = array_values(array_filter($written, fn (array $m): bool => ($m['method'] ?? null) === 'notifications/claude/channel'));
 
     expect($notices)->toHaveCount(1)
         ->and(data_get($notices, '0.params.meta'))->toBe(['new' => '1']);
+});
+
+it('reports from its own baseline when an earlier bridge left an entry unread', function (): void {
+    capacityService(atStart: 2, live: [3]);
+    [$bridge, $pending] = capacityBridge();
+    $said = [];
+
+    // The sink outlives the process that writes it, so an entry can be there before this bridge wrote any
+    $pending->leaveNotice(Bridge::CAPACITY_CHANGED, 'left by an earlier bridge');
+
+    capacityRun($bridge, $said);
+
+    expect(capacityEntries($pending))->toBe(["This session's capacity changed from 2 to 3, so it may now hold up to 3 tasks at once."]);
+});
+
+it('tries again when the entry could not be written, rather than moving on', function (): void {
+    capacityService(atStart: 1, live: [3, 3]);
+    [$bridge, $pending] = capacityBridge();
+    $said = [];
+
+    // The sink's directory cannot be made: a file stands where it would go
+    File::ensureDirectoryExists($this->state.'/robot-council');
+    File::put($this->state.'/robot-council/pending', 'in the way');
+
+    capacityRun($bridge, $said);
+
+    expect(implode("\n", $said))->not->toContain('capacity changed from');
+
+    File::delete($this->state.'/robot-council/pending');
+
+    capacityRun($bridge, $said);
+
+    expect(capacityEntries($pending))->toBe(["This session's capacity changed from 1 to 3, so it may now hold up to 3 tasks at once."]);
+});
+
+it('ends the entry with its session, and keeps the record the next session is owed', function (): void {
+    capacityService(atStart: 1, live: [3]);
+    [$bridge, $pending] = capacityBridge();
+    $said = [];
+
+    capacityRun($bridge, $said);
+    $pending->leaveNotice(Bridge::SESSION_ENDED, 'The fleet ended session 7.');
+
+    // What `mcp` does on the way out
+    $pending->clearFleetEvents();
+
+    // The control is the second entry: the clear kept a `bridge.` entry, so the capacity one was chosen
+    expect(capacityEntries($pending))->toBeEmpty()
+        ->and(array_column($pending->peek(), 'type'))->toBe([Bridge::SESSION_ENDED]);
 });
