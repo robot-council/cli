@@ -68,17 +68,18 @@ beforeEach(function (): void {
 it('forwards a message and writes the response back', function (): void {
     Http::fake([
         '*/api/sessions' => Http::response(['session_id' => 7, 'token' => FIRST_TOKEN, 'expires_in' => 3600], 201),
-        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}', 200),
+        '*/api/mcp' => Http::response('{"jsonrpc":"2.0","id":1,"result":{"resources":[]}}', 200),
     ]);
 
     $out = tmpfile();
 
+    // Not `tools/list`, to which the bridge adds its own `leave` (#336): this is the relay, byte for byte
     new Bridge(startedSession(), BRIDGE_SERVICE)
-        ->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"), $out, fn (string $m): null => null);
+        ->run(streamOf("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\"}\n"), $out, fn (string $m): null => null);
 
     rewind($out);
 
-    expect(trim((string) stream_get_contents($out)))->toBe('{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}');
+    expect(trim((string) stream_get_contents($out)))->toBe('{"jsonrpc":"2.0","id":1,"result":{"resources":[]}}');
 });
 
 it('carries the session token, never the installation credential', function (): void {
@@ -421,7 +422,8 @@ it('answers a call refused, renewed and refused again, and keeps relaying', func
         ])
 
         // Still relaying: the next call reached the fleet and its answer came back.
-        ->and($replies[1])->toBe(['jsonrpc' => '2.0', 'id' => 2, 'result' => ['tools' => []]]);
+        ->and($replies[1]['id'])->toBe(2)
+        ->and(data_get($replies[1], 'result.tools.*.name'))->toBe(['leave']);
 });
 
 it('answers a call whose request never reached the fleet', function (): void {
@@ -490,7 +492,12 @@ it('keeps the first page of tools when a later page fails', function (): void {
     new Bridge(startedSession(), BRIDGE_SERVICE)
         ->run(streamOf('{"jsonrpc":"2.0","id":1,"method":"tools/list"}'."\n"), $out, fn (string $m): null => null);
 
-    expect(bridgeReplies($out))->toBe([json_decode($first, true)])
+    // Page one as the fleet sent it, cursor and all, with the bridge's own `leave` after its tools (#336)
+    $replies = bridgeReplies($out);
+
+    expect($replies)->toHaveCount(1)
+        ->and(data_get($replies[0], 'result.tools.*.name'))->toBe(['task_list', 'leave'])
+        ->and(data_get($replies[0], 'result.nextCursor'))->toBe('p2')
         ->and($pages)->toBe(2);
 });
 

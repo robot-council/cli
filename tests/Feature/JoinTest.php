@@ -209,8 +209,8 @@ it("joins when join is called, says so, and then lists the fleet's tools", funct
         // Told the list changed, which is what makes the harness re-read it
         ->and($methods)->toContain('notifications/tools/list_changed')
 
-        // And the re-read is the fleet's list, relayed
-        ->and(data_get(joinReplyTo($written, 3), 'result.tools.*.name'))->toBe(['task_list', 'directive_post']);
+        // And the re-read is the fleet's list, relayed, with the bridge's own `leave` (#336)
+        ->and(data_get(joinReplyTo($written, 3), 'result.tools.*.name'))->toBe(['task_list', 'directive_post', 'leave']);
 });
 
 it('sends the list-changed notice before the join result, the order the harnesses were measured in', function (): void {

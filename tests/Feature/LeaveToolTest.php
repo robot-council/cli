@@ -26,14 +26,19 @@ use Illuminate\Support\Facades\Http;
 
 const LEAVE_SERVICE = 'https://leave.example.test';
 const LEAVE_PARENT = ['pid' => 4242, 'started' => 'Mon Sep 28 10:00:00 2026'];
+const LEAVE_INITIALIZE = '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}';
+const LEAVE_INITIALIZED = '{"jsonrpc":"2.0","method":"notifications/initialized"}';
 
 /**
- * Fake a service that starts sessions 61, 62, ... and answers the fleet's MCP endpoint.
+ * Fake a service that starts sessions 61 and 62, and answers the fleet's MCP endpoint.
+ *
+ * @param  int  $endStatus  What ending a session answers.
+ * @param  list<string>  $fleetTools  The tools the fleet lists.
  */
-function leaveService(): void
+function leaveService(int $endStatus = 204, array $fleetTools = ['task_list']): void
 {
     Http::fake([
-        '*/api/sessions/*' => Http::response('', 204),
+        '*/api/sessions/*' => Http::response('', $endStatus),
         '*/api/sessions' => Http::sequence()
             ->push(['session_id' => 61, 'token' => 'rcouncil_2|A', 'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => []], 201)
             ->push(['session_id' => 62, 'token' => 'rcouncil_2|B', 'expires_in' => 3600, 'feed_cursor' => 1, 'abilities' => []], 201),
@@ -44,7 +49,7 @@ function leaveService(): void
             'id' => data_get(json_decode($request->body(), true), 'id'),
             'result' => data_get(json_decode($request->body(), true), 'method') === 'initialize'
                 ? ['protocolVersion' => '2025-11-25', 'capabilities' => ['tools' => new stdClass]]
-                : ['tools' => [['name' => 'task_list', 'inputSchema' => ['type' => 'object', 'properties' => new stdClass]]]],
+                : ['tools' => array_map(fn (mixed $name): array => ['name' => $name, 'inputSchema' => ['type' => 'object', 'properties' => new stdClass]], $fleetTools)],
         ]), 200),
         '*' => Http::response('', 200),
     ]);
@@ -67,7 +72,7 @@ function leaveRecord(): JoinRecord
  * @param  list<string>  $said  Where its stderr lines are collected.
  * @return list<array<array-key, mixed>>
  */
-function leaveRun(array $lines, array &$said = []): array
+function leaveRun(array $lines, array &$said = [], string &$raw = '', ?string $sharedSink = null): array
 {
     $join = function (array $arguments): Joined {
         $session = new Session(app(Factory::class), LEAVE_SERVICE, new Credential('rcouncil_1|LEAVE-INSTALLATION'));
@@ -81,16 +86,17 @@ function leaveRun(array $lines, array &$said = []): array
     rewind($in);
     $out = tmpfile();
 
-    new Bridge(null, LEAVE_SERVICE, join: $join, joinRecord: leaveRecord())
+    new Bridge(null, LEAVE_SERVICE, join: $join, sharedSink: $sharedSink, joinRecord: leaveRecord())
         ->run($in, $out, function (string $m) use (&$said): void {
             $said[] = $m;
         });
 
     rewind($out);
 
+    $raw = (string) stream_get_contents($out);
     $written = [];
 
-    foreach (explode("\n", trim((string) stream_get_contents($out))) as $line) {
+    foreach (explode("\n", trim($raw)) as $line) {
         $decoded = json_decode($line, true);
 
         expect($decoded)->toBeArray("stdout carried a line that is not a protocol message: {$line}");
@@ -203,9 +209,16 @@ it('ends the session, clears the fleet events, forgets the join record, and offe
     leaveSink()->leaveNotice(Bridge::SESSION_ENDED, 'The fleet ended session 60.');
     leaveSink()->leaveNotice(Bridge::CAPACITY_CHANGED, 'capacity moved');
 
-    $written = leaveRun([leaveCall(1, 'join'), leaveCall(2, 'leave'), leaveList(3)]);
+    $written = leaveRun([LEAVE_INITIALIZE, LEAVE_INITIALIZED, leaveCall(1, 'join'), leaveCall(2, 'leave'), leaveList(3)]);
 
-    expect(data_get(leaveReply($written, 2), 'result.isError'))->toBeFalse()
+    // The list-changed notice comes before the reply, as it does for `join` (#126)
+    $order = array_map(fn (array $m): mixed => $m['method'] ?? 'reply-'.json_encode($m['id'] ?? null), $written);
+    $leaveReply = array_search('reply-2', $order, true);
+    $lastNotice = array_search('notifications/tools/list_changed', array_reverse($order, true), true);
+
+    expect($leaveReply)->toBeInt()
+        ->and($lastNotice)->toBeInt()->toBeLessThan((int) $leaveReply)
+        ->and(data_get(leaveReply($written, 2), 'result.isError'))->toBeFalse()
         ->and(data_get(leaveReply($written, 2), 'result.content.0.text'))->toBeString()->toContain('Left the fleet: session 61 ended')
         ->and(leaveToolNames($written, 3))->toBe(['join'])
         ->and(array_column($written, 'method'))->toContain('notifications/tools/list_changed')
@@ -305,4 +318,61 @@ it('starts a rejoined session from its own capacity, not the one that left', fun
     // Session 62 started at 3 and reads 3: no change, although session 61's baseline was 1
     expect(implode("\n", $said))->not->toContain('capacity changed')
         ->and(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/api/agent/session'))->count())->toBeGreaterThanOrEqual(2);
+});
+
+it('lists leave with an input schema whose properties are an object, not a list', function (): void {
+    leaveService();
+
+    $raw = '';
+    $said = [];
+    leaveRun([leaveCall(1, 'join'), leaveList(2)], $said, $raw);
+
+    // Read from the raw line: decoding to arrays would make `{}` and `[]` look the same
+    expect($raw)->toContain('{"name":"leave","title":"Leave the fleet"')
+        ->and($raw)->toMatch('/"name":"leave".*"inputSchema":\{"type":"object","properties":\{\},"additionalProperties":false\}/');
+});
+
+it('says the fleet did not confirm when the end was not taken, and still leaves', function (): void {
+    leaveService(endStatus: 500);
+
+    $written = leaveRun([leaveCall(1, 'join'), leaveCall(2, 'leave'), leaveList(3)]);
+
+    expect(data_get(leaveReply($written, 2), 'result.isError'))->toBeTrue()
+        ->and(data_get(leaveReply($written, 2), 'result.content.0.text'))->toBeString()->toContain('the fleet did not confirm that session 61 ended')
+        ->and(leaveToolNames($written, 3))->toBe(['join']);
+});
+
+it('keeps the sink when another bridge shares it', function (): void {
+    leaveService();
+    leaveSink()->add([['id' => 9, 'type' => 'directive', 'body' => 'for the other bridge']]);
+
+    leaveRun([leaveCall(1, 'join'), leaveCall(2, 'leave')], sharedSink: 'another bridge is running in this checkout (pid 1)');
+
+    expect(array_column(leaveSink()->peek(), 'id'))->toContain(9);
+});
+
+it('does not invite the agent to rejoin when it calls a fleet tool after leaving', function (): void {
+    leaveService();
+
+    $written = leaveRun([leaveCall(1, 'join'), leaveCall(2, 'leave'), leaveCall(3, 'task_list'), leaveCall(4, 'join'), leaveCall(5, 'task_list')]);
+
+    expect(data_get(leaveReply($written, 3), 'error.message'))->toBe("This session left the fleet at the operator's request. Call `join` only if the operator asks to rejoin.")
+
+        // Joined again, the call reaches the fleet
+        ->and(data_get(leaveReply($written, 5), 'error'))->toBeNull()
+        ->and(leaveReply($written, 5))->not->toBeNull();
+
+    // And a bridge that never left keeps the ordinary wording
+
+    $fresh = leaveRun([leaveCall(1, 'task_list')]);
+
+    expect(data_get(leaveReply($fresh, 1), 'error.message'))->toBe('This bridge has not joined the fleet. Call the `join` tool first.');
+});
+
+it('lists leave once when the fleet already lists its own', function (): void {
+    leaveService(fleetTools: ['task_list', 'leave']);
+
+    $written = leaveRun([leaveCall(1, 'join'), leaveList(2)]);
+
+    expect(leaveToolNames($written, 2))->toBe(['task_list', 'leave']);
 });

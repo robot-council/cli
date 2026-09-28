@@ -290,6 +290,14 @@ final class Bridge
     private ?string $startNotice = null;
 
     /**
+     * Whether this bridge's session left through `leave`, and it has not joined since (#336).
+     *
+     * So a call to a fleet tool the harness still lists is answered in a way that does not invite
+     * the agent to rejoin against an operator who just asked to leave.
+     */
+    private bool $left = false;
+
+    /**
      * Tell the agent something about how this bridge came up, in the instructions it reads at connect.
      *
      * Set by the command before the loop starts, once it knows whether a restarted Cursor bridge
@@ -699,7 +707,9 @@ final class Bridge
         try {
             $response = $this->exchange($session, $message);
 
-            $this->reply($message, $this->withLeaveTool($message, $this->everyTool($session, $message, $response)), $out, $diagnostic);
+            $listed = $this->withLeaveTool($message, $this->everyTool($session, $message, $response));
+
+            $this->reply($message, $listed, $out, $diagnostic);
         } catch (SessionHasGone $gone) {
             // **The busy bridge's path to the same news.** A tool call is refused, the renewal
             // `exchange()` makes answers `409`, and there is nothing to retry: this session's
@@ -1125,7 +1135,9 @@ final class Bridge
 
             // A notification needs no answer, and one about a session that does not exist has
             // nothing to act on
-            default => $id === null ? null : $this->error($out, $id, -32002, 'This bridge has not joined the fleet. Call the `join` tool first.'),
+            default => $id === null ? null : $this->error($out, $id, -32002, $this->left
+                ? "This session left the fleet at the operator's request. Call `join` only if the operator asks to rejoin."
+                : 'This bridge has not joined the fleet. Call the `join` tool first.'),
         };
 
         return true;
@@ -1258,8 +1270,8 @@ final class Bridge
             'name' => self::LEAVE_TOOL,
             'title' => 'Leave the fleet',
             'description' => 'Take this session off the Robot Council fleet, when the operator asks for it. The fleet ends the '
-                .'session and releases the tasks and locks it held, and this bridge goes back to offering `join` alone, so the '
-                .'operator can rejoin later without restarting anything.',
+                .'session and releases the tasks and locks it held on its next sweep, and this bridge goes back to offering '
+                .'`join` alone, so the operator can rejoin later without restarting anything.',
             'inputSchema' => ['type' => 'object', 'properties' => new stdClass, 'additionalProperties' => false],
         ];
     }
@@ -1273,6 +1285,7 @@ final class Bridge
      *
      * @param  string  $message  The harness's request.
      * @param  string  $reply  What is about to be relayed for it.
+     * @return string The reply to write.
      */
     private function withLeaveTool(string $message, string $reply): string
     {
@@ -1295,6 +1308,13 @@ final class Bridge
             return $reply;
         }
 
+        // A fleet that one day lists its own `leave` keeps it listed once; the bridge still answers the call
+        foreach ($result->tools as $tool) {
+            if ($tool instanceof stdClass && ($tool->name ?? null) === self::LEAVE_TOOL) {
+                return $reply;
+            }
+        }
+
         $result->tools = [...$result->tools, json_decode((string) json_encode($this->leaveTool()))];
 
         $encoded = json_encode($answer, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
@@ -1315,14 +1335,21 @@ final class Bridge
      * to the session that left.
      *
      * @param  resource  $out  Where protocol messages go.
+     * @param  mixed  $id  The request's id.
      * @param  callable(string):void  $diagnostic  Where anything else goes.
      */
     private function callLeave($out, mixed $id, callable $diagnostic): void
     {
         $sessionId = $this->session?->id();
 
-        $this->session?->end();
-        $this->follower?->pending()->clearFleetEvents($diagnostic);
+        $ended = $this->session?->end() ?? true;
+
+        // **Not while another bridge shares this sink** (#320): its unread events are in the same
+        // file, and the process this one is leaving from is not exiting
+        if ($this->sharedSink === null) {
+            $this->follower?->pending()->clearFleetEvents($diagnostic);
+        }
+
         $this->joinRecord?->forget();
 
         $this->session = null;
@@ -1337,18 +1364,25 @@ final class Bridge
         $this->roleChanged = false;
         $this->renewalDue = false;
         $this->watcherFailing = false;
+        $this->nextWatcherBeat = 0;
+        $this->nextRenewAttempt = 0;
+        $this->left = true;
 
-        $sentence = \sprintf(
-            'Left the fleet: %s ended, and the fleet releases the tasks and locks it held. Only `join` is offered now.',
-            $sessionId === null ? 'the session' : 'session '.$sessionId
-        );
+        $named = $sessionId === null ? 'the session' : 'session '.$sessionId;
+
+        $sentence = $ended
+            ? \sprintf('Left the fleet: %s ended, and the fleet releases the tasks and locks it held on its next sweep. Only `join` is offered now.', $named)
+            : \sprintf('Left the fleet, but the fleet did not confirm that %s ended: it holds its tasks and locks until its presence sweep marks it gone, within half an hour. Only `join` is offered now.', $named);
 
         $diagnostic($sentence);
 
-        $this->toolResult($out, $id, $sentence, false);
+        // Before the result, as `join` does (#126): the harness re-reads the list at once, so the
+        // agent's next call in this turn is not made against the fleet's tools
+        if ($this->initialized) {
+            $this->notifyListChanged($out);
+        }
 
-        // The harness holds the joined list, with every fleet tool in it: this makes it ask again
-        $this->notifyListChanged($out);
+        $this->toolResult($out, $id, $sentence, ! $ended);
     }
 
     /**
@@ -1446,6 +1480,7 @@ final class Bridge
 
         $this->session = $joined->session;
         $this->follower = $joined->follower;
+        $this->left = false;
 
         // For the bridge Cursor starts in this one's place, which rejoins only under the same parent (#333)
         $this->joinRecord?->remember($arguments);
