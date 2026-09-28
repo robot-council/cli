@@ -139,6 +139,22 @@ final class Bridge
     public const string SESSION_ENDED = PendingEvents::LOCAL_PREFIX.'session-ended';
 
     /**
+     * The type of the record left when this session's capacity moves after the join (#324).
+     */
+    public const string CAPACITY_CHANGED = PendingEvents::LOCAL_PREFIX.'capacity-changed';
+
+    /**
+     * How often to ask the service for this session's capacity, in seconds (#324).
+     *
+     * **Its own schedule, not the heartbeat's.** Core's heartbeat answers with the session's
+     * presence and nothing else, so learning the capacity costs a separate `GET agent/session`. A
+     * cap is raised by a person in the seat settings and read by an agent deciding what to take on
+     * next, so five minutes is soon enough, and at one request per bridge per five minutes a machine
+     * running twenty seats adds four a minute to the installation's traffic.
+     */
+    public const int CAPACITY_CHECK_SECONDS = 300;
+
+    /**
      * The roles `join` may ask for, as `robot-council/core`'s `Access\\Role` names them.
      *
      * A copy rather than a lookup, because `core` is not a dependency of this package. The service
@@ -228,6 +244,7 @@ final class Bridge
      *                          decides what a channel notice tells the agent to do (#306).
      * @param  string|null  $sharedSink  The warning to repeat when another bridge holds this sink's
      *                                   seat, or null when this bridge holds it (#320).
+     * @param  int  $capacitySeconds  How long to wait between reads of the session's capacity (#324).
      *
      * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -255,6 +272,7 @@ final class Bridge
         private readonly ?KeepWarm $keepWarm = null,
         private readonly bool $stopHook = true,
         private readonly ?string $sharedSink = null,
+        private readonly int $capacitySeconds = self::CAPACITY_CHECK_SECONDS,
     ) {}
 
     /**
@@ -347,6 +365,29 @@ final class Bridge
      * `notifications/initialized`, so a batch written then would otherwise never be announced.
      */
     private int $unannounced = 0;
+
+    /**
+     * When the session's capacity is next read, as a Unix timestamp (#324).
+     */
+    private int $nextCapacityCheck = 0;
+
+    /**
+     * The capacity the agent was last told, or null until the first read after the join.
+     *
+     * **Taken from the session start, not from the first live read**, because the start is what the
+     * join result reported: a cap raised between the join and the first read is a change the agent
+     * has not heard about, and a baseline taken from that read would swallow it. A start that
+     * reported none counts as one, which is what an agent holding no declared capacity plans on.
+     */
+    private ?int $reportedCapacity = null;
+
+    /**
+     * What the latest capacity entry reported its change from, or null before the first.
+     *
+     * While that entry is unread this is what the agent last saw, so a second change before the
+     * agent reads the first is reported from here rather than from a value it was never given.
+     */
+    private ?int $unreadFrom = null;
 
     /**
      * The sink as the last notice left it, or null when nothing announced is still waiting.
@@ -493,6 +534,7 @@ final class Bridge
     public function run($in, $out, callable $diagnostic): void
     {
         $this->nextHeartbeat = time() + $this->heartbeatSeconds;
+        $this->nextCapacityCheck = time() + $this->capacitySeconds;
 
         stream_set_blocking($in, false);
 
@@ -1257,6 +1299,9 @@ final class Bridge
 
         // The schedules start at the join, since nothing was due while there was no session
         $this->nextHeartbeat = time() + $this->heartbeatSeconds;
+        $this->nextCapacityCheck = time() + $this->capacitySeconds;
+        $this->reportedCapacity = null;
+        $this->unreadFrom = null;
 
         $this->fleetInstructions = $this->readFleetInstructions($joined->session);
 
@@ -1561,6 +1606,80 @@ final class Bridge
      *
      * @param  callable(string):void  $diagnostic  Where failures go.
      */
+    /**
+     * Tell the agent when its capacity has moved since it was last told (#324).
+     *
+     * **The join result says the capacity once, and a seat's cap can be raised live.** Core reads
+     * the cap on every request, so a developer who raises it changes what a coordinator may place
+     * on a running session, while the agent goes on planning by what it was told at the join.
+     *
+     * **A sink entry, like the session-ended record, rather than stderr alone**, because the agent
+     * reads the sink and an operator rarely reads a harness's server log. `leaveNotice()` replaces
+     * an unread entry of the same type, so two changes between turns reach the agent as the latest.
+     *
+     * @param  callable(string):void  $diagnostic  Where anything else goes.
+     */
+    private function checkCapacity(Session $session, callable $diagnostic): void
+    {
+        if (time() < $this->nextCapacityCheck) {
+            return;
+        }
+
+        $this->nextCapacityCheck = time() + $this->capacitySeconds;
+
+        $this->reportedCapacity ??= $session->capacity() ?? 1;
+
+        $live = $session->liveCapacity();
+
+        // Unknown is not a change: an older service, or a read that failed, leaves the baseline alone
+        if ($live === null || $live === $this->reportedCapacity) {
+            return;
+        }
+
+        $pending = $this->follower?->pending();
+
+        // **From what the agent was last TOLD, not what was last written.** `leaveNotice()` replaces
+        // an unread entry of this type, so a second change before the agent reads the first must
+        // still start from the value the agent last saw, or it reports a move from a number the
+        // agent was never given.
+        $unread = $pending instanceof PendingEvents && array_any(
+            $pending->peek(),
+            static fn (array $event): bool => ($event['type'] ?? null) === self::CAPACITY_CHANGED
+        );
+
+        $from = $unread && $this->unreadFrom !== null ? $this->unreadFrom : $this->reportedCapacity;
+
+        $sentence = $from === $live
+            ? \sprintf("This session's capacity changed and changed back: it is %d again.", $live)
+            : \sprintf(
+                "This session's capacity changed from %d to %d, so it may now hold up to %d %s at once.",
+                $from,
+                $live,
+                $live,
+                $live === 1 ? 'task' : 'tasks'
+            );
+
+        if ($pending instanceof PendingEvents) {
+            try {
+                $pending->leaveNotice(self::CAPACITY_CHANGED, $sentence);
+            } catch (Throwable $failure) {
+                // Not recorded, so not moved on from: the next read finds the same change and tries again
+                $diagnostic($failure->getMessage());
+
+                return;
+            }
+
+            // Announced like a delivered event, so a channel wakes an idle agent to read it
+            $this->unannounced++;
+        }
+
+        $this->unreadFrom = $from;
+
+        $diagnostic($sentence);
+
+        $this->reportedCapacity = $live;
+    }
+
     private function watcherHeartbeat(Session $session, callable $diagnostic): void
     {
         if (! $this->follower instanceof FleetFollower || $this->watcherUnsupported || time() < $this->nextWatcherBeat) {
@@ -1637,6 +1756,8 @@ final class Bridge
         }
 
         $this->watcherHeartbeat($session, $diagnostic);
+
+        $this->checkCapacity($session, $diagnostic);
 
         // Read before the renewal rather than after it: a renewal that throws is caught below and
         // backed off, and putting the feed after it would make a service that refuses renewals also
