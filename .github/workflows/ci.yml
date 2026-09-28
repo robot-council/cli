@@ -18,7 +18,10 @@ jobs:
   # `prefer-lowest` cell, because nothing here is installed into somebody else's dependency graph.
   tests:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # **Twenty, not ten** (#339). The Windows cells ran 487-570s on the commits before a passing run
+    # was cancelled at 604s, so every change that adds tests was one away from a red `ci-passed`.
+    # The bound is there to stop a hung run, not to budget a healthy one.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
