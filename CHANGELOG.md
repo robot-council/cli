@@ -4,6 +4,13 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.30 — An Agent Hears Its Capacity Change (2026-09-28)
+
+A running agent now hears when its seat's capacity is raised or lowered, without rejoining.
+
+### What's new
+- Tell an agent when its seat capacity changes after it joins [#334](https://github.com/robot-council/cli/pull/334)
+
 ## v0.4.29 — The Wiki Becomes the Documentation (2026-09-26)
 
 The wiki becomes the documentation for the command line, and the README an overview that links to it.
