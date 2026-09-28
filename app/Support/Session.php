@@ -254,24 +254,36 @@ final class Session
      * **Never throws.** It is called from a `finally`, so an exception here would replace whatever
      * actually went wrong with a failure to clean up after it -- and the caller would lose the real
      * reason. A session that could not be ended is swept by `core` on its presence threshold.
+     *
+     * **It says whether the fleet took the end**, for the one caller that tells someone: `leave`
+     * reports it to the agent, and must not claim a session ended that is still holding its work
+     * (#336). A `404` counts as taken, since the session is already gone. Either way the session is
+     * forgotten here, so nothing retries with a token the service may already have deleted.
+     *
+     * @return bool Whether the service accepted the end, or there was nothing to end.
      */
-    public function end(): void
+    public function end(): bool
     {
         if ($this->id === null || ! $this->token instanceof Credential) {
-            return;
+            return true;
         }
 
         try {
-            $this->http
+            $response = $this->http
                 ->acceptJson()
                 ->withToken($this->installation->reveal())
                 ->delete($this->service.'/robot-council/api/sessions/'.$this->id);
+
+            $accepted = $response->successful() || $response->status() === 404;
         } catch (Throwable) {
             // Deliberately swallowed. See above.
+            $accepted = false;
         }
 
         $this->id = null;
         $this->token = null;
+
+        return $accepted;
     }
 
     /**
