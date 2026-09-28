@@ -245,6 +245,9 @@ final class Bridge
      * @param  string|null  $sharedSink  The warning to repeat when another bridge holds this sink's
      *                                   seat, or null when this bridge holds it (#320).
      * @param  int  $capacitySeconds  How long to wait between reads of the session's capacity (#324).
+     * @param  JoinRecord|null  $joinRecord  Where a join is recorded for the bridge that replaces
+     *                                       this one, or null to record nothing, which is every
+     *                                       harness but Cursor (#333).
      *
      * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -273,7 +276,24 @@ final class Bridge
         private readonly bool $stopHook = true,
         private readonly ?string $sharedSink = null,
         private readonly int $capacitySeconds = self::CAPACITY_CHECK_SECONDS,
+        private readonly ?JoinRecord $joinRecord = null,
     ) {}
+
+    /**
+     * What the agent is told at connect about how this bridge came up, or null for nothing (#333).
+     */
+    private ?string $startNotice = null;
+
+    /**
+     * Tell the agent something about how this bridge came up, in the instructions it reads at connect.
+     *
+     * Set by the command before the loop starts, once it knows whether a restarted Cursor bridge
+     * rejoined or only found that its application had been on the fleet (#333).
+     */
+    public function tellAtConnect(string $notice): void
+    {
+        $this->startNotice = $notice;
+    }
 
     /**
      * When the next heartbeat is due, as a Unix timestamp.
@@ -483,6 +503,9 @@ final class Bridge
             .'a new session needs a new bridge.',
             $id === null ? 'The fleet ended this session' : 'The fleet ended session '.$id
         );
+
+        // The fleet decided this session should end, so a replacement bridge must not rejoin it (#333)
+        $this->joinRecord?->forget();
 
         if ($pending instanceof PendingEvents) {
             try {
@@ -1133,6 +1156,10 @@ final class Bridge
             $instructions[] = 'Tell your operator: '.$this->sharedSink;
         }
 
+        if ($this->startNotice !== null) {
+            $instructions[] = $this->startNotice;
+        }
+
         return [
             // The harness's own version when it is one this bridge knows: `2025-11-25` from both
             // Claude Code and Cursor
@@ -1296,6 +1323,9 @@ final class Bridge
 
         $this->session = $joined->session;
         $this->follower = $joined->follower;
+
+        // For the bridge Cursor starts in this one's place, which rejoins only under the same parent (#333)
+        $this->joinRecord?->remember($arguments);
 
         // The schedules start at the join, since nothing was due while there was no session
         $this->nextHeartbeat = time() + $this->heartbeatSeconds;

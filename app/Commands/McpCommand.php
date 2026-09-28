@@ -7,15 +7,19 @@ namespace App\Commands;
 use App\Support\Bridge;
 use App\Support\Credentials\Credentials;
 use App\Support\FleetJoin;
+use App\Support\JoinRecord;
 use App\Support\KeepWarm;
 use App\Support\MachineIdentity;
+use App\Support\ParentProcess;
 use App\Support\PendingEvents;
+use App\Support\Session;
 use App\Support\Stderr;
 use App\Support\StdinReader;
 use App\Support\StopHooks;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Http\Client\Factory;
+use Illuminate\Support\Sleep;
 use LaravelZero\Framework\Commands\Command;
 use RuntimeException;
 use Throwable;
@@ -46,6 +50,27 @@ use Throwable;
 final class McpCommand extends Command
 {
     /**
+     * What the agent reads at connect when a restarted Cursor bridge has rejoined by itself (#333).
+     */
+    public const string REJOINED_NOTICE = 'This Cursor application was on the Robot Council fleet before Cursor '
+        .'restarted its bridge, and the bridge has rejoined it as it was, with the repository, work location, role '
+        .'and capacity of the earlier join. It is a new fleet session: tasks and locks the earlier one held were released. '
+        .'Tell your operator on your next turn.';
+
+    /**
+     * How long a rejoin waits for the bridge it replaces to let go of the seat (#333).
+     *
+     * Measured on Cursor 3.17.19: the old bridge was stopped 58ms before the new one was spawned,
+     * and ending a session is one request. Two seconds is ample and still short beside a reload.
+     */
+    public const int REJOIN_SEAT_WAIT_MILLISECONDS = 2000;
+
+    /**
+     * How long after a join an application that has not rejoined is still told about it (#333).
+     */
+    public const int DROPPED_NOTICE_SECONDS = 86400;
+
+    /**
      * Run the bridge until stdin closes or a signal arrives.
      *
      * **No session until somebody joins (cli#127).** The bridge comes up, answers the handshake,
@@ -58,7 +83,7 @@ final class McpCommand extends Command
      * @param  Credentials  $credentials  Where the installation credential lives.
      * @return int The exit code.
      */
-    public function handle(Factory $http, Credentials $credentials): int
+    public function handle(Factory $http, Credentials $credentials, ParentProcess $parent): int
     {
         $service = $this->resolveService();
 
@@ -102,7 +127,27 @@ final class McpCommand extends Command
         // the seat held after this process was killed, for as long as the harness kept stdin open.
         // Close-on-exec covers this on POSIX (`SeatTest`); the order is what covers Windows
         $seat = new PendingEvents($service, $harness, $this->stringOption('project'));
-        $sharedSink = $this->sharedSinkWarning($seat);
+
+        // **Cursor only, and only when named** (#333). Cursor restarts its MCP servers by itself and
+        // each stop ends the session, so a Cursor seat needs a record to rejoin from. No other
+        // harness restarts the bridge under a live session, and none gets one: joining stays the
+        // agent's act there. Named rather than detected, because the detector reads `CURSOR_AGENT`
+        // before `CLAUDECODE`, so Claude Code started from a Cursor terminal detects as `cursor`;
+        // the Cursor wiring names it (`ROBOT_COUNCIL_HARNESS=cursor` in `mcp.json`).
+        $record = MachineIdentity::namedHarness($this->stringOption('harness')) === 'cursor'
+            ? new JoinRecord($seat->joinRecordPath(), $parent->identity())
+            : null;
+
+        // Not with `--auto-join`, which joins anyway and with what its own options say
+        $recalled = $this->option('auto-join') === true ? null : $record?->recall();
+        $sameParent = $record instanceof JoinRecord && $recalled !== null && $record->sameParent($recalled['parent']);
+
+        // **A reload overlaps the bridge it replaces**, which is still ending its session and
+        // clearing the sink when this one starts. Rejoining before it has gone would warn of a
+        // second bridge that is on its way out, and let its clearing take this session's first
+        // events. So a rejoin waits for the seat, briefly; a seat still held after that is a bridge
+        // that is not leaving, and nothing rejoins beside it.
+        $sharedSink = $this->sharedSinkWarning($seat, $sameParent ? self::REJOIN_SEAT_WAIT_MILLISECONDS : 0);
 
         $bridge = new Bridge(
             null,
@@ -116,7 +161,22 @@ final class McpCommand extends Command
             keepWarm: $this->keepWarm($service, $harness),
             stopHook: $this->stopHookDelivers($harness),
             sharedSink: $sharedSink,
+            joinRecord: $record,
         );
+
+        $rejoin = null;
+
+        if ($record instanceof JoinRecord && $recalled !== null) {
+            if ($sameParent && $sharedSink === null) {
+                $rejoin = $recalled['arguments'];
+            } elseif (time() - $recalled['joined_at'] > self::DROPPED_NOTICE_SECONDS) {
+                // Old news: an operator who quit Cursor to stay off the fleet is not told on every launch
+                $record->forget();
+            } else {
+                // A quit and relaunch, or another Cursor: tell, and never join (#321's option A)
+                $this->tellAtConnect($bridge, $this->droppedNotice($recalled['joined_at']));
+            }
+        }
 
         if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
             // A role is asked for at the join, and without `--auto-join` this process does not join
@@ -144,6 +204,14 @@ final class McpCommand extends Command
                     'work_location' => null,
                     'capacity' => $capacity,
                 ], $this->diagnostic(...));
+            } elseif ($rejoin !== null) {
+                $this->diagnostic('rejoining the fleet: this Cursor application joined before its bridge was restarted.');
+
+                $bridge->joinNow($rejoin, $this->diagnostic(...));
+
+                $this->tellAtConnect($bridge, $bridge->session() instanceof Session
+                    ? self::REJOINED_NOTICE
+                    : $this->droppedNotice($recalled['joined_at'] ?? time()));
             }
 
             $bridge->run($reader->stream(), STDOUT, $this->diagnostic(...));
@@ -216,12 +284,21 @@ final class McpCommand extends Command
      * the agent hears it at connect and at the join.
      *
      * @param  PendingEvents  $seat  The sink this bridge will write, keyed as the join keys it.
+     * @param  int  $waitMilliseconds  How long to keep trying for a seat another bridge holds (#333).
      * @return string|null The warning, or null when this bridge holds the seat.
      */
-    private function sharedSinkWarning(PendingEvents $seat): ?string
+    private function sharedSinkWarning(PendingEvents $seat, int $waitMilliseconds = 0): ?string
     {
-        if ($seat->claimSeat()) {
-            return null;
+        for ($waited = 0; ; $waited += 100) {
+            if ($seat->claimSeat()) {
+                return null;
+            }
+
+            if ($waited >= $waitMilliseconds) {
+                break;
+            }
+
+            Sleep::for(100)->milliseconds();
         }
 
         $holder = $seat->seatHolder();
@@ -336,6 +413,33 @@ final class McpCommand extends Command
                 $bridge->stop();
             });
         }
+    }
+
+    /**
+     * What the agent reads at connect when its application was on the fleet and has not rejoined (#333).
+     *
+     * @param  int  $joinedAt  When the earlier join was recorded, as a Unix timestamp.
+     */
+    private function droppedNotice(int $joinedAt): string
+    {
+        $minutes = intdiv(max(0, time() - $joinedAt), 60);
+
+        return \sprintf(
+            'A Cursor bridge joined the Robot Council fleet from this machine %s, and this bridge has not '
+            .'rejoined: Cursor was restarted since, or the rejoin could not be made. Tell your operator on your '
+            .'next turn, and if they want this application back on the fleet, call `join`.',
+            $minutes === 0 ? 'less than a minute ago' : ($minutes === 1 ? '1 minute ago' : $minutes.' minutes ago'),
+        );
+    }
+
+    /**
+     * Tell the agent at connect, and the operator on stderr, how this bridge came up (#333).
+     */
+    private function tellAtConnect(Bridge $bridge, string $notice): void
+    {
+        $bridge->tellAtConnect($notice);
+
+        $this->diagnostic($notice);
     }
 
     /**
