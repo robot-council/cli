@@ -129,6 +129,11 @@ final class Bridge
     public const string JOIN_TOOL = 'join';
 
     /**
+     * The tool a joined bridge adds to the fleet's, for taking the session off the fleet (#336).
+     */
+    public const string LEAVE_TOOL = 'leave';
+
+    /**
      * The type of the record left when the fleet ends this bridge's session.
      *
      * **The prefix is the whole point.** `PendingCommand` renders an entry with no `type` as
@@ -283,6 +288,14 @@ final class Bridge
      * What the agent is told at connect about how this bridge came up, or null for nothing (#333).
      */
     private ?string $startNotice = null;
+
+    /**
+     * Whether this bridge's session left through `leave`, and it has not joined since (#336).
+     *
+     * So a call to a fleet tool the harness still lists is answered in a way that does not invite
+     * the agent to rejoin against an operator who just asked to leave.
+     */
+    private bool $left = false;
 
     /**
      * Tell the agent something about how this bridge came up, in the instructions it reads at connect.
@@ -694,7 +707,9 @@ final class Bridge
         try {
             $response = $this->exchange($session, $message);
 
-            $this->reply($message, $this->everyTool($session, $message, $response), $out, $diagnostic);
+            $listed = $this->withLeaveTool($message, $this->everyTool($session, $message, $response));
+
+            $this->reply($message, $listed, $out, $diagnostic);
         } catch (SessionHasGone $gone) {
             // **The busy bridge's path to the same news.** A tool call is refused, the renewal
             // `exchange()` makes answers `409`, and there is nothing to retry: this session's
@@ -1094,6 +1109,20 @@ final class Bridge
             return true;
         }
 
+        // **Only once joined**: an unjoined bridge does not offer it, and a call to it falls through
+        // to the not-joined answer below, like any other tool it does not have
+        if ($joined && $method === 'tools/call' && \is_array($decoded['params'] ?? null) && ($decoded['params']['name'] ?? null) === self::LEAVE_TOOL) {
+            if ($this->sessionEnded) {
+                $this->refuseAfterTheEnding($message, $out);
+
+                return true;
+            }
+
+            $this->callLeave($out, $id, $diagnostic);
+
+            return true;
+        }
+
         if ($joined) {
             return false;
         }
@@ -1106,7 +1135,9 @@ final class Bridge
 
             // A notification needs no answer, and one about a session that does not exist has
             // nothing to act on
-            default => $id === null ? null : $this->error($out, $id, -32002, 'This bridge has not joined the fleet. Call the `join` tool first.'),
+            default => $id === null ? null : $this->error($out, $id, -32002, $this->left
+                ? "This session left the fleet at the operator's request. Call `join` only if the operator asks to rejoin."
+                : 'This bridge has not joined the fleet. Call the `join` tool first.'),
         };
 
         return true;
@@ -1229,6 +1260,132 @@ final class Bridge
     }
 
     /**
+     * The `leave` tool, as a joined bridge lists it beside the fleet's own (#336).
+     *
+     * @return array<string, mixed> The tool, as `tools/list` describes it.
+     */
+    private function leaveTool(): array
+    {
+        return [
+            'name' => self::LEAVE_TOOL,
+            'title' => 'Leave the fleet',
+            'description' => 'Take this session off the Robot Council fleet, when the operator asks for it. The fleet ends the '
+                .'session and releases the tasks and locks it held on its next sweep, and this bridge goes back to offering '
+                .'`join` alone, so the operator can rejoin later without restarting anything.',
+            'inputSchema' => ['type' => 'object', 'properties' => new stdClass, 'additionalProperties' => false],
+        ];
+    }
+
+    /**
+     * The fleet's tool list with `leave` added, when the reply is the first page of one (#336).
+     *
+     * **The first page only**: a harness that pages for itself asks for the rest by cursor, and
+     * `leave` belongs in the list once. **Anything unexpected is relayed untouched**, as
+     * `everyTool()` does, since a list without `leave` is still a list the agent can use.
+     *
+     * @param  string  $message  The harness's request.
+     * @param  string  $reply  What is about to be relayed for it.
+     * @return string The reply to write.
+     */
+    private function withLeaveTool(string $message, string $reply): string
+    {
+        $request = json_decode($message);
+
+        if (! $request instanceof stdClass || ($request->method ?? null) !== 'tools/list') {
+            return $reply;
+        }
+
+        $params = $request->params ?? null;
+
+        if ($params instanceof stdClass && isset($params->cursor)) {
+            return $reply;
+        }
+
+        $answer = json_decode(trim($reply));
+        $result = $answer instanceof stdClass ? ($answer->result ?? null) : null;
+
+        if (! $result instanceof stdClass || ! \is_array($result->tools ?? null)) {
+            return $reply;
+        }
+
+        // A fleet that one day lists its own `leave` keeps it listed once; the bridge still answers the call
+        foreach ($result->tools as $tool) {
+            if ($tool instanceof stdClass && ($tool->name ?? null) === self::LEAVE_TOOL) {
+                return $reply;
+            }
+        }
+
+        $result->tools = [...$result->tools, json_decode((string) json_encode($this->leaveTool()))];
+
+        $encoded = json_encode($answer, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+
+        return $encoded === false ? $reply : $encoded;
+    }
+
+    /**
+     * Answer a call to `leave`: end the session, as a shutdown does, and go back to offering `join` (#336).
+     *
+     * **What a shutdown does, in the same order**, so leaving and quitting are the same thing to
+     * the fleet: the session is ended, which releases its tasks and locks, and the sink loses the
+     * fleet events that named them while keeping what the bridge wrote for the next reader. The
+     * Cursor join record goes too, since the operator asked to be off and a reload must not rejoin.
+     *
+     * **Everything the session carried is reset**, so a later `join` in this process starts as the
+     * first one did: its capacity baseline, its announcements and its fleet instructions all belong
+     * to the session that left.
+     *
+     * @param  resource  $out  Where protocol messages go.
+     * @param  mixed  $id  The request's id.
+     * @param  callable(string):void  $diagnostic  Where anything else goes.
+     */
+    private function callLeave($out, mixed $id, callable $diagnostic): void
+    {
+        $sessionId = $this->session?->id();
+
+        $ended = $this->session?->end() ?? true;
+
+        // **Not while another bridge shares this sink** (#320): its unread events are in the same
+        // file, and the process this one is leaving from is not exiting
+        if ($this->sharedSink === null) {
+            $this->follower?->pending()->clearFleetEvents($diagnostic);
+        }
+
+        $this->joinRecord?->forget();
+
+        $this->session = null;
+        $this->follower = null;
+        $this->fleetInstructions = null;
+        $this->reportedCapacity = null;
+        $this->unreadFrom = null;
+        $this->unannounced = 0;
+        $this->announcedSink = null;
+        $this->announcedNew = 0;
+        $this->repeats = 0;
+        $this->roleChanged = false;
+        $this->renewalDue = false;
+        $this->watcherFailing = false;
+        $this->nextWatcherBeat = 0;
+        $this->nextRenewAttempt = 0;
+        $this->left = true;
+
+        $named = $sessionId === null ? 'the session' : 'session '.$sessionId;
+
+        $sentence = $ended
+            ? \sprintf('Left the fleet: %s ended, and the fleet releases the tasks and locks it held on its next sweep. Only `join` is offered now.', $named)
+            : \sprintf('Left the fleet, but the fleet did not confirm that %s ended: it holds its tasks and locks until its presence sweep marks it gone, within half an hour. Only `join` is offered now.', $named);
+
+        $diagnostic($sentence);
+
+        // Before the result, as `join` does (#126): the harness re-reads the list at once, so the
+        // agent's next call in this turn is not made against the fleet's tools
+        if ($this->initialized) {
+            $this->notifyListChanged($out);
+        }
+
+        $this->toolResult($out, $id, $sentence, ! $ended);
+    }
+
+    /**
      * Answer a call to `join`.
      *
      * **A second call is refused and changes nothing.** The session already held stays held: ending
@@ -1323,6 +1480,7 @@ final class Bridge
 
         $this->session = $joined->session;
         $this->follower = $joined->follower;
+        $this->left = false;
 
         // For the bridge Cursor starts in this one's place, which rejoins only under the same parent (#333)
         $this->joinRecord?->remember($arguments);

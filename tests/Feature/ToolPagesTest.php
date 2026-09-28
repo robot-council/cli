@@ -87,7 +87,8 @@ it('answers the first page with every tool the fleet pages, and no cursor left',
     $raw = pagedRun('{"jsonrpc":"2.0","id":7,"method":"tools/list"}');
     $reply = json_decode($raw, true);
 
-    expect(data_get($reply, 'result.tools.*.name'))->toBe(['task_list', 'task_create', 'events_narrate', 'directive_post', 'presence_heartbeat'])
+    // With the bridge's own `leave` after the fleet's, once (#336)
+    expect(data_get($reply, 'result.tools.*.name'))->toBe(['task_list', 'task_create', 'events_narrate', 'directive_post', 'presence_heartbeat', 'leave'])
         ->and(data_get($reply, 'result'))->not->toHaveKey('nextCursor')
         ->and(data_get($reply, 'id'))->toBe(7)
         ->and(pagedRequests())->toBe(3)
@@ -112,10 +113,14 @@ it('relays a request that names a cursor as asked, for a harness that pages itse
         ->and(pagedRequests())->toBe(1);
 });
 
-it('relays a single page untouched', function (): void {
+it("relays a single page with nothing added but the bridge's own leave", function (): void {
     pagedFleet(['' => ['tools' => [pagedTool('task_list')], 'next' => null]]);
 
-    expect(pagedRun('{"jsonrpc":"2.0","id":9,"method":"tools/list"}'))->toBe('{"jsonrpc":"2.0","id":9,"result":{"tools":['.pagedTool('task_list').']}}')
+    $raw = pagedRun('{"jsonrpc":"2.0","id":9,"method":"tools/list"}');
+
+    // The fleet's tool byte for byte, then `leave` (#336): nothing of the fleet's is rewritten
+    expect($raw)->toStartWith('{"jsonrpc":"2.0","id":9,"result":{"tools":['.pagedTool('task_list').',{"name":"leave",')
+        ->and(data_get(json_decode($raw, true), 'result.tools.*.name'))->toBe(['task_list', 'leave'])
         ->and(pagedRequests())->toBe(1);
 });
 
@@ -127,7 +132,7 @@ it('falls back to the first page when a cursor repeats, rather than looping', fu
 
     $reply = json_decode(pagedRun('{"jsonrpc":"2.0","id":10,"method":"tools/list"}'), true);
 
-    expect(data_get($reply, 'result.tools.*.name'))->toBe(['task_list'])
+    expect(data_get($reply, 'result.tools.*.name'))->toBe(['task_list', 'leave'])
         ->and(data_get($reply, 'result.nextCursor'))->toBe('again')
         ->and(pagedRequests())->toBe(2);
 });
@@ -143,7 +148,7 @@ it('gives up after the page bound and relays the first page', function (): void 
 
     $reply = json_decode(pagedRun('{"jsonrpc":"2.0","id":11,"method":"tools/list"}'), true);
 
-    expect(data_get($reply, 'result.tools.*.name'))->toBe(['t0'])
+    expect(data_get($reply, 'result.tools.*.name'))->toBe(['t0', 'leave'])
         ->and(pagedRequests())->toBe(Bridge::MAX_TOOL_PAGES);
 });
 
