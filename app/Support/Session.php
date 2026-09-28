@@ -498,6 +498,44 @@ final class Session
     }
 
     /**
+     * How many tasks the service lets this session hold now, or null when it did not say (#324).
+     *
+     * **Asked live, because the answer changes under a running session.** `capacity()` is what the
+     * start reported, and core computes the capacity against the seat's cap on every read, so a
+     * developer who raises the cap in the seat settings changes this value without a restart
+     * (`robot-council/core#409`). `GET agent/session` is where core reports it.
+     *
+     * **Null rather than a guess when the answer cannot be had**, for the reason `fleetCanDirect()`
+     * gives: an older service, a refused request, or a body that does not parse are all "unknown",
+     * and a caller comparing this against a remembered value must not read unknown as a change.
+     *
+     * @return int|null The capacity in effect, or null when the service did not answer.
+     */
+    public function liveCapacity(): ?int
+    {
+        // Equivalent to no guard at all, for the reason `fleetCanDirect()` gives: without it,
+        // `request()` throws, the catch below answers the same null, and no request is sent.
+        // @pest-mutate-ignore: InstanceOfToTrue, RemoveEarlyReturn
+        if (! $this->token instanceof Credential) {
+            return null;
+        }
+
+        try {
+            $response = $this->request()->timeout(self::DESCRIBE_TIMEOUT_SECONDS)->get($this->service.'/robot-council/api/agent/session');
+        } catch (Throwable) {
+            return null;
+        }
+
+        if (! $response->successful()) {
+            return null;
+        }
+
+        $capacity = $response->json('capacity');
+
+        return \is_int($capacity) ? $capacity : null;
+    }
+
+    /**
      * Ask for a role, which an administrator decides.
      *
      * **A request, never a grant.** `POST agent/role` records what this session asked to be and

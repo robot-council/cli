@@ -52,6 +52,15 @@ final class PendingEvents
     public const string LOCAL_PREFIX = 'bridge.';
 
     /**
+     * The local entry saying this session's capacity moved after the join (cli#324).
+     *
+     * **About the session that wrote it, so it ends with that session**, unlike the session-ended
+     * record: `clearFleetEvents()` drops it. Left behind, it would reach the next session's agent,
+     * whose own join result gave the capacity in effect now, and contradict it.
+     */
+    public const string CAPACITY_CHANGED = self::LOCAL_PREFIX.'capacity-changed';
+
+    /**
      * How many events one sink keeps.
      *
      * A bound rather than a policy: an agent that is idle for a weekend while the fleet is busy
@@ -308,6 +317,9 @@ final class PendingEvents
      * ordering the caller's shutdown means nothing breaks if that order later changes, which a
      * comment asking for an order does not give.
      *
+     * **Except a capacity change, which is the session's own news** (`CAPACITY_CHANGED`): the next
+     * session learns its capacity from its own join.
+     *
      * **It gives up rather than waits** when another process holds the sink for longer than
      * `CLEAR_WAIT_MILLISECONDS`, leaving the sink as it was and saying so once. `add()`, `drain()`
      * and `peek()` keep their blocking locks, since none of them sits in a shutdown path.
@@ -347,7 +359,7 @@ final class PendingEvents
 
             $kept = array_values(array_filter(
                 $this->decode($contents === false ? '' : $contents),
-                $this->isLocal(...)
+                fn (array $event): bool => $this->isLocal($event) && ($event['type'] ?? null) !== self::CAPACITY_CHANGED
             ));
 
             // **Encoded before the file is emptied, and a failure RETURNS rather than falling
