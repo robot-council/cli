@@ -4,6 +4,23 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.32 — A Stop Hook That Says When It Cannot Read the Sink (2026-09-29)
+
+The stop hook now says when it cannot read the sink, and reads the sink key its bridge recorded, so a slow `git` no longer splits the two.
+
+**Upgrading**:
+
+- **Replace each machine's copy of the stop-hook script** with this version's [`resources/stop-hook/robot-council-stop-hook`](https://github.com/robot-council/cli/blob/v0.4.32/resources/stop-hook/robot-council-stop-hook). #348 changed it: when `pending` exits `3` because the sink exists and could not be read, the script now tells the agent so, instead of ending the turn as though the fleet were quiet. An older copy keeps working, but it treats that case as a quiet fleet, so events can sit unannounced. The new script needs cli v0.4.31 or later.
+- **Restart each Claude Code seat's bridge after upgrading.** A bridge records its sink key only from this version, so a seat whose bridge started earlier keeps resolving the key on its own, as before, until it restarts.
+
+### What's fixed
+- Say so when `pending` cannot read the sink, rather than print nothing [#348](https://github.com/robot-council/cli/pull/348)
+- Record the bridge's sink key so its stop hook reads the same sink, however `git` answers [#349](https://github.com/robot-council/cli/pull/349)
+
+### Maintenance and tooling
+- State who may cut a release, and when, in the repository's own rules [#351](https://github.com/robot-council/cli/pull/351)
+- Pin that a sink marked delivered stops a channel notice from repeating [#347](https://github.com/robot-council/cli/pull/347)
+
 ## v0.4.31 — Cursor Seats Stay Joined, a Leave Tool, and Events That Survive a Killed Hook (2026-09-29)
 
 A Cursor seat stays on the fleet through Cursor's reloads, an agent can take its session off the fleet with `leave`, and a stop hook killed at its timeout no longer loses the fleet's events.
