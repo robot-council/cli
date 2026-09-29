@@ -7,6 +7,7 @@ namespace App\Commands;
 use App\Support\MachineIdentity;
 use App\Support\PendingEvents;
 use App\Support\Stderr;
+use App\Support\UnreadableSink;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use LaravelZero\Framework\Commands\Command;
@@ -40,6 +41,16 @@ final class PendingCommand extends Command
      * What a stop hook's answer opens with, before the events.
      */
     public const string NEWS = 'Robot Council has news:';
+
+    /**
+     * The exit code for a sink that could not be read, apart from every other failure (cli#345).
+     *
+     * **Its own code, so the stop hook can tell it apart.** The hook fails open on a misconfigured
+     * machine -- no `robot-council` on its `PATH`, no service named -- and must go on doing so, or
+     * every turn on such a seat would continue once to say so. A sink that exists and could not be
+     * read is different: its events are waiting, and the agent is told.
+     */
+    public const int UNREADABLE = 3;
 
     /**
      * Write to stdout, and say whether every byte arrived.
@@ -106,7 +117,17 @@ final class PendingCommand extends Command
 
         // **Delivered at least once** (cli#341): what an earlier call printed is removed now, and
         // what this call prints is only marked, below, once it has been written
-        $events = $peeking ? $pending->peek() : $pending->deliver();
+        //
+        // **A sink it could not read is an error, never an empty answer** (cli#345). Empty output
+        // tells a hook and an agent the fleet has been quiet, so a failed read says why on stderr
+        // and exits non-zero, having marked and removed nothing
+        try {
+            $events = $peeking ? $pending->inspect() : $pending->deliver();
+        } catch (UnreadableSink $unreadableSink) {
+            $this->diagnostic($unreadableSink->getMessage());
+
+            return self::UNREADABLE;
+        }
 
         // A delivery is a stop hook at a turn end; a peek is somebody looking, which is not a turn.
         // Claude Code only, the one harness whose bridge can keep a cache warm, so no other

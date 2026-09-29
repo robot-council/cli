@@ -114,7 +114,7 @@ function bashBinary(): ?string
  * @param  string|null  $line  What the stubbed `pending` prints, or null for a quiet fleet.
  * @return array{out: string, err: string, code: int|null} What the run produced.
  */
-function runScript(string $script, string $payload, ?string $line): array
+function runScript(string $script, string $payload, ?string $line, ?int $exit = null, string $error = ''): array
 {
     $bash = bashBinary();
 
@@ -136,6 +136,10 @@ function runScript(string $script, string $payload, ?string $line): array
             for argument in "$@"; do
                 case "$argument" in --format=*) format=${argument#--format=} ;; esac
             done
+            if [ -n "${RC_STUB_EXIT:-}" ]; then
+                printf '%s\n' "${RC_STUB_ERR:-}" >&2
+                return "$RC_STUB_EXIT"
+            fi
             [ -z "${RC_STUB_LINE:-}" ] && return 0
             case "$format" in
                 cursor) printf '{"followup_message":"Robot Council has news:\\n%s"}' "$RC_STUB_LINE" ;;
@@ -155,7 +159,7 @@ function runScript(string $script, string $payload, ?string $line): array
     // with backslashes on Windows, and a backslash is an escape character to the shell that
     // receives the path. Windows itself accepts either separator, so this costs nothing on the
     // platform that does not need it.
-    $process = new Process([$bash, str_replace('\\', '/', $path)], env: ['RC_STUB_LINE' => $line ?? ''], timeout: 30);
+    $process = new Process([$bash, str_replace('\\', '/', $path)], env: ['RC_STUB_LINE' => $line ?? '', 'RC_STUB_EXIT' => $exit === null ? '' : (string) $exit, 'RC_STUB_ERR' => $error], timeout: 30);
 
     $process->setInput($payload);
     $process->run();
@@ -180,9 +184,9 @@ function runScript(string $script, string $payload, ?string $line): array
  * @param  string  $extra  Shell appended after the script.
  * @return array{out: string, err: string, code: int|null} What the run produced.
  */
-function runStopHook(string $payload, ?string $line, string $extra = ''): array
+function runStopHook(string $payload, ?string $line, string $extra = '', ?int $exit = null, string $error = ''): array
 {
-    return runScript(stopHookScript().$extra, $payload, $line);
+    return runScript(stopHookScript().$extra, $payload, $line, $exit, $error);
 }
 
 /**
@@ -346,4 +350,28 @@ it('would not parse without the strip, which is what makes the test above discri
     $result = runScript($without.$probe, CURSOR_BOM_PAYLOAD, 'rebase your branch from otherdev');
 
     expect($result['code'])->toBe(9, 'removing the strip did not make the payload unparseable: '.firstLineOf($result['err']));
+})->skip(fn (): bool => bashBinary() === null, 'No bash on this machine to run the script with.');
+
+it('tells the agent when the sink could not be read, rather than ending the turn as if quiet', function (string $payload, string $key): void {
+    // `pending` exits 3 for a sink it could not read (cli#345), with the reason on stderr
+    $result = runStopHook($payload, null, exit: 3, error: 'robot-council: Could not lock the sink `x.json` within 2 seconds, so it was left as it was.');
+
+    $answer = hookAnswer($result['out']);
+
+    expect($result['code'])->toBe(0)
+        ->and($answer)->toHaveKey($key)
+        ->and($answer[$key])->toContain('could not read the fleet events')
+        ->and($answer[$key])->toContain('Could not lock the sink `x.json`');
+})->with([
+    'Claude Code' => [CLAUDE_PAYLOAD, 'reason'],
+    'Cursor' => [CURSOR_BOM_PAYLOAD, 'followup_message'],
+])->skip(fn (): bool => bashBinary() === null, 'No bash on this machine to run the script with.');
+
+it('still fails open on any other failure, which is what makes the test above mean something', function (): void {
+    // A misconfigured machine -- no service named, no `robot-council` on the PATH -- must not make
+    // every turn continue once to say so
+    $result = runStopHook(CLAUDE_PAYLOAD, null, exit: 1, error: 'robot-council: Pass --service, or set ROBOT_COUNCIL_SERVICE.');
+
+    expect($result['code'])->toBe(0)
+        ->and(trim($result['out']))->toBeEmpty();
 })->skip(fn (): bool => bashBinary() === null, 'No bash on this machine to run the script with.');
