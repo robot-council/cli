@@ -360,7 +360,7 @@ it('tells the agent when the sink could not be read, rather than ending the turn
 
     expect($result['code'])->toBe(0)
         ->and($answer)->toHaveKey($key)
-        ->and($answer[$key])->toContain('could not read the fleet events')
+        ->and($answer[$key])->toContain('could not read the fleet events waiting for this seat, and removed none of them')
         ->and($answer[$key])->toContain('Could not lock the sink `x.json`');
 })->with([
     'Claude Code' => [CLAUDE_PAYLOAD, 'reason'],
@@ -373,5 +373,8 @@ it('still fails open on any other failure, which is what makes the test above me
     $result = runStopHook(CLAUDE_PAYLOAD, null, exit: 1, error: 'robot-council: Pass --service, or set ROBOT_COUNCIL_SERVICE.');
 
     expect($result['code'])->toBe(0)
-        ->and(trim($result['out']))->toBeEmpty();
+        ->and(trim($result['out']))->toBeEmpty()
+
+        // Not silently, though: the harness keeps a hook's stderr as its log
+        ->and($result['err'])->toContain('Pass --service');
 })->skip(fn (): bool => bashBinary() === null, 'No bash on this machine to run the script with.');

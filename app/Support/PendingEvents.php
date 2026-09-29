@@ -115,10 +115,12 @@ final class PendingEvents
     private static array $checkouts = [];
 
     /**
-     * Checkouts whose git directory could not be resolved on the last try, by directory (cli#345).
+     * Checkouts whose git directory timed out on the last try, by directory (cli#345).
      *
      * Their key fell back to the plain path, which names a different sink from the one keyed by the
      * git directory, so a strict read refuses rather than reporting that other sink's emptiness.
+     * **A timeout only.** A git that is missing, or a checkout that no longer exists, falls back the
+     * same way every time, in the bridge as in the hook, so the two agree and the read goes ahead.
      *
      * @var array<string, true>
      */
@@ -328,7 +330,11 @@ final class PendingEvents
 
             try {
                 $encoded = $events === [] ? '' : json_encode($events, JSON_THROW_ON_ERROR);
-            } catch (JsonException) {
+            } catch (JsonException $jsonException) {
+                if ($strict) {
+                    throw new UnreadableSink(sprintf('The sink `%s` could not be written back: %s. It was left as it was.', $path, $jsonException->getMessage()), 0, $jsonException);
+                }
+
                 return [];
             }
 
@@ -436,9 +442,12 @@ final class PendingEvents
         $path = $this->path();
         $directory = $this->checkoutDirectory ?? getcwd();
 
-        if (isset(self::$unresolved[\is_string($directory) ? $directory : ''])) {
+        // Only a key that depends on the checkout, as `key()` decides, can have fallen back
+        $keyedByCheckout = $this->projectId === null && $this->harness !== self::APP_WIDE_HARNESS;
+
+        if ($keyedByCheckout && isset(self::$unresolved[\is_string($directory) ? $directory : ''])) {
             throw new UnreadableSink(sprintf(
-                'Could not tell which checkout this is: `git rev-parse` gave no answer %d times within %d seconds each, so its sink cannot be found.',
+                'Could not tell which checkout this is: `git rev-parse` ran out of time %d times, at %d seconds each, so its sink cannot be found.',
                 self::CHECKOUT_ATTEMPTS,
                 Checkout::TIMEOUT_SECONDS,
             ));
@@ -457,26 +466,19 @@ final class PendingEvents
      */
     private function lockOrFail(mixed $handle, int $operation): void
     {
-        for ($waited = 0; ; $waited += self::CLEAR_RETRY_MILLISECONDS) {
-            if (flock($handle, $operation | LOCK_NB)) {
-                return;
-            }
-
-            if ($waited >= self::CLEAR_WAIT_MILLISECONDS) {
-                throw new UnreadableSink(sprintf(
-                    'Could not lock the sink `%s` within %s seconds, so it was left as it was.',
-                    $this->path(),
-                    self::CLEAR_WAIT_MILLISECONDS / 1000,
-                ));
-            }
-
-            Sleep::for(self::CLEAR_RETRY_MILLISECONDS)->milliseconds();
+        if (! $this->lockWithinTheWait($handle, $operation)) {
+            throw new UnreadableSink(sprintf(
+                'Could not lock the sink `%s` within %s seconds, so it was left as it was.',
+                $this->path(),
+                self::CLEAR_WAIT_MILLISECONDS / 1000,
+            ));
         }
     }
 
     /**
      * Entries from a sink's contents, or a refusal when they do not parse as a list of entries.
      *
+     * @param  string  $contents  What the sink file holds.
      * @return list<array<array-key, mixed>>
      *
      * @throws UnreadableSink When the contents are not empty and not a JSON list.
@@ -490,11 +492,11 @@ final class PendingEvents
         try {
             $decoded = json_decode($contents, true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $jsonException) {
-            throw new UnreadableSink(sprintf('The sink `%s` does not parse: %s. It was left as it was.', $this->path(), $jsonException->getMessage()), 0, $jsonException);
+            throw new UnreadableSink(sprintf('The sink `%s` does not parse: %s. It was left as it was; move it aside to let delivery resume.', $this->path(), $jsonException->getMessage()), 0, $jsonException);
         }
 
         if (! \is_array($decoded) || ! array_is_list($decoded)) {
-            throw new UnreadableSink(sprintf('The sink `%s` is not a list of events. It was left as it was.', $this->path()));
+            throw new UnreadableSink(sprintf('The sink `%s` is not a list of events. It was left as it was; move it aside to let delivery resume.', $this->path()));
         }
 
         return array_values(array_filter($decoded, \is_array(...)));
@@ -647,12 +649,13 @@ final class PendingEvents
      * `CLEAR_WAIT_MILLISECONDS`.
      *
      * @param  resource  $handle  The open sink.
+     * @param  LOCK_SH|LOCK_EX  $operation  Which lock to take.
      * @return bool Whether the lock was taken.
      */
-    private function lockWithinTheWait(mixed $handle): bool
+    private function lockWithinTheWait(mixed $handle, int $operation = LOCK_EX): bool
     {
         for ($waited = 0; ; $waited += self::CLEAR_RETRY_MILLISECONDS) {
-            if (flock($handle, LOCK_EX | LOCK_NB)) {
+            if (flock($handle, $operation | LOCK_NB)) {
                 return true;
             }
 
@@ -1011,8 +1014,11 @@ final class PendingEvents
             return self::$checkouts[$directory];
         }
 
+        $anyTimedOut = false;
+
         for ($attempt = 0; $attempt < self::CHECKOUT_ATTEMPTS; $attempt++) {
-            $resolved = Checkout::resolveGitDirectory($directory === '' ? null : $directory);
+            $resolved = Checkout::resolveGitDirectory($directory === '' ? null : $directory, $timedOut);
+            $anyTimedOut = $anyTimedOut || $timedOut;
 
             if ($resolved !== null) {
                 unset(self::$unresolved[$directory]);
@@ -1021,7 +1027,11 @@ final class PendingEvents
             }
         }
 
-        self::$unresolved[$directory] = true;
+        if ($anyTimedOut) {
+            self::$unresolved[$directory] = true;
+        } else {
+            unset(self::$unresolved[$directory]);
+        }
 
         return $this->comparable($this->realDirectory($directory));
     }

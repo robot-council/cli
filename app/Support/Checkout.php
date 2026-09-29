@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Support;
 
+use Illuminate\Process\Exceptions\ProcessTimedOutException;
 use Illuminate\Support\Facades\Process;
 use Throwable;
 
@@ -202,12 +203,22 @@ final class Checkout
      * "no repository" would key a sink one way while a process that asked a moment later keyed it
      * another.
      *
+     * **A null says whether it was a timeout** (cli#345), through `$timedOut`. A git that ran out of
+     * time may answer next time, and a caller keying a sink by the answer must not guess meanwhile.
+     * A git that is missing, or a directory it cannot start in, answers the same way every time, so
+     * falling back is at least consistent between the processes that do it.
+     *
      * @param  string|null  $directory  Where to ask from; the current working directory by default.
+     * @param  bool|null  $timedOut  Set to whether git ran out of time.
+     *
+     * @param-out bool  $timedOut
+     *
      * @return string|false|null The git directory; false when this is not a repository; null when
      *                           git could not answer.
      */
-    public static function resolveGitDirectory(?string $directory = null): string|false|null
+    public static function resolveGitDirectory(?string $directory = null, ?bool &$timedOut = null): string|false|null
     {
+        $timedOut = false;
         $directory ??= getcwd();
 
         if (! \is_string($directory) || $directory === '') {
@@ -218,7 +229,9 @@ final class Checkout
             $result = Process::path($directory)
                 ->timeout(self::TIMEOUT_SECONDS)
                 ->run(['git', 'rev-parse', '--absolute-git-dir']);
-        } catch (Throwable) {
+        } catch (Throwable $throwable) {
+            $timedOut = $throwable instanceof ProcessTimedOutException;
+
             return null;
         }
 
