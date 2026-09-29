@@ -554,6 +554,30 @@ it('stops announcing once the sink has been drained', function (): void {
     ]);
 })->skipOnWindows();
 
+it('stops announcing once the stop hook has marked the sink delivered, which leaves it in the file', function (): void {
+    // **What v0.4.31's `pending` leaves behind** (cli#341): the printed entry stays in the sink,
+    // marked, until the next turn end, so the sink is not empty and a repeat must still stop
+    // (cli#343). The control is the comparison: without it this and the drained case both repeat.
+    // A check on the raw file would also stop here, since the mark changes the bytes.
+    channelService(feed: channelPages([[channelDirective(11)]]));
+
+    $delivered = (string) json_encode([[...channelDirective(11), PendingEvents::DELIVERED => 1790000000]]);
+
+    $metas = channelRepeats([
+        ...channelHandshake(),
+        ...channelPings(1),
+        ['await' => '"repeat":"1"'], ['put' => channelSink(), 'with' => $delivered],
+        ...channelPings(3, from: 200),
+    ]);
+
+    // The control that the entry is still in the file, so the stop is not an emptied sink by another name
+    expect(json_decode((string) file_get_contents(channelSink()), true))->toHaveCount(1)
+        ->and($metas)->toBe([
+            ['new' => '1'],
+            ['new' => '1', 'repeat' => '1'],
+        ]);
+})->skipOnWindows();
+
 it('stops announcing once the sink has changed some other way', function (): void {
     // Different contents that are still not empty: what the notice announced is no longer what is
     // waiting, so repeating it would be a claim about a sink that no longer exists. The empty case
