@@ -67,7 +67,8 @@ final class PendingEvents
      * NEXT `pending`, never by the one that printed it. A hook killed between reading the sink and
      * printing it leaves the entries unmarked, and the next turn end prints them again.
      */
-    public const string DELIVERED = 'delivered_at';
+    // Under the bridge's own prefix, so no field the fleet ever sends can be mistaken for it
+    public const string DELIVERED = self::LOCAL_PREFIX.'delivered_at';
 
     /**
      * How many events one sink keeps.

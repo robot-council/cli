@@ -50,11 +50,11 @@ function deliveryEvent(int $id, string $body = 'rebase your branch'): array
 /**
  * Run `pending` for this sink, and return what it printed.
  */
-function deliveryPending(): string
+function deliveryPending(?string $format = null): string
 {
     $output = new TwoStreamOutput;
 
-    expect(Artisan::call('pending', ['--service' => DELIVERY_SERVICE, '--harness' => 'claude', '--project' => 'delivery'], $output))->toBe(0);
+    expect(Artisan::call('pending', ['--service' => DELIVERY_SERVICE, '--harness' => 'claude', '--project' => 'delivery', ...($format === null ? [] : ['--format' => $format])], $output))->toBe(0);
 
     return $output->stdout();
 }
@@ -163,12 +163,82 @@ it('keeps the events of a pending killed while it was printing them', function (
 
     Sleep::for(500)->milliseconds();
 
-    // The control that it was stopped mid-print rather than finished: still running, blocked
-    expect(proc_get_status($process)['running'])->toBeTrue();
+    // The controls that it was stopped mid-print: it had read the sink (the turn mark is written
+    // just after), and it is still running, blocked on the pipe rather than finished
+    expect(deliverySink()->turnMarkPath())->toBeFile()
+        ->and(proc_get_status($process)['running'])->toBeTrue();
 
     proc_terminate($process, 9);
     proc_close($process);
 
     // Nothing was lost: the next turn end prints every one of them
     expect(substr_count(deliveryPending(), '[directive]'))->toBe(PendingEvents::MAX_EVENTS);
+})->skipOnWindows();
+
+it('prints the whole stop-hook answer in the shape asked for', function (string $format, string $key): void {
+    deliverySink()->add([deliveryEvent(1, "say \"hi\"\nand bye")]);
+
+    $answer = json_decode(deliveryPending($format), true);
+
+    // Encoded, not interpolated: the body's quotes and newline survive as data
+    expect($answer)->toBeArray()
+        ->and(array_keys((array) $answer))->toBe($format === 'block' ? ['decision', 'reason'] : ['followup_message'])
+        ->and(data_get($answer, $key))->toBeString()->toStartWith("Robot Council has news:\n[directive] say \"hi\"\nand bye");
+})->with([
+    'Claude Code and Codex' => ['block', 'reason'],
+    'Cursor' => ['cursor', 'followup_message'],
+]);
+
+it('prints nothing in either shape when the fleet has been quiet', function (string $format): void {
+    expect(deliveryPending($format))->toBeEmpty();
+})->with(['block', 'cursor']);
+
+it('refuses a shape it does not know, and leaves the sink alone', function (): void {
+    deliverySink()->add([deliveryEvent(1)]);
+
+    $output = new TwoStreamOutput;
+
+    expect(Artisan::call('pending', ['--service' => DELIVERY_SERVICE, '--harness' => 'claude', '--project' => 'delivery', '--format' => 'json'], $output))->toBe(1)
+        ->and($output->stderr())->toContain('--format takes block or cursor')
+        ->and(deliverySink()->peek())->toHaveCount(1);
+});
+
+/**
+ * Run a real `pending --format=block` whose stdout reader is closed at once or kept, and return
+ * what a later `pending` prints.
+ */
+function deliveryAfterStdout(bool $closed, string $state): string
+{
+    deliverySink()->add([deliveryEvent(1)]);
+
+    $process = proc_open(
+        [PHP_BINARY, base_path('robot-council'), 'pending', '--service='.DELIVERY_SERVICE, '--harness=claude', '--project=delivery', '--format=block'],
+        [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes,
+        null,
+        ['XDG_STATE_HOME' => $state, 'PATH' => (string) getenv('PATH'), 'HOME' => (string) getenv('HOME')],
+    );
+
+    if ($process === false) {
+        throw new RuntimeException('Could not start `pending`.');
+    }
+
+    if ($closed) {
+        fclose($pipes[1]);
+    } else {
+        stream_get_contents($pipes[1]);
+    }
+
+    proc_close($process);
+
+    return deliveryPending();
+}
+
+it('does not mark what it could not write, when the reader of its stdout has gone', function (): void {
+    // A hook the harness killed while `pending` ran on: every write fails, and nothing is marked
+    expect(deliveryAfterStdout(closed: true, state: $this->state))->toContain('rebase your branch');
+})->skipOnWindows();
+
+it('marks what it wrote when the reader stayed, which is what makes the test above mean something', function (): void {
+    expect(deliveryAfterStdout(closed: false, state: $this->state))->toBeEmpty();
 })->skipOnWindows();

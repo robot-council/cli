@@ -128,9 +128,20 @@ function runScript(string $script, string $payload, ?string $line): array
         throw new RuntimeException('Could not create '.$directory);
     }
 
+    // **The stub answers in the shape it is asked for**, as `pending --format` does (cli#341), so a
+    // script passing the wrong shape is caught here; `PendingCommandTest` holds the real encoder
     $stub = <<<'BASH'
         robot-council() {
-            [ -n "${RC_STUB_LINE:-}" ] && printf '%s\n' "$RC_STUB_LINE"
+            format=
+            for argument in "$@"; do
+                case "$argument" in --format=*) format=${argument#--format=} ;; esac
+            done
+            [ -z "${RC_STUB_LINE:-}" ] && return 0
+            case "$format" in
+                cursor) printf '{"followup_message":"Robot Council has news:\\n%s"}' "$RC_STUB_LINE" ;;
+                block) printf '{"decision":"block","reason":"Robot Council has news:\\n%s"}' "$RC_STUB_LINE" ;;
+                *) printf 'no --format given\n' ;;
+            esac
             return 0
         }
 
@@ -224,9 +235,10 @@ it('leaves no copy of the script in the README, where it would go untested', fun
 it('carries the lines the hooks depend on', function (): void {
     $script = stopHookScript();
 
-    expect($script)->toContain('robot-council pending')
-        ->and($script)->toContain('followup_message')
-        ->and($script)->toContain('"decision" => "block"')
+    // The answer's encoding lives in `pending --format` now (cli#341), so the script names the shape
+    expect($script)->toContain('robot-council pending --format="$shape"')
+        ->and($script)->toContain('shape=cursor')
+        ->and($script)->toContain('shape=block')
         // The line #84 added. Its absence is caught behaviorally further down; this catches an
         // edit to the file that drops it, which is the way it would actually go.
         ->and($script)->toContain(BOM_STRIP_LINE);
