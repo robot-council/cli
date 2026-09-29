@@ -10,6 +10,7 @@ use App\Support\Stderr;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use LaravelZero\Framework\Commands\Command;
+use Symfony\Component\Console\Output\StreamOutput;
 
 /**
  * Prints the fleet events waiting for this harness, and clears them.
@@ -26,14 +27,39 @@ use LaravelZero\Framework\Commands\Command;
  * turn normally when the fleet has been quiet, and a command that printed "nothing waiting" would
  * make every turn continue forever.
  */
-#[Description('Print the fleet events waiting for this harness, and clear them')]
+#[Description('Print the fleet events waiting for this harness, and clear them at the next turn end')]
 #[Signature('pending
     {--service= : The service base URL, defaulting to ROBOT_COUNCIL_SERVICE}
     {--project= : The repository or workspace the bridge was started for}
     {--harness= : Which enrolled harness this is, when detection cannot tell}
-    {--peek : Show what is waiting without clearing it}')]
+    {--peek : Show what is waiting without clearing it}
+    {--format= : Print the whole stop-hook answer, as block (Claude Code, Codex) or cursor}')]
 final class PendingCommand extends Command
 {
+    /**
+     * What a stop hook's answer opens with, before the events.
+     */
+    public const string NEWS = 'Robot Council has news:';
+
+    /**
+     * Write to stdout, and say whether every byte arrived.
+     */
+    private function written(string $text): bool
+    {
+        $output = $this->output->getOutput();
+
+        // An output held in memory, as a test or a caller capturing it uses, has no write to fail
+        if (! $output instanceof StreamOutput) {
+            $this->output->write($text);
+
+            return true;
+        }
+
+        $stream = $output->getStream();
+
+        return @fwrite($stream, $text) === \strlen($text) && fflush($stream);
+    }
+
     /**
      * Drain the sink.
      *
@@ -68,18 +94,46 @@ final class PendingCommand extends Command
         $pending = new PendingEvents($service, $harness, $this->stringOption('project'), $this->projectDirectory());
 
         $peeking = $this->option('peek') === true;
+        $format = $this->stringOption('format');
 
-        $events = $peeking ? $pending->peek() : $pending->drain();
+        // Refused before the sink is touched, so a hook passing a shape this version does not know
+        // leaves every event where it was
+        if ($format !== null && ! \in_array($format, ['block', 'cursor'], true)) {
+            $this->diagnostic('--format takes block or cursor.');
 
-        // A drain is a stop hook at a turn end; a peek is somebody looking, which is not a turn.
+            return self::FAILURE;
+        }
+
+        // **Delivered at least once** (cli#341): what an earlier call printed is removed now, and
+        // what this call prints is only marked, below, once it has been written
+        $events = $peeking ? $pending->peek() : $pending->deliver();
+
+        // A delivery is a stop hook at a turn end; a peek is somebody looking, which is not a turn.
         // Claude Code only, the one harness whose bridge can keep a cache warm, so no other
         // harness's hook starts writing a file nothing reads
         if (! $peeking && $harness === 'claude') {
             $pending->markTurnEnded();
         }
 
-        foreach ($events as $event) {
-            $this->line($this->describe($event));
+        if ($events === []) {
+            return self::SUCCESS;
+        }
+
+        $lines = implode("\n", array_map($this->describe(...), $events));
+
+        $text = match ($format) {
+            // The hook's whole answer, so the script hands it straight to the harness and no
+            // second process stands between this write and the harness reading it (cli#341)
+            'block' => json_encode(['decision' => 'block', 'reason' => self::NEWS."\n".$lines]),
+            'cursor' => json_encode(['followup_message' => self::NEWS."\n".$lines]),
+            default => $lines."\n",
+        };
+
+        // **Marked only once every byte is written.** Symfony's own writer drops a failed write
+        // without a word, so a stdout whose reader has gone -- a hook the harness killed while this
+        // process ran on -- would otherwise be marked delivered into nothing (cli#341)
+        if ($this->written((string) $text) && ! $peeking) {
+            $pending->markDelivered($events);
         }
 
         return self::SUCCESS;

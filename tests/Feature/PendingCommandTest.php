@@ -81,7 +81,7 @@ it('prints what is waiting and clears it', function (): void {
     expect(Artisan::call('pending', ['--project' => 'probe']))->toBe(0)
         ->and(Artisan::output())->toContain('[directive] rebase your branch from otherdev');
 
-    // Cleared, so the next turn does not read the same directive again and act on it twice.
+    // Marked delivered, so the next turn does not read the same directive again and act on it twice (cli#341).
     expect(pendingSink()->isEmpty())->toBeTrue();
 });
 

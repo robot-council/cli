@@ -20,10 +20,10 @@ case "$payload" in
   *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
 esac
 
-# **Which shape to answer with is read from the payload, never passed in.** A wrong argument would
-# be unrecoverable: `pending` clears the sink as it reads, so by the time a harness discards an
-# answer it does not understand, the events are already gone and nothing reports it. Cursor's stop
-# payload carries `loop_count`; Claude Code's and Codex's carry `stop_hook_active`.
+# **Which shape to answer with is read from the payload, never passed in.** A harness discards an
+# answer it does not understand, and `pending` has marked the events delivered by then, so a wrong
+# shape loses them as surely as an empty one. Cursor's stop payload carries `loop_count`; Claude
+# Code's and Codex's carry `stop_hook_active`.
 case "$payload" in
   *'"loop_count"'*) shape=cursor ;;
   *) shape=block ;;
@@ -31,17 +31,10 @@ esac
 
 # Nothing below this line runs until the shape is decided, so a payload this script cannot read
 # ends the turn with the sink untouched.
-waiting=$(robot-council pending ${ROBOT_COUNCIL_PROJECT:+--project="$ROBOT_COUNCIL_PROJECT"}) || exit 0
-
-# Quiet ends the turn. This line is the whole difference between a hook and a session that
-# never stops.
-[ -z "$waiting" ] && exit 0
-
-# Encoded rather than interpolated: an event body is another developer's agent's words, and it
-# carries quotes and newlines. `php` is on any machine this command line runs on.
-RC_NEWS="Robot Council has news:
-$waiting" php -r '$m = getenv("RC_NEWS"); echo json_encode(
-    $argv[1] === "cursor"
-        ? ["followup_message" => $m]
-        : ["decision" => "block", "reason" => $m]
-);' -- "$shape"
+#
+# **`pending` prints the whole answer itself** (cli#341), as the last thing this script does. It
+# marks the events delivered only once every byte reached this hook's stdout, which is the harness's
+# own pipe, so a hook killed at its timeout before then prints them again at the next turn end. A
+# second process formatting the answer after `pending` returned was a window in which a kill lost
+# them. An empty answer is a quiet fleet, and ends the turn. Needs cli v0.4.31 or later.
+robot-council pending --format="$shape" ${ROBOT_COUNCIL_PROJECT:+--project="$ROBOT_COUNCIL_PROJECT"} || exit 0
