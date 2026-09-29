@@ -4,6 +4,26 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.31 — Cursor Seats Stay Joined, a Leave Tool, and Events That Survive a Killed Hook (2026-09-29)
+
+A Cursor seat stays on the fleet through Cursor's reloads, an agent can take its session off the fleet with `leave`, and a stop hook killed at its timeout no longer loses the fleet's events.
+
+**Upgrading**:
+
+- **Replace each machine's copy of the stop-hook script** from this version ([`resources/stop-hook/robot-council-stop-hook`](https://github.com/robot-council/cli/blob/v0.4.31/resources/stop-hook/robot-council-stop-hook)). It now calls `robot-council pending --format`, so no second process stands between delivery and the harness. An older copy keeps working, with a wider window in which a killed hook loses events. The new script needs cli v0.4.31 or later.
+- **Sink delivery is now at least once, so an event can arrive twice** by design: when a hook is killed after printing and before it marks the events delivered, the next turn end prints them again. Treat a directive as a request to reach a state, and check whether that state already holds before acting on it.
+- **For Cursor, restart the bridge** (reload Cursor) after installing, so it runs this version.
+
+### What's new
+- Let an agent take its session off the fleet with a `leave` tool [#338](https://github.com/robot-council/cli/pull/338)
+- Rejoin a restarted Cursor bridge under the application that joined, and otherwise tell the operator [#337](https://github.com/robot-council/cli/pull/337)
+
+### What's fixed
+- Deliver sink events at least once, removing them at the next turn end rather than before printing [#342](https://github.com/robot-council/cli/pull/342)
+
+### Maintenance and tooling
+- Give the CI tests job twenty minutes, which the Windows cells had outgrown [#340](https://github.com/robot-council/cli/pull/340)
+
 ## v0.4.30 — An Agent Hears Its Capacity Change (2026-09-28)
 
 A running agent now hears when its seat's capacity is raised or lowered, without rejoining.
