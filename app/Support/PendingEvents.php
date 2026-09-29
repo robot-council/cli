@@ -61,6 +61,15 @@ final class PendingEvents
     public const string CAPACITY_CHANGED = self::LOCAL_PREFIX.'capacity-changed';
 
     /**
+     * The key an entry carries once `pending` has printed it, holding when (cli#341).
+     *
+     * **A mark rather than a removal**, so delivery is at least once: an entry is removed by the
+     * NEXT `pending`, never by the one that printed it. A hook killed between reading the sink and
+     * printing it leaves the entries unmarked, and the next turn end prints them again.
+     */
+    public const string DELIVERED = 'delivered_at';
+
+    /**
      * How many events one sink keeps.
      *
      * A bound rather than a policy: an agent that is idle for a weekend while the fleet is busy
@@ -213,6 +222,101 @@ final class PendingEvents
     }
 
     /**
+     * Everything not yet delivered, having removed what an earlier `pending` delivered (cli#341).
+     *
+     * **At least once, not at most once.** `drain()` emptied the sink before the hook had printed
+     * anything, so a hook killed at its timeout on a machine under load lost every event in it:
+     * measured on 2026-09-28, a sink read and emptied at a turn end whose output never reached the
+     * agent. Here nothing is removed until a later call, and only what an earlier call marked
+     * delivered (`markDelivered()`), so what this call returns is still in the sink if the process
+     * dies before it is printed. The cost is a duplicate when a hook dies after printing and
+     * before marking.
+     *
+     * Under one lock, for the reason `drain()` gives.
+     *
+     * @return list<array<array-key, mixed>> What is waiting, oldest first.
+     */
+    public function deliver(): array
+    {
+        return $this->rewrite(static fn (array $events): array => array_values(array_filter(
+            $events,
+            static fn (array $event): bool => ! isset($event[self::DELIVERED])
+        )));
+    }
+
+    /**
+     * Mark the given entries delivered, once they have been printed (cli#341).
+     *
+     * **Matched by content**, since an entry's content is all it has in common with the copy
+     * `deliver()` returned: an entry the bridge replaced since (`leaveNotice()`) is a different
+     * entry, stays unmarked, and is printed at the next turn end.
+     *
+     * @param  list<array<array-key, mixed>>  $printed  What `deliver()` returned and was printed.
+     */
+    public function markDelivered(array $printed): void
+    {
+        if ($printed === []) {
+            return;
+        }
+
+        $keys = array_fill_keys(array_map(static fn (array $event): string => hash('sha256', (string) json_encode($event)), $printed), true);
+        $now = time();
+
+        $this->rewrite(static fn (array $events): array => array_map(
+            static fn (array $event): array => ! isset($event[self::DELIVERED]) && isset($keys[hash('sha256', (string) json_encode($event))])
+                ? [...$event, self::DELIVERED => $now]
+                : $event,
+            $events
+        ));
+    }
+
+    /**
+     * Replace the sink's entries with what `$change` makes of them, under one exclusive lock.
+     *
+     * @param  callable(list<array<array-key, mixed>>): list<array<array-key, mixed>>  $change
+     * @return list<array<array-key, mixed>> The entries undelivered after the change.
+     */
+    private function rewrite(callable $change): array
+    {
+        $path = $this->path();
+
+        if (! is_file($path)) {
+            return [];
+        }
+
+        $handle = fopen($path, 'c+');
+
+        if ($handle === false) {
+            return [];
+        }
+
+        try {
+            if (! flock($handle, LOCK_EX)) {
+                return [];
+            }
+
+            $contents = stream_get_contents($handle);
+            $events = $change($this->decode($contents === false ? '' : $contents));
+
+            try {
+                $encoded = $events === [] ? '' : json_encode($events, JSON_THROW_ON_ERROR);
+            } catch (JsonException) {
+                return [];
+            }
+
+            rewind($handle);
+            ftruncate($handle, 0);
+            fwrite($handle, $encoded);
+            fflush($handle);
+
+            return array_values(array_filter($events, static fn (array $event): bool => ! isset($event[self::DELIVERED])));
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    /**
      * Take everything waiting, leaving the sink empty.
      *
      * **Read and truncate under one lock**, because a hook draining while the bridge appends would
@@ -288,7 +392,11 @@ final class PendingEvents
 
             $contents = stream_get_contents($handle);
 
-            return $this->decode($contents === false ? '' : $contents);
+            // What `pending` would print next: an entry already delivered is waiting for nothing
+            return array_values(array_filter(
+                $this->decode($contents === false ? '' : $contents),
+                static fn (array $event): bool => ! isset($event[self::DELIVERED])
+            ));
         } finally {
             flock($handle, LOCK_UN);
             fclose($handle);

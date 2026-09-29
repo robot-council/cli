@@ -26,7 +26,7 @@ use LaravelZero\Framework\Commands\Command;
  * turn normally when the fleet has been quiet, and a command that printed "nothing waiting" would
  * make every turn continue forever.
  */
-#[Description('Print the fleet events waiting for this harness, and clear them')]
+#[Description('Print the fleet events waiting for this harness, and clear them at the next turn end')]
 #[Signature('pending
     {--service= : The service base URL, defaulting to ROBOT_COUNCIL_SERVICE}
     {--project= : The repository or workspace the bridge was started for}
@@ -69,9 +69,11 @@ final class PendingCommand extends Command
 
         $peeking = $this->option('peek') === true;
 
-        $events = $peeking ? $pending->peek() : $pending->drain();
+        // **Delivered at least once** (cli#341): what an earlier call printed is removed now, and
+        // what this call prints is only marked, below, once it has been written
+        $events = $peeking ? $pending->peek() : $pending->deliver();
 
-        // A drain is a stop hook at a turn end; a peek is somebody looking, which is not a turn.
+        // A delivery is a stop hook at a turn end; a peek is somebody looking, which is not a turn.
         // Claude Code only, the one harness whose bridge can keep a cache warm, so no other
         // harness's hook starts writing a file nothing reads
         if (! $peeking && $harness === 'claude') {
@@ -80,6 +82,14 @@ final class PendingCommand extends Command
 
         foreach ($events as $event) {
             $this->line($this->describe($event));
+        }
+
+        if (! $peeking && $events !== []) {
+            // Written through before the mark, so a process killed in between prints them again
+            // at the next turn end rather than having marked what nobody received
+            fflush(STDOUT);
+
+            $pending->markDelivered($events);
         }
 
         return self::SUCCESS;
