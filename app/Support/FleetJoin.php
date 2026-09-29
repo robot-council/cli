@@ -106,8 +106,8 @@ final class FleetJoin
             // identifies this bridge, so a stop hook beside it finds the same file.
             $pending = new PendingEvents($this->service, $this->harness, $this->project, useRecordedKey: true);
 
-            // Resolved now, at the join, rather than at the first event, which may arrive hours
-            // later on a machine too loaded for git to answer in time (#299)
+            // Settled now, at the join, rather than at the first event: from the record the bridge
+            // left at start (cli#346), or resolved here where there is none (#299)
             $pending->path();
 
             $follower = new FleetFollower($session, $this->service, $pending);

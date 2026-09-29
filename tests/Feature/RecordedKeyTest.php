@@ -16,15 +16,21 @@ declare(strict_types=1);
  *
  * @command  vendor/bin/pest --compact tests/Feature/RecordedKeyTest.php
  */
-
+use App\Support\Credentials\Credential;
+use App\Support\Credentials\Credentials;
 use App\Support\PendingEvents;
+use Illuminate\Http\Client\Request;
 use Illuminate\Process\Exceptions\ProcessTimedOutException;
+use Illuminate\Process\PendingProcess;
 use Illuminate\Process\ProcessResult;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Process;
 use Symfony\Component\Process\Exception\ProcessTimedOutException as SymfonyTimedOut;
+use Symfony\Component\Process\InputStream;
 use Symfony\Component\Process\Process as SymfonyProcess;
+use Tests\Fixtures\RecordingStore;
 use Tests\Fixtures\TwoStreamOutput;
 
 const RECORDED_SERVICE = 'https://recorded.example.test';
@@ -209,24 +215,163 @@ it('records nothing for a sink whose key does not depend on the checkout', funct
     'Cursor, one sink per application' => ['cursor', null],
 ]);
 
-it('records the key the bridge uses, at start', function (): void {
+it('records the key while the bridge runs, lets a timed-out hook read it, and removes it on the way out', function (): void {
+    // A real bridge, as its own process, with stdin held open so it keeps running
+    $bridge = new SymfonyProcess(
+        [PHP_BINARY, base_path('robot-council'), 'mcp', '--service='.RECORDED_SERVICE],
+        $this->checkout,
+        ['XDG_STATE_HOME' => $this->state, 'ROBOT_COUNCIL_HARNESS' => 'claude', 'CLAUDE_CONFIG_DIR' => $this->state.'/claude', 'ROBOT_COUNCIL_SERVICE' => false],
+    );
+    $bridge->setInput($input = new InputStream);
+    $bridge->start();
+
+    // Until its record exists: it is written before the bridge reads anything
+    for ($waited = 0; $waited < 300 && recordedFiles($this->state) === [] && $bridge->isRunning(); $waited++) {
+        usleep(100_000);
+    }
+
+    $files = recordedFiles($this->state);
+
+    try {
+        // The checkout is not a repository, so git's answer is definite and the key is the folder's
+        expect($files)->toHaveCount(1)
+            ->and(trim((string) file_get_contents($files[0])))->toBe(basename(recordedSink($this->checkout, useRecordedKey: false)->path(), '.json'));
+
+        // The hook beside it, whose own git lookup times out, reads the record rather than refusing
+        recordedGit(null);
+
+        expect(recordedHook($this->checkout)[0])->toBe(0);
+    } finally {
+        $input->close();
+        $bridge->wait();
+    }
+
+    expect(recordedFiles($this->state))->toBeEmpty();
+})->skipOnWindows();
+
+it("adopts a live bridge's record, so a second bridge in the folder shares its sink and is warned", function (): void {
+    // Bridge A: git answers, it records its key and holds that sink's seat
     recordedGit($this->checkout.'/.git');
+    $first = recordedSink($this->checkout);
+    $first->recordKey();
+
+    $firstPath = $first->path();
+    expect($first->claimSeat())->toBeTrue();
+
+    // Bridge B, a new process whose git times out: it would key the folder, a different sink
+    recordedNewProcess();
+    recordedGit(null);
+    $second = recordedSink($this->checkout);
+
+    expect($second->recordKey())->toBeNull()
+        ->and($second->path())->toBe($first->path())
+
+        // On the shared sink, B's seat claim fails, which is what makes the bridge warn (#320)
+        ->and($second->claimSeat())->toBeFalse();
+
+    // The control: with A's seat free, B records its own key instead, and says why
+    unset($first);
+    recordedNewProcess();
+    $third = recordedSink($this->checkout);
+
+    expect($third->recordKey())->toContain('git did not answer in time')
+        ->and($third->path())->not->toBe($firstPath);
+});
+
+it("keeps the bridge's follower and keep-alive on the record rather than asking git again", function (): void {
+    // Git times out for the record, then answers every later call: a reader that asked again
+    // would land on another sink, and would show as another git call
+    $calls = 0;
+
+    Process::fake(function () use (&$calls): mixed {
+        $calls++;
+
+        if ($calls <= PendingEvents::CHECKOUT_ATTEMPTS) {
+            $git = new SymfonyProcess(['git']);
+
+            throw new ProcessTimedOutException(new SymfonyTimedOut($git, SymfonyTimedOut::TYPE_GENERAL), new ProcessResult($git));
+        }
+
+        return Process::result(output: '/elsewhere/.git'."\n");
+    });
+
+    recordedSink($this->checkout)->recordKey();
+
+    // What the bridge's follower (FleetJoin) and keep-alive build, then ask
+    recordedSink($this->checkout)->path();
+    recordedSink($this->checkout)->turnEndedAt();
+
+    expect($calls)->toBe(PendingEvents::CHECKOUT_ATTEMPTS);
+});
+
+it('keeps the real follower and keep-alive of a joined bridge on its record', function (): void {
+    // Git times out for the record, then answers: FleetJoin's sink at the join, or the keep-alive's
+    // turn mark, asking again would show as a git call beyond the record's
+    $calls = 0;
+
+    // Only the sink's lookup is counted: the join also asks git for the repository and work location
+    Process::fake(function (PendingProcess $process) use (&$calls): mixed {
+        $command = is_array($process->command) ? implode(' ', $process->command) : (string) $process->command;
+
+        if (! str_contains($command, '--absolute-git-dir')) {
+            return Process::result(exitCode: 1);
+        }
+
+        $calls++;
+
+        if ($calls <= PendingEvents::CHECKOUT_ATTEMPTS) {
+            $git = new SymfonyProcess(['git']);
+
+            throw new ProcessTimedOutException(new SymfonyTimedOut($git, SymfonyTimedOut::TYPE_GENERAL), new ProcessResult($git));
+        }
+
+        return Process::result(output: '/elsewhere/.git'."\n");
+    });
+
+    $store = new RecordingStore;
+    $store->put(RECORDED_SERVICE.'|claude', new Credential('rcouncil_1|RECORDED-INSTALLATION'));
+
+    app()->instance(Credentials::class, new Credentials([$store]));
+
+    Http::fake([
+        '*/api/sessions/*' => Http::response('', 204),
+        '*/api/sessions' => Http::response(['session_id' => 81, 'token' => 'rcouncil_2|T', 'expires_in' => 3600, 'abilities' => []], 201),
+        '*/api/agent/session' => Http::response(['fleet_can_direct' => true], 200),
+        '*' => Http::response('', 200),
+    ]);
+
     putenv('ROBOT_COUNCIL_HARNESS=claude');
     putenv('CLAUDE_CONFIG_DIR='.$this->state.'/claude');
-
     $cwd = getcwd();
     chdir($this->checkout);
 
     try {
-        Artisan::call('mcp', ['--service' => RECORDED_SERVICE], new TwoStreamOutput);
+        expect(Artisan::call('mcp', ['--service' => RECORDED_SERVICE, '--auto-join' => true, '--keep-warm' => '30'], new TwoStreamOutput))->toBe(0);
     } finally {
         chdir((string) $cwd);
         putenv('ROBOT_COUNCIL_HARNESS');
         putenv('CLAUDE_CONFIG_DIR');
     }
 
-    $files = recordedFiles($this->state);
+    // The join happened, so FleetJoin built its sink. Beyond the record's lookups, git was asked once
+    // more, by `Checkout::workLocation()` naming the work location at the join -- not for the sink
+    expect(Http::recorded(fn (Request $request): bool => str_ends_with($request->url(), '/api/sessions'))->count())->toBe(1)
+        ->and($calls)->toBe(PendingEvents::CHECKOUT_ATTEMPTS + 1);
+});
 
-    expect($files)->toHaveCount(1)
-        ->and(trim((string) file_get_contents($files[0])))->toBe(basename(recordedSink($this->checkout, useRecordedKey: false)->path(), '.json'));
-})->skipOnWindows();
+it('keeps a running bridge on its own key when another process rewrites the record', function (): void {
+    recordedGit($this->checkout.'/.git');
+    $bridge = recordedSink($this->checkout);
+    $bridge->recordKey();
+
+    $own = $bridge->path();
+
+    // Another bridge, elsewhere, records a different key over this one
+    File::put(recordedFiles($this->state)[0], str_repeat('a', 32));
+
+    // This bridge's follower, keep-alive and shutdown clear stay where they were
+    expect($bridge->path())->toBe($own)
+
+        // The control: a reader in another process, such as the hook, reads the file as it now is
+        ->and(new ReflectionMethod(PendingEvents::class, 'recordedKey')->invoke($bridge))->toBe(str_repeat('a', 32));
+});

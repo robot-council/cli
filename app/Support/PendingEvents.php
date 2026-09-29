@@ -142,9 +142,22 @@ final class PendingEvents
     ) {}
 
     /**
-     * Whether the last key came from the bridge's record rather than from resolving the checkout.
+     * The key this process recorded or adopted, by record path, so a later record cannot move it (cli#346).
+     *
+     * **A bridge keeps its sink for its whole life.** Read from disk on every call, a second bridge
+     * starting in the same folder and recording a different key would move the first bridge's
+     * follower, keep-alive and shutdown clear onto the second's sink mid-life, with nothing said.
+     *
+     * @var array<string, string>
      */
-    private bool $keyFromRecord = false;
+    private static array $ownKeys = [];
+
+    /**
+     * Records this process wrote, by path, so its shutdown removes only its own (cli#346).
+     *
+     * @var array<string, true>
+     */
+    private static array $wroteRecords = [];
 
     /**
      * Add events to the sink, keeping the newest.
@@ -448,9 +461,9 @@ final class PendingEvents
         $path = $this->path();
         $directory = $this->checkoutDirectory ?? getcwd();
 
-        // Only a key resolved from the checkout here can have fallen back; the bridge's record is its
-        // own answer, whatever this process's git would say (cli#346)
-        if ($this->keyedByCheckout() && ! $this->keyFromRecord && isset(self::$unresolved[\is_string($directory) ? $directory : ''])) {
+        // Only a key that depends on the checkout, as `key()` decides, can have fallen back. A key read
+        // from the bridge's record never resolves here, so it never sets the flag (cli#346)
+        if ($this->keyedByCheckout() && isset(self::$unresolved[\is_string($directory) ? $directory : ''])) {
             throw new UnreadableSink(sprintf(
                 'Could not tell which checkout this is: `git rev-parse` ran out of time %d times, at %d seconds each, so its sink cannot be found.',
                 self::CHECKOUT_ATTEMPTS,
@@ -991,16 +1004,16 @@ final class PendingEvents
         // never matched: a Cursor seat's hook drained an empty sink while its bridge's filled.
         // Measured on Cursor 3.17.19. One bridge per app means one sink per app is the right match,
         // which is the key it had before #299
-        $this->keyFromRecord = false;
-
         if ($this->keyedByCheckout()) {
             // **The bridge's own answer, where it left one** (cli#346). Resolving the checkout again
             // is what let a hook and its bridge key two different sinks: the git lookup that times
-            // out in one process and answers in the other
-            if ($this->useRecordedKey && ($recorded = $this->recordedKey()) !== null) {
-                $this->keyFromRecord = true;
+            // out in one process and answers in the other. This process's own key first, then the file
+            if ($this->useRecordedKey) {
+                $recorded = self::$ownKeys[$this->recordPath()] ?? $this->recordedKey();
 
-                return $recorded;
+                if ($recorded !== null) {
+                    return $recorded;
+                }
             }
 
             $parts[] = $this->checkout();
@@ -1027,36 +1040,94 @@ final class PendingEvents
      * that answer. A hook that finds no record, such as one beside a bridge from before this,
      * resolves on its own as it always did.
      *
-     * Named from what both sides know without asking git: the service, the harness, the project and
-     * the checkout's real path. Written aside and moved into place; best-effort, since a record that
+     * Named from what both sides know without asking git: the service, the harness and the
+     * checkout's real path. Written aside and moved into place; best-effort, since a record that
      * could not be written leaves a hook resolving on its own, which is what happened before.
+     *
+     * **A live bridge's record wins.** A record whose sink's seat is held belongs to a bridge still
+     * running in this folder, so a second bridge adopts that key rather than recording its own: the
+     * two then share one sink, and the seat claim that follows warns about it (#320), instead of the
+     * second quietly moving everyone onto another sink.
+     *
+     * @return string|null What to tell the operator, or null when there is nothing to say.
      */
-    public function recordKey(): void
+    public function recordKey(): ?string
     {
         if (! $this->keyedByCheckout()) {
-            return;
-        }
-
-        $parts = [rtrim($this->service, '/'), $this->harness, '', $this->checkout()];
-        $key = substr(hash('sha256', implode("\0", $parts)), 0, 32);
-
-        $directory = $this->directory();
-
-        if (! is_dir($directory) && ! @mkdir($directory, 0o700, true) && ! is_dir($directory)) {
-            return;
+            return null;
         }
 
         $path = $this->recordPath();
-        $staging = $path.'.'.getmypid();
+        $existing = $this->recordedKey();
 
-        if (@file_put_contents($staging, $key) === false) {
-            return;
+        if ($existing !== null && $this->seatHeld($existing)) {
+            self::$ownKeys[$path] = $existing;
+
+            return null;
         }
 
-        @chmod($staging, 0o600);
+        $directory = $this->checkoutDirectory ?? getcwd();
+        $parts = [rtrim($this->service, '/'), $this->harness, '', $this->checkout()];
+        $key = substr(hash('sha256', implode("\0", $parts)), 0, 32);
 
-        if (! @rename($staging, $path)) {
-            @unlink($staging);
+        self::$ownKeys[$path] = $key;
+
+        $state = $this->directory();
+
+        if ((is_dir($state) || @mkdir($state, 0o700, true) || is_dir($state))
+            && @file_put_contents($path.'.'.getmypid(), $key) !== false) {
+            @chmod($path.'.'.getmypid(), 0o600);
+
+            if (@rename($path.'.'.getmypid(), $path)) {
+                self::$wroteRecords[$path] = true;
+            } else {
+                @unlink($path.'.'.getmypid());
+            }
+        }
+
+        return isset(self::$unresolved[\is_string($directory) ? $directory : ''])
+            ? 'git did not answer in time, so this bridge keys its sink by the checkout folder for as long as it runs; its stop hook reads the same key from the record it left.'
+            : null;
+    }
+
+    /**
+     * Remove the record this process wrote, on the way out, if it is still this process's (cli#346).
+     *
+     * So a record never outlives its bridge to steer a hook beside a later bridge that leaves none,
+     * such as one still running an older version after an upgrade.
+     */
+    public function forgetKey(): void
+    {
+        $path = $this->recordPath();
+
+        if (isset(self::$wroteRecords[$path], self::$ownKeys[$path]) && $this->recordedKey() === self::$ownKeys[$path]) {
+            @unlink($path);
+        }
+
+        unset(self::$wroteRecords[$path]);
+    }
+
+    /**
+     * Whether another process holds the seat of the sink with this key, by its lock.
+     */
+    private function seatHeld(string $key): bool
+    {
+        $handle = @fopen($this->directory().'/'.$key.'.seat', 'r');
+
+        if ($handle === false) {
+            return false;
+        }
+
+        try {
+            $free = flock($handle, LOCK_SH | LOCK_NB);
+
+            if ($free) {
+                flock($handle, LOCK_UN);
+            }
+
+            return ! $free;
+        } finally {
+            fclose($handle);
         }
     }
 
