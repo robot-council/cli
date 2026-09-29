@@ -102,7 +102,8 @@ final class PendingCommand extends Command
             return self::FAILURE;
         }
 
-        $pending = new PendingEvents($service, $harness, $this->stringOption('project'), $this->projectDirectory());
+        // The bridge's recorded key where it left one, so the hook needs no git lookup (cli#346)
+        $pending = new PendingEvents($service, $harness, $this->stringOption('project'), $this->projectDirectory(), useRecordedKey: true);
 
         $peeking = $this->option('peek') === true;
         $format = $this->stringOption('format');

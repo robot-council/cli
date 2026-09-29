@@ -104,7 +104,7 @@ final class FleetJoin
 
             // The sink the follower writes and `robot-council pending` drains, keyed by what
             // identifies this bridge, so a stop hook beside it finds the same file.
-            $pending = new PendingEvents($this->service, $this->harness, $this->project);
+            $pending = new PendingEvents($this->service, $this->harness, $this->project, useRecordedKey: true);
 
             // Resolved now, at the join, rather than at the first event, which may arrive hours
             // later on a machine too loaded for git to answer in time (#299)

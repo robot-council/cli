@@ -138,7 +138,13 @@ final class PendingEvents
         private readonly string $harness,
         private readonly ?string $projectId = null,
         private readonly ?string $checkoutDirectory = null,
+        private readonly bool $useRecordedKey = false,
     ) {}
+
+    /**
+     * Whether the last key came from the bridge's record rather than from resolving the checkout.
+     */
+    private bool $keyFromRecord = false;
 
     /**
      * Add events to the sink, keeping the newest.
@@ -442,10 +448,9 @@ final class PendingEvents
         $path = $this->path();
         $directory = $this->checkoutDirectory ?? getcwd();
 
-        // Only a key that depends on the checkout, as `key()` decides, can have fallen back
-        $keyedByCheckout = $this->projectId === null && $this->harness !== self::APP_WIDE_HARNESS;
-
-        if ($keyedByCheckout && isset(self::$unresolved[\is_string($directory) ? $directory : ''])) {
+        // Only a key resolved from the checkout here can have fallen back; the bridge's record is its
+        // own answer, whatever this process's git would say (cli#346)
+        if ($this->keyedByCheckout() && ! $this->keyFromRecord && isset(self::$unresolved[\is_string($directory) ? $directory : ''])) {
             throw new UnreadableSink(sprintf(
                 'Could not tell which checkout this is: `git rev-parse` ran out of time %d times, at %d seconds each, so its sink cannot be found.',
                 self::CHECKOUT_ATTEMPTS,
@@ -986,11 +991,94 @@ final class PendingEvents
         // never matched: a Cursor seat's hook drained an empty sink while its bridge's filled.
         // Measured on Cursor 3.17.19. One bridge per app means one sink per app is the right match,
         // which is the key it had before #299
-        if ($this->projectId === null && $this->harness !== self::APP_WIDE_HARNESS) {
+        $this->keyFromRecord = false;
+
+        if ($this->keyedByCheckout()) {
+            // **The bridge's own answer, where it left one** (cli#346). Resolving the checkout again
+            // is what let a hook and its bridge key two different sinks: the git lookup that times
+            // out in one process and answers in the other
+            if ($this->useRecordedKey && ($recorded = $this->recordedKey()) !== null) {
+                $this->keyFromRecord = true;
+
+                return $recorded;
+            }
+
             $parts[] = $this->checkout();
         }
 
         return substr(hash('sha256', implode("\0", $parts)), 0, 32);
+    }
+
+    /**
+     * Whether this sink's key depends on the checkout: no project named, and not Cursor (#299, #327).
+     */
+    private function keyedByCheckout(): bool
+    {
+        return $this->projectId === null && $this->harness !== self::APP_WIDE_HARNESS;
+    }
+
+    /**
+     * Resolve this sink's key from the checkout, and record it for the stop hook to read (cli#346).
+     *
+     * **Called once, by a bridge as it starts.** The bridge and its hook each resolved the checkout
+     * for themselves, and a `git` that answered one and timed out for the other put them on two
+     * sinks with nothing to say so. Now the bridge resolves it once, whatever it gets, and every
+     * other reader of this sink -- the bridge's own follower and keep-alive, and the hook -- uses
+     * that answer. A hook that finds no record, such as one beside a bridge from before this,
+     * resolves on its own as it always did.
+     *
+     * Named from what both sides know without asking git: the service, the harness, the project and
+     * the checkout's real path. Written aside and moved into place; best-effort, since a record that
+     * could not be written leaves a hook resolving on its own, which is what happened before.
+     */
+    public function recordKey(): void
+    {
+        if (! $this->keyedByCheckout()) {
+            return;
+        }
+
+        $parts = [rtrim($this->service, '/'), $this->harness, '', $this->checkout()];
+        $key = substr(hash('sha256', implode("\0", $parts)), 0, 32);
+
+        $directory = $this->directory();
+
+        if (! is_dir($directory) && ! @mkdir($directory, 0o700, true) && ! is_dir($directory)) {
+            return;
+        }
+
+        $path = $this->recordPath();
+        $staging = $path.'.'.getmypid();
+
+        if (@file_put_contents($staging, $key) === false) {
+            return;
+        }
+
+        @chmod($staging, 0o600);
+
+        if (! @rename($staging, $path)) {
+            @unlink($staging);
+        }
+    }
+
+    /**
+     * The key the bridge recorded for this sink, or null when it left none that reads as one.
+     */
+    private function recordedKey(): ?string
+    {
+        $recorded = @file_get_contents($this->recordPath());
+
+        return \is_string($recorded) && preg_match('/^[0-9a-f]{32}$/', trim($recorded)) === 1 ? trim($recorded) : null;
+    }
+
+    /**
+     * Where the bridge records this sink's key, named without asking git.
+     */
+    private function recordPath(): string
+    {
+        $directory = $this->checkoutDirectory ?? getcwd();
+        $parts = [rtrim($this->service, '/'), $this->harness, 'recorded-key', $this->comparable($this->realDirectory(\is_string($directory) ? $directory : ''))];
+
+        return $this->directory().'/'.substr(hash('sha256', implode("\0", $parts)), 0, 32).'.key';
     }
 
     /**

@@ -126,7 +126,11 @@ final class McpCommand extends Command
         // long-lived child never holds a copy of the lock: a child that inherited it would keep
         // the seat held after this process was killed, for as long as the harness kept stdin open.
         // Close-on-exec covers this on POSIX (`SeatTest`); the order is what covers Windows
-        $seat = new PendingEvents($service, $harness, $this->stringOption('project'));
+        $seat = new PendingEvents($service, $harness, $this->stringOption('project'), useRecordedKey: true);
+
+        // **Resolved once, here, and recorded for everything else to use** (cli#346): the seat, the
+        // follower, the keep-alive and the stop hook then key one sink, whatever git says later
+        $seat->recordKey();
 
         // **Cursor only, and only when named** (#333). Cursor restarts its MCP servers by itself and
         // each stop ends the session, so a Cursor seat needs a record to rejoin from. No other
@@ -375,7 +379,7 @@ final class McpCommand extends Command
             return null;
         }
 
-        $pending = new PendingEvents($service, $harness, $this->stringOption('project'));
+        $pending = new PendingEvents($service, $harness, $this->stringOption('project'), useRecordedKey: true);
 
         $keepWarm = KeepWarm::fromOptions($interval, $ceiling, $pending->turnEndedAt(...), time(...));
 
