@@ -53,3 +53,5 @@ Four ways the tool reports success it has not earned:
 ## Where the conventions live
 
 `.claude/rules/` loads into every session, and `.claude/skills/` loads on demand. They are the same files `robot-council/core` carries, and a change worth making applies to both repositories.
+
+- **Who cuts a release, and when:** only the release seat, at a checkpoint (08:00, 16:00 and 00:00 Central), under the `release:robot-council/cli` lock. See [`who-cuts-a-release`](.claude/rules/who-cuts-a-release.md).
