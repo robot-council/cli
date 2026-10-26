@@ -6,6 +6,7 @@ namespace App\Support;
 
 use Illuminate\Process\Exceptions\ProcessTimedOutException;
 use Illuminate\Support\Facades\Process;
+use RuntimeException;
 use Throwable;
 
 /**
@@ -117,9 +118,21 @@ final class Checkout
      * @param  string|null  $workLocation  What `--work-location` carried.
      * @param  string|null  $directory  Where to derive from; the current working directory by default.
      * @return array{string|null, string|null} The repository and the work location, in that order.
+     *
+     * @throws RuntimeException When the work location written is a path rather than a label.
      */
     public static function resolve(?string $repository, ?string $workLocation, ?string $directory = null): array
     {
+        // Refused before `reduce()` can flatten `/Users/me/repo-ci` into a valid-looking label that
+        // the service accepts and the lane board then shows (cli#354). Here rather than in `join`,
+        // so `api --work-location` cannot reach the same flattening.
+        if (\is_string($workLocation) && self::looksLikePath($workLocation)) {
+            throw new RuntimeException(\sprintf(
+                'The work location %s is a path, and the fleet takes a short label. Pass one such as `a`, `ci` or `primary`, or omit it and the checkout is read.',
+                $workLocation
+            ));
+        }
+
         // Narrowed inline rather than through a helper, because a closure hides the narrowing from
         // the analyzer -- the reason `EnrollCommand::stringValue()` gives for narrowing where the
         // value is used.

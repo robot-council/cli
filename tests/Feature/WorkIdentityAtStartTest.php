@@ -133,6 +133,14 @@ it('judges a written value by the same rules as a derived one', function (): voi
         ->and(Checkout::resolve('../evil', null)[0])->toBeNull();
 });
 
+it('refuses a written path as the work location, whichever command asks', function (string $path): void {
+    expect(fn (): array => Checkout::resolve('octo/repo', $path))->toThrow(RuntimeException::class, 'short label');
+})->with([
+    'a POSIX path' => ['/Users/me/Herd/uams-statamic-ci'],
+    'a Windows path' => ['D:\GitHub Repos\robot-council\cli-b'],
+    'a padded path' => [' /x '],
+]);
+
 it('gives a session the same abilities whichever repository it names', function (): void {
     // **This is a property of the service, and this test cannot prove it.** What it can prove is
     // the client half: nothing here derives, filters, or varies an ability by where the work is.
