@@ -62,6 +62,17 @@ final class FleetJoin
      */
     public function __invoke(array $arguments): Joined
     {
+        // Refused before anything else, so a path never reaches `reduce()`, which would flatten
+        // `/Users/me/repo-ci` into a valid-looking label and let the session join under it (cli#354).
+        $writtenLocation = $arguments['work_location'] ?? $this->workLocation;
+
+        if (\is_string($writtenLocation) && Checkout::looksLikePath($writtenLocation)) {
+            throw new RuntimeException(\sprintf(
+                'The work location %s is a path, and the fleet takes a short label. Pass one such as `a`, `ci` or `primary`, or omit it and the checkout is read.',
+                $writtenLocation
+            ));
+        }
+
         // One credential per harness per fleet, so this process has to say which harness it is.
         // It refuses rather than guessing, including when only one is stored -- #21 weighed that
         // and chose one rule with nothing inferred. `InstallationChoice` throws a sentence naming

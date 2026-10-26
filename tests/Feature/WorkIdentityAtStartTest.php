@@ -125,6 +125,7 @@ it('judges a written value by the same rules as a derived one', function (): voi
     // refuses the first.
     expect(Checkout::resolve(null, 'Feature-A')[1])->toBe('feature-a')
         ->and(Checkout::resolve(null, '-wip')[1])->toBe('wip')
+        ->and(Checkout::resolve(null, ' wip ')[1])->toBe('wip')
         // Rejected, because a repository name is GitHub's and a changed one names a different
         // repository. Writing it out is not a reason to send something the service will refuse.
         ->and(Checkout::resolve('not-a-repository', null)[0])->toBeNull()

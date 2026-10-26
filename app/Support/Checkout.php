@@ -148,6 +148,19 @@ final class Checkout
     }
 
     /**
+     * Whether a work location somebody wrote is a filesystem path rather than a label.
+     *
+     * A path is refused, not normalized: `reduce()` strips the separators, so the segments run
+     * together and the result is cut mid-word, which the service accepts as a valid label (cli#354).
+     *
+     * @param  string  $value  The location as written.
+     */
+    public static function looksLikePath(string $value): bool
+    {
+        return str_contains($value, '/') || str_contains($value, '\\');
+    }
+
+    /**
      * Which GitHub repository this checkout belongs to, or null when nothing can be said.
      *
      * @param  string|null  $directory  Where to ask from; the current working directory by default.
