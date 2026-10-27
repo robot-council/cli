@@ -976,7 +976,16 @@ final class PendingEvents
             return rtrim($configured, '/\\').'/'.self::DIRECTORY.'/pending';
         }
 
+        // **`USERPROFILE` before the temp directory (#268).** Windows does not set `HOME`, so a bridge
+        // started from PowerShell fell through to `sys_get_temp_dir()` and wrote its sink under
+        // `%TEMP%`, while the stop hook, run under Git Bash where `HOME` is set, read the user
+        // folder. Two sinks, so nothing was ever delivered and the channel notice repeated. Both
+        // processes now reach the user folder, which is the order `UserFileStore::path()` uses.
         $home = getenv('HOME');
+
+        if (! \is_string($home) || trim($home) === '') {
+            $home = getenv('USERPROFILE');
+        }
 
         if (! \is_string($home) || trim($home) === '') {
             $home = sys_get_temp_dir();
