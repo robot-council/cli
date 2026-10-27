@@ -23,6 +23,8 @@ use App\Support\PendingEvents;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Assert;
+use Symfony\Component\Console\Command\Command;
 use Tests\Fixtures\RecordingStore;
 use Tests\Fixtures\TwoStreamOutput;
 
@@ -428,3 +430,12 @@ it('says a capacity without --auto-join does nothing, whatever it is', function 
         ->and($output->stderr())->not->toContain('not joining automatically')
         ->and(bridgeStartCalls())->toBe(0);
 })->with(['usable' => ['3'], 'unusable' => ['0'], 'bare' => [null]]);
+
+it('describes --capacity as taking the seat setting when omitted (#361)', function (): void {
+    $command = Artisan::all()['mcp'] ?? null;
+
+    Assert::assertInstanceOf(Command::class, $command);
+
+    expect($command->getDefinition()->getOption('capacity')->getDescription())->toContain('Tasks at once setting of its seat')
+        ->toContain('1 keeps it at one');
+});

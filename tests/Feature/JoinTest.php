@@ -522,3 +522,14 @@ it('offers a capacity in the join tool, as a positive integer', function (): voi
     expect(data_get(joinReplyTo($written, 1), 'result.tools.0.inputSchema.properties.capacity'))
         ->toMatchArray(['type' => 'integer', 'minimum' => 1]);
 });
+
+it('tells an agent that omitting capacity takes the seat setting and that 1 keeps it at one (#361)', function (): void {
+    $written = joinRun(['{"jsonrpc":"2.0","id":1,"method":"tools/list"}']);
+
+    $description = data_get(joinReplyTo($written, 1), 'result.tools.0.inputSchema.properties.capacity.description');
+
+    expect($description)->toBeString()
+        ->and($description)->toContain("seat's Tasks at once setting")
+        ->and($description)->toContain('declares 1')
+        ->and($description)->not->toContain('Omit it for one');
+});
