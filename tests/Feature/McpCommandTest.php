@@ -255,7 +255,7 @@ function readersRunning(?int $parent = null): int
 
             // The parent is the second field after the command name, which is parenthesized and may
             // itself contain spaces or a parenthesis, so it is read after the last one.
-            if (\is_string($command) && str_contains($command, 'mcp:reader') && \is_string($status) && preg_match('/\)\s+\S+\s+(\d+)/', $status, $fields) === 1 && (int) $fields[1] === $parent) {
+            if (\is_string($command) && str_contains($command, 'mcp:reader') && \is_string($status) && preg_match('/^\d+ \(.*\)\s+\S+\s+(\d+)/s', $status, $fields) === 1 && (int) $fields[1] === $parent) {
                 $running++;
             }
         }
@@ -291,10 +291,10 @@ function readersRunning(?int $parent = null): int
 function markedProcess(bool $withGrandchild = false): Process
 {
     $code = $withGrandchild
-        ? '$p = proc_open([PHP_BINARY, "-r", "usleep(60000000);", "mcp:reader"], [], $pipes); usleep(60000000);'
-        : 'usleep(60000000);';
+        ? '$p = proc_open([PHP_BINARY, "-r", "usleep(20000000);", "mcp:reader"], [], $pipes); usleep(20000000);'
+        : 'usleep(20000000);';
 
-    $process = new Process([PHP_BINARY, '-r', $code, 'mcp:reader'], timeout: 90);
+    $process = new Process([PHP_BINARY, '-r', $code, 'mcp:reader'], timeout: 40);
     $process->start();
 
     return $process;
@@ -304,9 +304,16 @@ it('counts a reader this process owns, and not one below another process or on t
     $child = markedProcess(withGrandchild: true);
 
     try {
-        // Time for the grandchild to exist: a count of 1 is only meaningful once there are 2 marked
-        // processes on the machine below this one, one of them a grandchild.
-        usleep(1_500_000);
+        // Until the grandchild exists: a count of 1 under the child is only meaningful once there are
+        // two marked processes below this one, one of them a grandchild. Polled, because a cold PHP
+        // start on a loaded runner can take longer than any fixed wait.
+        $below = 0;
+
+        for ($attempt = 0; $attempt < 100 && $below < 1; $attempt++) {
+            usleep(100_000);
+
+            $below = readersRunning((int) $child->getPid());
+        }
 
         expect($child->isRunning())->toBeTrue()
             ->and(readersRunning())->toBe(1)
