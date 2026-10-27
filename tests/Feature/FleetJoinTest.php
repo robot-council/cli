@@ -134,6 +134,26 @@ it('takes what join was told over the flags, and the flags over the checkout', f
         ->and($read['repository'] ?? null)->toBe('octo/from-checkout');
 });
 
+it('refuses a path as the work location and starts nothing', function (string $path): void {
+    fleetJoinService();
+
+    expect(fn (): Joined => fleetJoin()(['role' => null, 'repository' => 'octo/repo', 'work_location' => $path]))
+        ->toThrow(RuntimeException::class, 'short label')
+        ->and(Http::recorded())->toBeEmpty();
+})->with([
+    'a POSIX path' => ['/Users/me/Herd/uams-statamic-ci'],
+    'a Windows path' => ['D:\GitHub Repos\robot-council\cli-b'],
+    'a relative path' => ['../cli-b'],
+]);
+
+it('refuses a path given as the flag too', function (): void {
+    fleetJoinService();
+
+    expect(fn (): Joined => fleetJoin(workLocation: '/tmp/cli-b')(['role' => null, 'repository' => 'octo/repo', 'work_location' => null]))
+        ->toThrow(RuntimeException::class, 'short label')
+        ->and(Http::recorded())->toBeEmpty();
+});
+
 it('names what is missing when this machine has no credential, and starts nothing', function (): void {
     fleetJoinService();
 
