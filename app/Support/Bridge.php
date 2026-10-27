@@ -1250,8 +1250,9 @@ final class Bridge
                     'capacity' => [
                         'type' => 'integer',
                         'minimum' => 1,
-                        'description' => 'How many tasks this session will hold at once, if it runs parallel work through '
-                            ."subagents. Omit it for one. The seat's own cap applies, and the result says what is in effect.",
+                        'description' => 'How many tasks this session will hold at once. Omit it to take the seat\'s Tasks at once '
+                            .'setting, which can be more than one. A session that must hold only one task at a time declares 1. '
+                            ."The seat's own cap applies, and the result says what is in effect.",
                     ],
                 ],
                 'additionalProperties' => false,
@@ -1423,7 +1424,7 @@ final class Bridge
         $capacity = $this->wholeNumber($arguments['capacity'] ?? null);
 
         if ($capacity === false || ($capacity !== null && $capacity < 1)) {
-            $this->toolResult($out, $id, 'The capacity must be a whole number, 1 or more. Omit it to hold one task at a time.', true);
+            $this->toolResult($out, $id, 'The capacity must be a whole number, 1 or more. Omit it to take the seat\'s Tasks at once setting, or declare 1 to hold one task at a time.', true);
 
             return;
         }

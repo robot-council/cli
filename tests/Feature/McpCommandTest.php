@@ -428,3 +428,10 @@ it('says a capacity without --auto-join does nothing, whatever it is', function 
         ->and($output->stderr())->not->toContain('not joining automatically')
         ->and(bridgeStartCalls())->toBe(0);
 })->with(['usable' => ['3'], 'unusable' => ['0'], 'bare' => [null]]);
+
+it('describes --capacity as taking the seat setting when omitted (#361)', function (): void {
+    $description = Artisan::all()['mcp']->getDefinition()->getOption('capacity')->getDescription();
+
+    expect($description)->toContain('Tasks at once setting of its seat')
+        ->and($description)->toContain('1 keeps it at one');
+});

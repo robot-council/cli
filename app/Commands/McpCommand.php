@@ -44,7 +44,7 @@ use Throwable;
     {--harness= : Which enrolled harness this process is, when detection cannot tell}
     {--auto-join : Join the fleet at launch, for a checkout that should join every time it starts}
     {--role= : With --auto-join, the role to ask for: build, ci or coordinator}
-    {--capacity= : With --auto-join, how many tasks this session will hold at once, up to its seat cap}
+    {--capacity= : With --auto-join, how many tasks this session will hold at once, up to its seat cap; omitted, it takes the Tasks at once setting of its seat, and 1 keeps it at one}
     {--keep-warm= : Claude Code only: wake the session after this many idle minutes, to keep its prompt cache warm}
     {--keep-warm-for= : With --keep-warm, stop once the session has been idle this many minutes}')]
 final class McpCommand extends Command
