@@ -25,6 +25,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Assert;
 use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Process\Process;
 use Tests\Fixtures\RecordingStore;
 use Tests\Fixtures\TwoStreamOutput;
 
@@ -175,10 +176,10 @@ it('leaves no reader child behind', function (): void {
 
     Artisan::call('mcp', ['--service' => MCP_SERVICE]);
 
-    // **Settled rather than snapshotted.** Process teardown is not instantaneous, and this counts
-    // every reader on the machine, so a child from the test that ran just before -- the order is
-    // random -- can still be exiting. Measured: one run in two failed on an instant read. A short
-    // bound still fails outright on a genuine leak, which does not go away by waiting.
+    // **Settled rather than snapshotted.** Process teardown is not instantaneous, so a child of an
+    // earlier command in this process -- the order is random -- can still be exiting. Measured: one
+    // run in two failed on an instant read. A short bound still fails outright on a genuine leak,
+    // which does not go away by waiting. Counted under this process only (#366).
     $running = readersRunning();
 
     for ($attempt = 0; $attempt < 30 && $running > 0; $attempt++) {
@@ -231,17 +232,30 @@ it('writes nothing to stdout when no message ever arrives', function (): void {
 });
 
 /**
- * How many reader children are running.
+ * How many `mcp:reader` processes are running as direct children of a process (#366).
+ *
+ * **Children of one process, not every reader on the machine.** The count used to be machine-wide,
+ * so any other agent session's bridge failed the test that asks whether *this* command left one
+ * behind: 19 were counted against an expected 0 with 38 robot-council processes running. The bridge
+ * starts its reader with `proc_open()` and an argument array, so the reader is a direct child of the
+ * process running the test, with no shell between them (`Support\StdinReader`).
+ *
+ * @param  int|null  $parent  The parent process id to count under; this process by default.
  */
-function readersRunning(): int
+function readersRunning(?int $parent = null): int
 {
+    $parent ??= (int) getmypid();
+
     if (PHP_OS_FAMILY === 'Linux') {
         $running = 0;
 
-        foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $path) {
-            $raw = @file_get_contents($path);
+        foreach (glob('/proc/[0-9]*', GLOB_ONLYDIR) ?: [] as $directory) {
+            $command = @file_get_contents($directory.'/cmdline');
+            $status = @file_get_contents($directory.'/stat');
 
-            if (is_string($raw) && str_contains($raw, 'mcp:reader')) {
+            // The parent is the second field after the command name, which is parenthesized and may
+            // itself contain spaces or a parenthesis, so it is read after the last one.
+            if (\is_string($command) && str_contains($command, 'mcp:reader') && \is_string($status) && preg_match('/\)\s+\S+\s+(\d+)/', $status, $fields) === 1 && (int) $fields[1] === $parent) {
                 $running++;
             }
         }
@@ -253,7 +267,7 @@ function readersRunning(): int
 
     file_put_contents(
         $script,
-        '(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*mcp:reader*" } | Measure-Object).Count'
+        sprintf('(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq %d -and $_.CommandLine -like "*mcp:reader*" } | Measure-Object).Count', $parent)
     );
 
     $output = shell_exec(sprintf(
@@ -265,6 +279,56 @@ function readersRunning(): int
 
     return (int) trim((string) $output);
 }
+
+/**
+ * A process that stays alive with `mcp:reader` on its command line, and optionally one more below it.
+ *
+ * Stands in for a reader, so the counter can be shown to see a leaked child and to ignore one it
+ * does not own, without depending on what else is running on the machine.
+ *
+ * @param  bool  $withGrandchild  Whether it starts a second marked process of its own.
+ */
+function markedProcess(bool $withGrandchild = false): Process
+{
+    $code = $withGrandchild
+        ? '$p = proc_open([PHP_BINARY, "-r", "usleep(60000000);", "mcp:reader"], [], $pipes); usleep(60000000);'
+        : 'usleep(60000000);';
+
+    $process = new Process([PHP_BINARY, '-r', $code, 'mcp:reader'], timeout: 90);
+    $process->start();
+
+    return $process;
+}
+
+it('counts a reader this process owns, and not one below another process or on the machine at large', function (): void {
+    $child = markedProcess(withGrandchild: true);
+
+    try {
+        // Time for the grandchild to exist: a count of 1 is only meaningful once there are 2 marked
+        // processes on the machine below this one, one of them a grandchild.
+        usleep(1_500_000);
+
+        expect($child->isRunning())->toBeTrue()
+            ->and(readersRunning())->toBe(1)
+            ->and(readersRunning((int) $child->getPid()))->toBe(1);
+    } finally {
+        $child->stop(0);
+    }
+
+    // Once the child is stopped there is nothing left of this process's to count.
+    $running = readersRunning();
+
+    for ($attempt = 0; $attempt < 30 && $running > 0; $attempt++) {
+        usleep(100_000);
+
+        $running = readersRunning();
+    }
+
+    expect($running)->toBe(0);
+})->skip(
+    fn (): bool => ! in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true),
+    'Counting another process is implemented here for Windows and Linux only.'
+);
 
 it('asks for a role named with --auto-join, which is a request and not a grant', function (): void {
     bridgeEnrolled();
