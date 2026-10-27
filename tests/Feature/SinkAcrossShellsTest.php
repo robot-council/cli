@@ -117,9 +117,11 @@ it('delivers to the hook what a bridge with no HOME wrote', function (): void {
         }
     }
 
-    $hook = underGitBash($profile, '"$RC_PHP" "$RC_BIN" pending');
-
-    File::deleteDirectory($profile);
+    try {
+        $hook = underGitBash($profile, '"$RC_PHP" "$RC_BIN" pending');
+    } finally {
+        File::deleteDirectory($profile);
+    }
 
     expect($hook->getExitCode())->toBe(0)
         ->and($hook->getOutput())->toContain('across-shells-probe');
