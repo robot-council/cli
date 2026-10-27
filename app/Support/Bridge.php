@@ -1245,7 +1245,7 @@ final class Bridge
                     ],
                     'work_location' => [
                         'type' => 'string',
-                        'description' => 'Which working copy of that repository this is. Read from the checkout when omitted.',
+                        'description' => 'Which working copy of that repository this is, as a short label such as a, ci or primary, never a path. Read from the checkout when omitted.',
                     ],
                     'capacity' => [
                         'type' => 'integer',

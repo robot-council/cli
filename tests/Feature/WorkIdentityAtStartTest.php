@@ -125,12 +125,21 @@ it('judges a written value by the same rules as a derived one', function (): voi
     // refuses the first.
     expect(Checkout::resolve(null, 'Feature-A')[1])->toBe('feature-a')
         ->and(Checkout::resolve(null, '-wip')[1])->toBe('wip')
+        ->and(Checkout::resolve(null, ' wip ')[1])->toBe('wip')
         // Rejected, because a repository name is GitHub's and a changed one names a different
         // repository. Writing it out is not a reason to send something the service will refuse.
         ->and(Checkout::resolve('not-a-repository', null)[0])->toBeNull()
         ->and(Checkout::resolve('-leading/hyphen', null)[0])->toBeNull()
         ->and(Checkout::resolve('../evil', null)[0])->toBeNull();
 });
+
+it('refuses a written path as the work location, whichever command asks', function (string $path): void {
+    expect(fn (): array => Checkout::resolve('octo/repo', $path))->toThrow(RuntimeException::class, 'short label');
+})->with([
+    'a POSIX path' => ['/Users/me/Herd/uams-statamic-ci'],
+    'a Windows path' => ['D:\GitHub Repos\robot-council\cli-b'],
+    'a padded path' => [' /x '],
+]);
 
 it('gives a session the same abilities whichever repository it names', function (): void {
     // **This is a property of the service, and this test cannot prove it.** What it can prove is
