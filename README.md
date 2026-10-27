@@ -41,6 +41,15 @@ Then put `~/.local/robot-council/bin` on your `PATH`. The Windows commands, upgr
 
 The stop-hook script itself is [`resources/stop-hook/robot-council-stop-hook`](resources/stop-hook/robot-council-stop-hook), which `tests/Feature/StopHookScriptTest.php` runs.
 
+### The stop hook under Claude Code on Windows
+
+Measured on Windows 11 with Claude Code 2.1.284 ([#268](https://github.com/robot-council/cli/issues/268)). Claude Code picks up a `hooks` change in `~/.claude/settings.json` without a restart.
+
+- **Name Git Bash and the script explicitly**, with forward slashes: `hooks.Stop` set to `"C:/Program Files/Git/bin/bash.exe" "C:/Users/<you>/bin/robot-council-stop-hook"`, with `timeout` of `20`. Which shell a bare `command` runs under on Windows was not measured, so a bare command is not a supported form here.
+- **`robot-council` is usually not on Git Bash's `PATH`.** The script calls it by name. Put `~/.local/robot-council/bin` on that `PATH`, or edit your copy to call `php` and `robot-council.php` by absolute path. A hook that cannot find it prints nothing, which looks the same as a quiet fleet.
+- **The hook and the bridge now agree on where the sink lives**, though Windows does not set `HOME` for a bridge started from PowerShell and Git Bash does for the hook: with no `HOME`, the bridge falls back to `USERPROFILE`. `tests/Feature/SinkAcrossShellsTest.php` has a bridge with no `HOME` write a sink and `robot-council pending`, run under Git Bash with an MSYS `HOME`, read it back on Windows. It does not run the hook script itself. A sink an older bridge wrote under `%TEMP%\.local\state\robot-council\pending` is not read and can be deleted.
+- **`XDG_STATE_HOME`, if set for one of them, must be set for both**, since it wins over everything else. Write it in the Windows form (`C:\Users\<you>\.local\state`) the native PHP process reads; the form Git Bash would give a shell variable was not measured.
+
 ## Development
 
 ```bash
