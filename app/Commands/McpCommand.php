@@ -170,6 +170,7 @@ final class McpCommand extends Command
             stopHook: $this->stopHookDelivers($harness),
             sharedSink: $sharedSink,
             joinRecord: $record,
+            afterJoinNotice: Bridge::afterJoinNoticeFor($harness),
         );
 
         $rejoin = null;
