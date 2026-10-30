@@ -202,6 +202,15 @@ describe('what the agent is told', function (): void {
             ->not->toContain(Bridge::CHANNEL_INSTRUCTIONS)
             ->and(Bridge::CHANNEL_INSTRUCTIONS_WITHOUT_HOOK)->toContain('`events_read`')->toContain('`task_list`');
     });
+
+    it('names the parameter the cursor goes in, not only the field it comes back in (#371)', function (): void {
+        // The reply's field is `cursor` and the parameter is `after`; an agent that followed
+        // "passing the `cursor`" literally sent a parameter core does not take and re-read the window.
+        expect(Bridge::CHANNEL_INSTRUCTIONS_WITHOUT_HOOK)
+            ->toContain('the `cursor` value your last read returned as its `after` parameter')
+            ->toContain('omit `after` on your first read')
+            ->not->toContain('omit it on your first read');
+    });
 });
 
 /**
