@@ -506,7 +506,8 @@ it("tells a Codex session at the join that the fleet's tools may not appear, and
         expect($joined)->not->toContain('re-read this server');
     } else {
         expect($joined)->toContain("Note: {$notice}")
-            ->and($notice)->toContain('fleet-kit#26')->toContain('codex-cli 0.163.0');
+            ->and($notice)->toContain('robot-council/cli#375')->toContain('codex-cli 0.163.0')
+            ->toContain('`--auto-join`')->toContain('a resumed session starts a new bridge');
     }
 })->with([
     'a Codex bridge' => [Bridge::CODEX_JOIN_NOTICE],

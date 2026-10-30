@@ -222,16 +222,18 @@ final class Bridge
     /**
      * What a Codex session is told at the join, because it may keep only `join` afterwards (#373).
      *
-     * **Measured once, and worded as measured.** On `codex-cli 0.163.0` on macOS 27.2 (arm64), a
-     * session that joined kept only `join`: asked to call `leave`, it answered that the tool was not
-     * available (`robot-council/fleet-kit#26`). The bridge sends `notifications/tools/list_changed`
-     * after a join, so Codex does not appear to re-read the list, but that is an inference. Whether
-     * `--auto-join` or `codex resume` gives the tools was not measured, so neither is promised here.
+     * **Measured on `codex-cli 0.163.0`, macOS 27.2 (arm64), and worded as measured.** A session that
+     * joined with the `join` tool kept only `join` (`robot-council/fleet-kit#26`). A bridge launched
+     * with `--auto-join` and `--role` offered the fleet's tools from the first turn, and a resumed
+     * conversation started a new, unjoined bridge that offered `join` alone (#375). The bridge sends
+     * `notifications/tools/list_changed` after a join, so Codex does not appear to re-read the
+     * list, but that is an inference.
      */
     public const string CODEX_JOIN_NOTICE = "Codex has been seen not to re-read this server's tool list after a join "
-        ."(codex-cli 0.163.0, macOS 27.2; robot-council/fleet-kit#26), so the fleet's tools may not appear in this session. "
-        .'If a fleet tool you need is not offered, say so to your operator: a second `join` changes nothing, and whether a '
-        .'restarted or resumed session keeps the tools was not measured.';
+        ."(codex-cli 0.163.0, macOS 27.2; robot-council/cli#375), so the fleet's tools may not appear in this session. "
+        .'A Codex seat gets them by launching the bridge with `--auto-join`, `--role` and its repository and work location in '
+        .'its MCP `args`; a resumed session starts a new bridge and needs the same `args`. If a fleet tool you need is not '
+        .'offered, say so to your operator: a second `join` changes nothing.';
 
     /**
      * What a harness is told at the join about its tools, or null for nothing (#373).
