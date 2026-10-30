@@ -4,6 +4,31 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.33 — Windows Sink Agreement, Path-Free Work Locations, and a Codex Join Note (2026-10-30)
+
+Windows seats now share one sink between the bridge and the stop hook, `join` refuses a path as `work_location`, and a Codex session is told how to get the fleet's tools.
+
+**Upgrading**:
+
+- **Restart each Windows seat's bridge after upgrading.** A bridge started without `HOME`, as PowerShell starts it, now falls back to `USERPROFILE` for the sink, the folder the stop hook already reads under Git Bash ([#364](https://github.com/robot-council/cli/pull/364)). A sink an older bridge wrote under `%TEMP%\.local\state\robot-council\pending` is not read and can be deleted. If `XDG_STATE_HOME` is set for one of the two processes it must be set for both.
+- **Pass a short label as `work_location`, never a path.** `join` and `api --work-location` now refuse a path such as `C:\work\repo` or `/home/me/repo` and say which labels to use, such as `a`, `ci` or `primary` ([#363](https://github.com/robot-council/cli/pull/363)). Omit it and the checkout is read.
+- **A Codex seat launches its bridge with `--auto-join`.** A Codex session that joins with the `join` tool keeps only `join`, so a `codex` bridge now ends its `join` result with a note saying so ([#374](https://github.com/robot-council/cli/pull/374), [#376](https://github.com/robot-council/cli/pull/376)). The wiki's Wiring section has the arguments and the two Codex behaviors the run found.
+
+### What's new
+- Tell a Codex session at the join that the fleet's tools may not appear [#374](https://github.com/robot-council/cli/pull/374)
+- Point a Codex session at `--auto-join` in the join note [#376](https://github.com/robot-council/cli/pull/376)
+- Say that omitting `capacity` takes the seat's Tasks at once setting [#365](https://github.com/robot-council/cli/pull/365)
+- Refuse a path passed as `work_location` on `join` [#363](https://github.com/robot-council/cli/pull/363)
+
+### What's fixed
+- Name `after` as the parameter the no-hook instruction pages `events_read` with [#372](https://github.com/robot-council/cli/pull/372)
+- Resolve the sink under `USERPROFILE` when `HOME` is unset [#364](https://github.com/robot-council/cli/pull/364)
+
+### Maintenance and tooling
+- Count only the readers `McpCommandTest` started [#368](https://github.com/robot-council/cli/pull/368)
+- Document the stop hook under Claude Code on Windows, and check it on Windows [#367](https://github.com/robot-council/cli/pull/367)
+- Build(deps): Bump actions/setup-python from 5 to 7 [#353](https://github.com/robot-council/cli/pull/353)
+
 ## v0.4.32 — A Stop Hook That Says When It Cannot Read the Sink (2026-09-29)
 
 The stop hook now says when it cannot read the sink, and reads the sink key its bridge recorded, so a slow `git` no longer splits the two.
