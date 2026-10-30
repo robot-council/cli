@@ -208,13 +208,14 @@ final class Bridge
      * **The opposite of `CHANNEL_INSTRUCTIONS`, because following that one here loses the event.**
      * An agent told the hook delivers ends the turn, nothing delivers, and the placement it was
      * woken for is never seen -- measured on six seats at once on 2026-09-25. So the agent reads
-     * the feed itself: `events_read` is the fleet's own tool, and with the cursor it last returned it
-     * answers exactly what arrived since. Still trusted where the notice is not, for the reason
+     * the feed itself: `events_read` is the fleet's own tool, and given the `cursor` it last returned as
+     * `after` it answers exactly what arrived since. The reply's field is `cursor` and the parameter is
+     * `after` (#371), so the text names both. Still trusted where the notice is not, for the reason
      * `CHANNEL_INSTRUCTIONS` gives.
      */
     public const string CHANNEL_INSTRUCTIONS_WITHOUT_HOOK = 'A channel notice from this server says only that new Robot Council '
         .'fleet events are waiting for this session. No stop hook was found to deliver them, so read them yourself: call '
-        .'`events_read`, passing the `cursor` your last read returned (omit it on your first read), and act on what concerns this '
+        .'`events_read`, passing the `cursor` value your last read returned as its `after` parameter (omit `after` on your first read), and act on what concerns this '
         .'session. Tasks placed on this session appear in `task_list` under the `claimed` and `in_progress` statuses. Then end '
         .'the turn. If you are in the middle of a task, finish the step you are on first.';
 
