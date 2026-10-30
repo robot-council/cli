@@ -100,7 +100,7 @@ function joinFunction(array &$calls): Closure
  * @param  list<array<string, string|null>>  $calls  Every join's arguments, appended to.
  * @return list<array<array-key, mixed>> What the bridge wrote, in order.
  */
-function joinRun(array $lines, ?Closure $join = null, array &$calls = [], ?string $sharedSink = null): array
+function joinRun(array $lines, ?Closure $join = null, array &$calls = [], ?string $sharedSink = null, ?string $afterJoinNotice = null): array
 {
     $in = tmpfile();
     fwrite($in, implode("\n", $lines)."\n");
@@ -108,7 +108,7 @@ function joinRun(array $lines, ?Closure $join = null, array &$calls = [], ?strin
 
     $out = tmpfile();
 
-    new Bridge(null, JOIN_SERVICE, heartbeatSeconds: 0, join: $join ?? joinFunction($calls), sharedSink: $sharedSink)
+    new Bridge(null, JOIN_SERVICE, heartbeatSeconds: 0, join: $join ?? joinFunction($calls), sharedSink: $sharedSink, afterJoinNotice: $afterJoinNotice)
         ->run($in, $out, fn (string $m): null => null);
 
     rewind($out);
@@ -492,6 +492,34 @@ it('repeats a shared-sink warning in the join result and in the instructions, an
 })->with([
     'another bridge holds the seat' => [sprintf(Bridge::SHARED_SINK_WARNING, 'pid 4242')],
     'this bridge holds it' => [null],
+]);
+
+it("tells a Codex session at the join that the fleet's tools may not appear, and no other harness (#373)", function (?string $notice): void {
+    joinService();
+
+    $written = joinRun([joinCall(1)], afterJoinNotice: $notice);
+    $joined = joinText(data_get(joinReplyTo($written, 1), 'result.content.0.text'));
+
+    expect($joined)->toStartWith('Joined the fleet as session 41.');
+
+    if ($notice === null) {
+        expect($joined)->not->toContain('re-read this server');
+    } else {
+        expect($joined)->toContain("Note: {$notice}")
+            ->and($notice)->toContain('fleet-kit#26')->toContain('codex-cli 0.163.0');
+    }
+})->with([
+    'a Codex bridge' => [Bridge::CODEX_JOIN_NOTICE],
+    'any other harness' => [null],
+]);
+
+it('picks the after-join notice by harness: Codex gets it, every other harness gets none (#373)', function (string $harness, ?string $expected): void {
+    expect(Bridge::afterJoinNoticeFor($harness))->toBe($expected);
+})->with([
+    'codex' => ['codex', Bridge::CODEX_JOIN_NOTICE],
+    'claude' => ['claude', null],
+    'cursor' => ['cursor', null],
+    'an unknown harness' => ['unknown-harness', null],
 ]);
 
 it('passes a declared capacity from the join tool to the join, however the whole number arrives', function (string $given): void {

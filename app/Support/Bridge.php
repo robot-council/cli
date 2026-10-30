@@ -220,6 +220,30 @@ final class Bridge
         .'the turn. If you are in the middle of a task, finish the step you are on first.';
 
     /**
+     * What a Codex session is told at the join, because it may keep only `join` afterwards (#373).
+     *
+     * **Measured once, and worded as measured.** On `codex-cli 0.163.0` on macOS 27.2 (arm64), a
+     * session that joined kept only `join`: asked to call `leave`, it answered that the tool was not
+     * available (`robot-council/fleet-kit#26`). The bridge sends `notifications/tools/list_changed`
+     * after a join, so Codex does not appear to re-read the list, but that is an inference. Whether
+     * `--auto-join` or `codex resume` gives the tools was not measured, so neither is promised here.
+     */
+    public const string CODEX_JOIN_NOTICE = "Codex has been seen not to re-read this server's tool list after a join "
+        ."(codex-cli 0.163.0, macOS 27.2; robot-council/fleet-kit#26), so the fleet's tools may not appear in this session. "
+        .'If a fleet tool you need is not offered, say so to your operator: a second `join` changes nothing, and whether a '
+        .'restarted or resumed session keeps the tools was not measured.';
+
+    /**
+     * What a harness is told at the join about its tools, or null for nothing (#373).
+     *
+     * @param  string  $harness  Which harness this bridge serves.
+     */
+    public static function afterJoinNoticeFor(string $harness): ?string
+    {
+        return $harness === 'codex' ? self::CODEX_JOIN_NOTICE : null;
+    }
+
+    /**
      * What a second bridge in one checkout says, with the other bridge's pid (#320).
      *
      * One seat per checkout is the supported arrangement (#300), so this names the consequence and
@@ -254,6 +278,8 @@ final class Bridge
      * @param  JoinRecord|null  $joinRecord  Where a join is recorded for the bridge that replaces
      *                                       this one, or null to record nothing, which is every
      *                                       harness but Cursor (#333).
+     * @param  string|null  $afterJoinNotice  Said at the end of a successful `join`, or null for
+     *                                        nothing, which is every harness but Codex (#373).
      *
      * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -283,6 +309,7 @@ final class Bridge
         private readonly ?string $sharedSink = null,
         private readonly int $capacitySeconds = self::CAPACITY_CHECK_SECONDS,
         private readonly ?JoinRecord $joinRecord = null,
+        private readonly ?string $afterJoinNotice = null,
     ) {}
 
     /**
@@ -1500,6 +1527,10 @@ final class Bridge
         // Said again at the join, the moment the shared sink starts to matter (#320)
         if ($this->sharedSink !== null) {
             $text .= "\n\nWarning: ".$this->sharedSink;
+        }
+
+        if ($this->afterJoinNotice !== null) {
+            $text .= "\n\nNote: ".$this->afterJoinNotice;
         }
 
         return ['joined' => true, 'text' => $text];
