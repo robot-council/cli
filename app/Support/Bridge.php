@@ -282,6 +282,9 @@ final class Bridge
      *                                       harness but Cursor (#333).
      * @param  string|null  $afterJoinNotice  Said at the end of a successful `join`, or null for
      *                                        nothing, which is every harness but Codex (#373).
+     * @param  WakeDelivery|null  $wake  Hands a notice to the harness's adapter when events are
+     *                                   pending for an idle seat, or null for never, which is the
+     *                                   default (#381). Not the Claude Code channel, which stays as it is.
      *
      * The intervals are parameters rather than only constants because otherwise nothing can show
      * what they do: the schedule is read from `time()` inside a loop that blocks on
@@ -312,6 +315,7 @@ final class Bridge
         private readonly int $capacitySeconds = self::CAPACITY_CHECK_SECONDS,
         private readonly ?JoinRecord $joinRecord = null,
         private readonly ?string $afterJoinNotice = null,
+        private readonly ?WakeDelivery $wake = null,
     ) {}
 
     /**
@@ -1097,6 +1101,12 @@ final class Bridge
             // told to read the feed again. Once it has read, the notice has done its job.
             if (! $this->stopHook && \is_array($decoded['params'] ?? null) && ($decoded['params']['name'] ?? null) === self::FEED_READ_TOOL) {
                 $this->announcedSink = null;
+
+                // **And a woken seat that has read has nothing left to be told** (#381): a delivery
+                // waiting out a failure would otherwise announce events the agent already has
+                if ($this->wake instanceof WakeDelivery) {
+                    $this->unannounced = 0;
+                }
             }
         }
 
@@ -1203,6 +1213,11 @@ final class Bridge
         $instructions = $joined
             ? array_filter([$this->fleetInstructions])
             : [self::JOIN_INSTRUCTIONS];
+
+        // A woken seat reads the feed itself, since nothing here assumes a stop hook (#381)
+        if ($this->wake instanceof WakeDelivery && $this->follower instanceof FleetFollower) {
+            $instructions[] = WakeDelivery::INSTRUCTIONS;
+        }
 
         // Only where a follower can exist, since a notice announces what it left in the sink
         if ($this->channel && ($this->follower instanceof FleetFollower || $this->join instanceof Closure)) {
@@ -1393,6 +1408,9 @@ final class Bridge
         $this->announcedNew = 0;
         $this->repeats = 0;
         $this->roleChanged = false;
+
+        // A new session starts with a clean wake: a give-up or a backoff belonged to the old one
+        $this->wake?->reset();
         $this->renewalDue = false;
         $this->watcherFailing = false;
         $this->nextWatcherBeat = 0;
@@ -1704,6 +1722,58 @@ final class Bridge
     }
 
     /**
+     * Wake the seat's harness for events the follower left pending, when it was asked to (#381).
+     *
+     * **One delivery per batch.** What arrived is counted, and handed to the adapter once its gap and
+     * any backoff allow, so a burst is one notice. It is not sent again because time passed: only
+     * events arriving after it make another, so an unchanged pending state never wakes the seat twice.
+     *
+     * **Dropped when the events were read first.** A pass that finds nothing pending has nothing to
+     * announce, and a retry waiting out a failure is dropped the same way.
+     *
+     * **A failed delivery leaves everything where it was.** The events are still pending, the count
+     * is kept, and `WakeDelivery` decides when to try again and when to stop.
+     *
+     * @param  callable(string):void  $diagnostic  Where a failure is said.
+     */
+    private function wakeSeat(callable $diagnostic): void
+    {
+        $wake = $this->wake;
+
+        if (! $wake instanceof WakeDelivery) {
+            return;
+        }
+
+        $arrived = $this->follower?->delivered() ?? 0;
+        $this->unannounced += $arrived;
+
+        // A batch that arrives after the last one gave up has not failed yet
+        if ($arrived > 0 && $wake->gaveUp()) {
+            $wake->rearm();
+        }
+
+        if ($this->unannounced === 0 || ! $wake->due()) {
+            return;
+        }
+
+        if ($this->follower?->waiting() === null) {
+            $this->unannounced = 0;
+
+            return;
+        }
+
+        if (! $wake->deliver()) {
+            $diagnostic('Wake '.$wake->lastFailure().($wake->gaveUp()
+                ? '; giving up on this batch. The events are still pending, and a later batch tries again.'
+                : '; trying again later.'));
+
+            return;
+        }
+
+        $this->unannounced = 0;
+    }
+
+    /**
      * Announce again a sink that nothing drained since its notice, within the bound (cli#230).
      *
      * **Only while the sink is exactly as the notice left it.** Empty means a stop hook delivered
@@ -1995,6 +2065,8 @@ final class Bridge
         }
 
         $this->announce($out);
+
+        $this->wakeSeat($diagnostic);
 
         $this->keepCacheWarm($out);
 
