@@ -16,6 +16,9 @@ use App\Support\Session;
 use App\Support\Stderr;
 use App\Support\StdinReader;
 use App\Support\StopHooks;
+use App\Support\WakeAdapter;
+use App\Support\WakeAdapters;
+use App\Support\WakeDelivery;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Http\Client\Factory;
@@ -46,7 +49,8 @@ use Throwable;
     {--role= : With --auto-join, the role to ask for: build, ci or coordinator}
     {--capacity= : With --auto-join, how many tasks this session will hold at once, up to its seat cap; omitted, it takes the Tasks at once setting of its seat, and 1 keeps it at one}
     {--keep-warm= : Claude Code only: wake the session after this many idle minutes, to keep its prompt cache warm}
-    {--keep-warm-for= : With --keep-warm, stop once the session has been idle this many minutes}')]
+    {--keep-warm-for= : With --keep-warm, stop once the session has been idle this many minutes}
+    {--wake-target= : Wake this seat of the harness, by the id its adapter reaches it with, when fleet events arrive for it}')]
 final class McpCommand extends Command
 {
     /**
@@ -83,7 +87,7 @@ final class McpCommand extends Command
      * @param  Credentials  $credentials  Where the installation credential lives.
      * @return int The exit code.
      */
-    public function handle(Factory $http, Credentials $credentials, ParentProcess $parent): int
+    public function handle(Factory $http, Credentials $credentials, ParentProcess $parent, WakeAdapters $adapters): int
     {
         $service = $this->resolveService();
 
@@ -157,6 +161,8 @@ final class McpCommand extends Command
         // that is not leaving, and nothing rejoins beside it.
         $sharedSink = $this->sharedSinkWarning($seat, $sameParent ? self::REJOIN_SEAT_WAIT_MILLISECONDS : 0);
 
+        $wake = $this->wakeDelivery($harness, $adapters);
+
         $bridge = new Bridge(
             null,
             $service,
@@ -167,10 +173,13 @@ final class McpCommand extends Command
             channel: $harness === 'claude',
             join: $join(...),
             keepWarm: $this->keepWarm($service, $harness),
-            stopHook: $this->stopHookDelivers($harness),
+
+            // **A woken seat assumes no hook**, so the agent is told to read the feed itself (#381)
+            stopHook: $wake instanceof WakeDelivery ? false : $this->stopHookDelivers($harness),
             sharedSink: $sharedSink,
             joinRecord: $record,
             afterJoinNotice: Bridge::afterJoinNoticeFor($harness),
+            wake: $wake,
         );
 
         $rejoin = null;
@@ -348,6 +357,46 @@ final class McpCommand extends Command
         }
 
         return $hooks->delivers();
+    }
+
+    /**
+     * The wake `--wake-target` asks for, or null (#381).
+     *
+     * **Opt-in and never guessed.** Without the option nothing is delivered. With it, the harness
+     * must have an adapter and the adapter must accept the target; anything else is said and
+     * dropped, never fatal, for the reason `keepWarm()` gives. **Not Claude Code**, whose channel
+     * is its own path and stays as it is.
+     *
+     * @param  string  $harness  Which harness this process is.
+     * @param  WakeAdapters  $adapters  The harnesses that can be woken.
+     */
+    private function wakeDelivery(string $harness, WakeAdapters $adapters): ?WakeDelivery
+    {
+        $target = $this->stringOption('wake-target');
+
+        if ($target === null) {
+            if ($this->input->hasParameterOption('--wake-target')) {
+                $this->diagnostic('--wake-target takes the id of the seat to wake; waking is off.');
+            }
+
+            return null;
+        }
+
+        if ($harness === 'claude') {
+            $this->diagnostic('--wake-target does not apply to Claude Code, which wakes through its channel; waking is off.');
+
+            return null;
+        }
+
+        $adapter = $adapters->for($harness, $target);
+
+        if (! $adapter instanceof WakeAdapter) {
+            $this->diagnostic('--wake-target: '.$adapter.'; waking is off.');
+
+            return null;
+        }
+
+        return new WakeDelivery($adapter, time(...));
     }
 
     /**
