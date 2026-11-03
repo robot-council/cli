@@ -1104,7 +1104,9 @@ final class Bridge
 
                 // **And a woken seat that has read has nothing left to be told** (#381): a delivery
                 // waiting out a failure would otherwise announce events the agent already has
-                $this->unannounced = 0;
+                if ($this->wake instanceof WakeDelivery) {
+                    $this->unannounced = 0;
+                }
             }
         }
 
@@ -1406,6 +1408,9 @@ final class Bridge
         $this->announcedNew = 0;
         $this->repeats = 0;
         $this->roleChanged = false;
+
+        // A new session starts with a clean wake: a give-up or a backoff belonged to the old one
+        $this->wake?->reset();
         $this->renewalDue = false;
         $this->watcherFailing = false;
         $this->nextWatcherBeat = 0;

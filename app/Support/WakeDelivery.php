@@ -121,10 +121,23 @@ final class WakeDelivery
 
     /**
      * Start counting failures again, for a batch that arrived after the last one gave up.
+     *
+     * **And forget the backoff**, so a new batch is tried now rather than after the wait the last
+     * batch's final failure earned.
      */
     public function rearm(): void
     {
         $this->failures = 0;
+        $this->notBefore = 0;
+    }
+
+    /**
+     * Forget everything, for a new session on the same bridge.
+     */
+    public function reset(): void
+    {
+        $this->rearm();
+        $this->lastFailure = null;
     }
 
     /**

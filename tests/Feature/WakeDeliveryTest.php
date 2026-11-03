@@ -91,9 +91,10 @@ function seamDirective(int $id, string $body = 'hold new migrations'): array
  *
  * @param  list<list<array<string, mixed>>>  $pages  What each feed read returns, in order; empty after.
  * @param  bool  $wakeOn  Whether the seat opted in.
+ * @param  bool|null  $stopHook  Whether a stop hook delivers; omitted, as `McpCommand` builds it: none for a woken seat.
  * @return array{pass: Closure(): list<string>, adapter: SeamAdapter, clock: SeamClock, sink: PendingEvents, bridge: Bridge}
  */
-function seamWorld(array $pages, bool $wakeOn = true, string $target = 'seat-A'): array
+function seamWorld(array $pages, bool $wakeOn = true, string $target = 'seat-A', ?bool $stopHook = null): array
 {
     $sequence = Http::sequence();
 
@@ -119,7 +120,7 @@ function seamWorld(array $pages, bool $wakeOn = true, string $target = 'seat-A')
         SEAM_SERVICE,
         follower: new FleetFollower($session, SEAM_SERVICE, $sink, 0),
         // As `McpCommand` builds it: a woken seat assumes no hook
-        stopHook: ! $wakeOn,
+        stopHook: $stopHook ?? ! $wakeOn,
         wake: $wakeOn ? new WakeDelivery($adapter, $clock->read(...)) : null,
     );
 
@@ -406,13 +407,14 @@ describe('a failing adapter', function (): void {
 });
 
 describe('the target', function (): void {
-    it('is the one configured, handed to its own adapter and nobody else', function (): void {
+    it('is handed to the adapter of the bridge that holds the event, and to no other', function (): void {
         $a = seamWorld([[seamDirective(11)]], target: 'seat-A');
         $b = seamWorld([[seamDirective(11)]], target: 'seat-B');
 
         ($a['pass'])();
 
-        // Seat B's bridge never ran a pass, and seat A's adapter is the only one that heard
+        // Shows the adapter binding only. That a second seat in the checkout is not woken for this
+        // seat's events is the recipient filter's, covered by the addressee cases below.
         expect($a['adapter']->target())->toBe('seat-A')
             ->and($a['adapter']->notices)->toHaveCount(1)
             ->and($b['adapter']->target())->toBe('seat-B')
@@ -438,6 +440,54 @@ describe('the target', function (): void {
         'another seat in the checkout' => [8, 0],
         'this one' => [7, 1],
     ]);
+});
+
+describe('the state a new batch or session starts from', function (): void {
+    it('tries a new batch at once after the last one gave up, not after the old backoff', function (): void {
+        $clock = new SeamClock;
+        $adapter = new SeamAdapter;
+        $adapter->answers = ['unreachable'];
+
+        $delivery = new WakeDelivery($adapter, $clock->read(...));
+
+        for ($i = 0; $i < WakeDelivery::FAILURE_LIMIT; $i++) {
+            $delivery->deliver();
+            $clock->now += 3;
+        }
+
+        expect($delivery->gaveUp())->toBeTrue()
+            ->and($delivery->due())->toBeFalse();
+
+        $delivery->rearm();
+
+        expect($delivery->due())->toBeTrue();
+    });
+
+    it('forgets a give-up and its failure when the bridge joins again', function (): void {
+        $clock = new SeamClock;
+        $adapter = new SeamAdapter;
+        $adapter->answers = ['unreachable'];
+
+        $delivery = new WakeDelivery($adapter, $clock->read(...));
+
+        $delivery->deliver();
+        $delivery->reset();
+
+        expect($delivery->lastFailure())->toBeNull()
+            ->and($delivery->due())->toBeTrue();
+    });
+
+    it('leaves the Claude Code channel count alone when the agent reads, with waking off', function (): void {
+        // The reset on a read belongs to a woken seat; a channel seat without a hook keeps its count
+        $world = seamWorld([], wakeOn: false, stopHook: false);
+        $count = new ReflectionProperty(Bridge::class, 'unannounced');
+        $count->setValue($world['bridge'], 2);
+
+        $call = '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"events_read","arguments":{}}}';
+        new ReflectionMethod(Bridge::class, 'answerLocally')->invoke($world['bridge'], $call, tmpfile(), fn (string $m): null => null);
+
+        expect($count->getValue($world['bridge']))->toBe(2);
+    });
 });
 
 describe('the adapters', function (): void {

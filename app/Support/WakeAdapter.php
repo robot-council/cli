@@ -22,6 +22,10 @@ interface WakeAdapter
     /**
      * Deliver the notice to the target.
      *
+     * **Bounded by the adapter.** The bridge calls this inside its own loop, so a call that never
+     * returns stops heartbeats, feed reads and forwarding with it. An adapter that runs a process or
+     * a request gives it a timeout of a few seconds and reports the expiry as a failure.
+     *
      * **Success means the harness accepted the message, and nothing more.** It does not mean a turn
      * ran or that the events were read: the bridge leaves the pending events alone either way.
      *
