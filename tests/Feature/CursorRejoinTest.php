@@ -382,7 +382,9 @@ function rejoinRealBridge(string $state): array
 {
     $bridge = new Process(
         [PHP_BINARY, base_path('robot-council'), 'mcp', '--service='.REJOIN_SERVICE],
-        $state,
+        // This process's own folder, which is where the record was seeded: a Cursor sink is keyed by
+        // the folder its bridge runs in (#356), so a bridge started in `$state` would look elsewhere
+        base_path(),
         ['XDG_STATE_HOME' => $state, 'ROBOT_COUNCIL_HARNESS' => 'cursor', 'ROBOT_COUNCIL_SERVICE' => false, 'CLAUDE_CONFIG_DIR' => $state.'/claude'],
         REJOIN_INITIALIZE."\n",
         60,

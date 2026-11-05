@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Support;
 
+use Illuminate\Support\Sleep;
 use JsonException;
 
 /**
@@ -119,7 +120,7 @@ final class HookPayload
                 break;
             }
 
-            usleep(10_000);
+            Sleep::usleep(10_000);
         }
 
         return $read;
