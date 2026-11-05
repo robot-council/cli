@@ -105,7 +105,7 @@ final class PendingCommand extends Command
 
         // The bridge's recorded key where it left one, so the hook needs no git lookup (cli#346)
         $project = $this->stringOption('project');
-        $pending = new PendingEvents($service, $harness, $project, $this->projectDirectory($harness, $payload), useRecordedKey: true);
+        $pending = new PendingEvents($service, $harness, $project, $this->projectDirectory($harness, $payload, $project), useRecordedKey: true);
 
         // **A Cursor seat's events may still be in the sink every Cursor bridge shared before sinks were
         // keyed by workspace folder (#356).** Drained along with the workspace's own, so an upgrade
@@ -115,7 +115,8 @@ final class PendingCommand extends Command
             ? new PendingEvents($service, $harness, appWide: true)
             : null;
 
-        if ($shared instanceof PendingEvents && ! is_file($shared->path())) {
+        // Not the same file twice: a hook whose folder is the home folder keys the legacy sink itself
+        if ($shared instanceof PendingEvents && (! is_file($shared->path()) || $shared->path() === $pending->path())) {
             $shared = null;
         }
 
@@ -138,11 +139,23 @@ final class PendingCommand extends Command
         // and exits non-zero, having marked and removed nothing
         try {
             $events = $peeking ? $pending->inspect() : $pending->deliver();
-            $sharedEvents = $shared instanceof PendingEvents ? ($peeking ? $shared->inspect() : $shared->deliver()) : [];
         } catch (UnreadableSink $unreadableSink) {
             $this->diagnostic($unreadableSink->getMessage());
 
             return self::UNREADABLE;
+        }
+
+        // **The old shared sink is a leftover, so a bad one never silences the workspace's own.** A
+        // corrupt or locked file there is said on stderr and skipped, with nothing marked or removed
+        $sharedEvents = [];
+
+        if ($shared instanceof PendingEvents) {
+            try {
+                $sharedEvents = $peeking ? $shared->inspect() : $shared->deliver();
+            } catch (UnreadableSink $unreadableSink) {
+                $this->diagnostic('The sink Cursor bridges shared before workspace keying could not be read, and was skipped: '.$unreadableSink->getMessage());
+                $shared = null;
+            }
         }
 
         // A delivery is a stop hook at a turn end; a peek is somebody looking, which is not a turn.
@@ -240,11 +253,12 @@ final class PendingCommand extends Command
      * JSON carries `workspace_roots`; `CURSOR_PROJECT_DIR` is the fallback when a hook script did not
      * hand the payload on. A harness that sets none of these falls back to the working directory.
      */
-    private function projectDirectory(string $harness, HookPayload $payload): ?string
+    private function projectDirectory(string $harness, HookPayload $payload, ?string $project): ?string
     {
         $variables = ['CLAUDE_PROJECT_DIR'];
 
-        if ($harness === PendingEvents::APP_WIDE_HARNESS) {
+        // **Stdin is read only when the folder can matter**: a named project's key ignores it
+        if ($harness === PendingEvents::APP_WIDE_HARNESS && $project === null) {
             $fromPayload = $payload->workspaceRoot();
 
             if ($fromPayload !== null) {

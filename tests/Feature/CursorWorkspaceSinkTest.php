@@ -242,6 +242,25 @@ describe('an upgrade', function (): void {
         expect(glob($this->root.'/state/robot-council/pending/*.key'))->toHaveCount(1);
     });
 
+    it('drains the old sink once when the hook itself is keyed to it', function (): void {
+        putenv('HOME='.$this->root.'/home');
+
+        $shared = new PendingEvents(WORKSPACE_SERVICE, 'cursor', appWide: true);
+        $shared->add([workspaceEvent('only once')]);
+
+        expect(substr_count(workspaceHook(['workspace_roots' => [$this->root.'/home']]), 'only once'))->toBe(1);
+    });
+
+    it('still delivers the workspace events when the old sink is unreadable', function (): void {
+        $shared = new PendingEvents(WORKSPACE_SERVICE, 'cursor', appWide: true);
+        $shared->add([workspaceEvent('unreadable soon')]);
+        file_put_contents($shared->path(), '{ not json');
+
+        workspaceSink($this->one)->add([workspaceEvent('from the workspace')]);
+
+        expect(workspaceHook(['workspace_roots' => [$this->one]]))->toContain('from the workspace');
+    });
+
     it('does not read the old sink for a named project, whose key never changed', function (): void {
         new PendingEvents(WORKSPACE_SERVICE, 'cursor', appWide: true)->add([workspaceEvent('the old shared sink')]);
 
@@ -265,6 +284,14 @@ describe('the hook payload', function (): void {
         'a number' => '{"workspace_roots":[7]}',
         'a list at the top' => '["/work"]',
     ]);
+
+    it('reads a Windows drive spelled with a leading slash', function (): void {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            $this->markTestSkipped('Cursor spells a Windows drive this way; other systems keep the path as given.');
+        }
+
+        expect(HookPayload::rootIn('{"workspace_roots":["/c:/work/repo"]}'))->toBe('c:/work/repo');
+    });
 
     it('skips a blank entry for the next folder', function (): void {
         expect(HookPayload::rootIn('{"workspace_roots":["", "/work/repo"]}'))->toBe('/work/repo');
