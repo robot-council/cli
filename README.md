@@ -10,6 +10,7 @@ Four commands, designed in [#1](https://github.com/robot-council/cli/issues/1) a
 - **`robot-council mcp`** — the stdio MCP bridge. An agent harness launches it, and it comes up **without joining the fleet**: its one tool is `join`, and the fleet's coordination tools appear once an agent calls it. Once joined, it renews its own session token, so a token expiring needs no restart and no human. Under Claude Code, `--keep-warm=<minutes>` has it wake an idle session to keep its prompt cache warm.
 - **`robot-council pending`** — print the fleet events waiting for this harness, and clear them. The bridge reads the change feed while it runs and leaves anything that concerns its own session here; a harness's stop hook runs this at a turn boundary so an agent finds out without being asked. Prints nothing and exits `0` when the fleet has been quiet. It also records when the turn ended, for a bridge keeping the session's cache warm.
 - **`robot-council api`** — the fallback for anything the bridge does not cover.
+- **`robot-council rename <label>`** — rename this machine in the fleet, for a label chosen badly at enrollment. It uses the installation credential and starts no session, so a running agent cannot rename its machine. A refused label, a label another of the developer's installations already holds, and an unchanged label each print the service's reason.
 
 - **`robot-council new`** — create a fleet service in this directory, the way `statamic new` creates a site.
 
