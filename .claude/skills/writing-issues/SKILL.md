@@ -76,8 +76,8 @@ gh api -X POST 'repos/{owner}/{repo}/issues' -f title='…' -F body=@body.md -f 
 gh api -X PATCH 'repos/{owner}/{repo}/issues/<n>' -F body=@body.md
 ```
 
-`gh issue create --body-file body.md` and `gh issue edit <n> --body-file body.md` are the
-equivalent wrapper forms.
+`gh issue create` and `gh issue edit` are GraphQL-backed wrappers; use the REST calls above, per
+[`github-api-budget`](../../rules/github-api-budget.md).
 
 ## The disclaimer rule (non-negotiable)
 

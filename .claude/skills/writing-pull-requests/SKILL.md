@@ -42,18 +42,20 @@ the user can copy it cleanly. If the body itself contains fenced blocks, open th
 more backticks than any inner one. The body uses GitHub-Flavored Markdown — never include an `H1`
 (`#`) heading; GitHub renders the PR title separately.
 
-When you create the PR yourself with `gh`, **write the body to a file and pass `--body-file`
-from the start** — never inline the Markdown via `--body`. These bodies are dense with
+When you create the PR yourself, **write the body to a file and pass it as a file field (`-F body=@pr-body.md`)
+from the start** — never inline the Markdown as an argument. These bodies are dense with
 backticks, `$`, `!`, backslashes, and fenced code blocks, every one of which the shell mangles
 or errors on as an inline argument (the failure is intermittent, so inline `--body` looks fine
 until a body finally trips it). Write it to a scratch file and
-`gh pr create --draft --base main --head <branch> --title '…' --body-file pr-body.md`; the same
-holds for `gh pr edit <n> --body-file`.
+`gh api -X POST 'repos/{owner}/{repo}/pulls' -f title='…' -f head=<branch> -f base=main -F draft=true -F body=@pr-body.md`;
+the same holds for editing one, `gh api -X PATCH 'repos/{owner}/{repo}/pulls/<n>' -F body=@pr-body.md`.
+These are REST, per [`github-api-budget`](../../rules/github-api-budget.md); `gh pr create` and
+`gh pr edit` are GraphQL-backed.
 
 ## Draft state and CI
 
 - **Open as draft until the branch is ready for review; flip it with `gh pr ready <n>` when it
-  is.** Never present a PR as ready while its branch still needs work.
+  is.** That is the one named GraphQL exception, since REST has no call that marks a draft ready. Never present a PR as ready while its branch still needs work.
 - **Every pull request runs the same checks.** `.github/workflows/ci.yml` runs on every pull
   request, with no path filters:
   - `tests` — `vendor/bin/pest --ci` across a matrix of operating systems and PHP versions, with
@@ -251,7 +253,8 @@ row's label; the text said it closed nothing, a grep for `Closes #N` could not m
 [`writing-commits`](../writing-commits/SKILL.md) for the table shape to avoid.
 
 **Check both paths before merging.** No CI job covers this, and [`pre-merge-check`](../../rules/pre-merge-check.md) points here for it:
-read the field with `gh pr view <N> --json closingIssuesReferences`, then list every
+read the field with `gh pr view <N> --json closingIssuesReferences` (a named GraphQL exception in
+[`github-api-budget`](../../rules/github-api-budget.md); read the headers first), then list every
 keyword-reference pair in the plain text, same-line and cross-line alike:
 
 ```bash

@@ -1,6 +1,6 @@
 # Rule — spend the REST quota to preserve the GraphQL one
 
-GitHub meters **REST and GraphQL separately** — 5,000 points per hour each, tracked independently. Prefer the **REST** endpoint for anything REST can do, and reserve GraphQL for the work that has no alternative. If a GitHub Projects (V2) board is in use, that means protecting it above all: **Projects V2 is GraphQL-only**, so every GraphQL call spent on an issue is one the board may not have when you need it.
+GitHub meters **REST and GraphQL separately** — 5,000 points per hour each, tracked independently. **Use the REST endpoint for anything REST supports, and GraphQL only where REST has no equivalent.** That is a requirement, not a preference. The exceptions are named in step 2, and each is read against the rate-limit headers first. If a GitHub Projects (V2) board is in use, that means protecting it above all: **Projects V2 is GraphQL-only**, so every GraphQL call spent on an issue is one the board may not have when you need it.
 
 **Why this is a standing order.** The two quotas do not fail together, but `gh`'s ergonomic commands make it look as though they do. `gh issue create`, `gh issue edit`, and even resolving `--assignee @me` are GraphQL-backed, so when the GraphQL quota is gone every one of them errors identically — while thousands of REST calls sit untouched. Only work with no REST surface genuinely has to wait for the reset.
 
@@ -18,7 +18,14 @@ GitHub meters **REST and GraphQL separately** — 5,000 points per hour each, tr
 
    **A GraphQL rate-limit refusal arrives as `HTTP 200`,** with the error in an `errors` array — not `403`, not `429`. A handler branching on status records it as a success, and so does a pipeline taking its exit code from the last command. Read the body or the headers. **`retry-after` discriminates the two limits:** present, with secondary-limit wording, means a burst limit and a short wait; absent, with `X-Ratelimit-Resource: graphql` and `Used` at the limit, means the hour's quota is gone and only `reset` helps.
 
-2. **Know which `gh` commands are secretly GraphQL.** `gh issue create`, `gh issue edit`, `gh issue close`, `gh pr merge` (it sends a `mergePullRequest` mutation), the `@me` handle lookup, and **all** of `gh project *`, which has no REST surface at all.
+2. **Know which `gh` commands are secretly GraphQL, and use none of them where REST has the operation.** These are GraphQL-backed: `gh issue create`, `gh issue edit`, `gh issue close`, `gh issue list`, `gh issue view`, `gh pr create`, `gh pr edit`, `gh pr view`, `gh pr list`, `gh pr checks`, `gh pr ready`, `gh pr merge` (it sends a `mergePullRequest` mutation), the `@me` handle lookup, and **all** of `gh project *`, which has no REST surface at all. `gh api` with a `repos/…` path is the REST form of every one of them except the three below.
+
+   **The GraphQL-only exceptions, and nothing else:**
+   - **Marking a draft ready for review** (`gh pr ready`, the `markPullRequestReadyForReview` mutation). REST can open a draft but has no call that marks one ready, so this one has no REST form.
+   - **GitHub Projects (V2)**, every `gh project *` call.
+   - **`closingIssuesReferences`**, the field a pull request declares its closing links in (`gh pr view <N> --json closingIssuesReferences`).
+
+   Read the headers from step 1 before each of them, and wait for the reset rather than falling back to a wrapper that spends the same quota.
 
 3. **Use the REST equivalents for issue and pull-request work.** These keep working when `gh issue` does not:
 
@@ -33,6 +40,11 @@ GitHub meters **REST and GraphQL separately** — 5,000 points per hour each, tr
    | Assign (add) | `gh api -X POST 'repos/{owner}/{repo}/issues/{n}/assignees' -f 'assignees[]=handle'` |
    | Open a PR | `gh api -X POST 'repos/{owner}/{repo}/pulls' --input -` with a JSON body (`title`, `head`, `base`, `body`, `draft`) |
    | Merge a PR | `gh api -X PUT 'repos/{owner}/{repo}/pulls/{n}/merge' -f merge_method=<merge\|squash\|rebase>` |
+   | Edit a PR's body or title | `gh api -X PATCH 'repos/{owner}/{repo}/pulls/{n}' -F body=@body.md` (or `-f title='…'`) |
+   | View a PR | `gh api 'repos/{owner}/{repo}/pulls/{n}' --jq '.title, .state, .mergeable_state, .head.sha'` |
+   | List PRs | `gh api 'repos/{owner}/{repo}/pulls?state=open&per_page=100'` |
+   | PR checks | `gh api 'repos/{owner}/{repo}/commits/<head-sha>/check-runs?per_page=100' --jq '.check_runs[] \| "\(.name) \(.status) \(.conclusion)"'`; the combined legacy status is `…/commits/<head-sha>/status` |
+   | View or list issues | `gh api 'repos/{owner}/{repo}/issues/{n}'`; `gh api 'repos/{owner}/{repo}/issues?state=open&per_page=100'` |
 
    **The two assignment endpoints differ by one path segment and do opposite things, and a single-account probe cannot tell them apart.** `POST …/issues/{n}` **replaces** the assignee list; `POST …/issues/{n}/assignees` **adds** to it. They diverge only when a request omits somebody already assigned — so a probe against an unassigned issue, or one assigned to the person you are sending, returns identical results from both. Handing work over is exactly the omitting case, and the endpoint whose name matches the intent is the one that does not do it: a hand-over written against `…/assignees` silently leaves **two** assignees.
 
