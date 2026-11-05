@@ -105,7 +105,21 @@ final class PendingCommand extends Command
 
         // The bridge's recorded key where it left one, so the hook needs no git lookup (cli#346)
         $project = $this->stringOption('project');
-        $pending = new PendingEvents($service, $harness, $project, $this->projectDirectory($harness, $payload, $project), useRecordedKey: true);
+        $directory = $this->projectDirectory($harness, $payload, $project);
+        $pending = new PendingEvents($service, $harness, $project, $directory, useRecordedKey: true);
+
+        // **Said, not silent (#386).** A Cursor hook that learns no folder keys the sink by its own
+        // working directory (`~/.cursor`), which no project-level bridge writes to, so it drains an
+        // empty sink and the agent is never told events are waiting. Stderr only: a hook that injects
+        // stdout injects events and nothing else, and the exit code is the one it always had
+        if ($harness === PendingEvents::APP_WIDE_HARNESS && $project === null && $directory === null) {
+            $this->diagnostic(
+                'No workspace folder was found: the hook payload on stdin has no usable `workspace_roots` and '
+                .'CURSOR_PROJECT_DIR is not set. A bridge started from a project-level `.cursor/mcp.json` keys its '
+                .'events by that folder, so they are not read here. Pass the payload on to `pending` '
+                ."(`printf '%s' \"\$payload\" | robot-council pending`) or set CURSOR_PROJECT_DIR."
+            );
+        }
 
         // **A Cursor seat's events may still be in the sink every Cursor bridge shared before sinks were
         // keyed by workspace folder (#356).** Drained along with the workspace's own, so an upgrade

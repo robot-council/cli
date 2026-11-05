@@ -19,6 +19,7 @@ declare(strict_types=1);
 use App\Support\HookPayload;
 use App\Support\PendingEvents;
 use Illuminate\Support\Facades\Artisan;
+use Tests\Fixtures\TwoStreamOutput;
 
 const WORKSPACE_SERVICE = 'https://workspace.example.test';
 
@@ -164,6 +165,84 @@ describe('a payload that names no folder', function (): void {
         putenv('CURSOR_PROJECT_DIR='.$this->two);
 
         expect(workspaceHook(['workspace_roots' => [$this->one]]))->toContain('in the payload folder')->not->toContain('in the environment folder');
+    });
+});
+
+/**
+ * Run the stop hook's command with a stdin payload, and return [stdout, stderr, exit code].
+ *
+ * @return array{0: string, 1: string, 2: int}
+ */
+function workspaceHookStreams(string $payload, string $harness = 'cursor', ?string $project = null): array
+{
+    $stream = fopen('php://memory', 'r+') ?: throw new RuntimeException('Could not open a memory stream.');
+
+    fwrite($stream, $payload);
+    rewind($stream);
+
+    app()->instance(HookPayload::class, new HookPayload($stream));
+
+    $output = new TwoStreamOutput;
+    $exit = Artisan::call('pending', array_filter(['--harness' => $harness, '--project' => $project]), $output);
+
+    return [$output->stdout(), $output->stderr(), $exit];
+}
+
+describe('a hook that finds no folder (#386)', function (): void {
+    it('says so on stderr, and changes neither stdout nor the exit code', function (string $payload): void {
+        workspaceSink($this->one)->add([workspaceEvent('in a sink nobody reads here')]);
+
+        [$stdout, $stderr, $exit] = workspaceHookStreams($payload);
+
+        expect($stderr)->toContain('No workspace folder was found')->toContain('CURSOR_PROJECT_DIR')
+            ->and($stdout)->toBeEmpty()
+            ->and($exit)->toBe(0);
+    })->with([
+        'empty stdin' => '',
+        'not JSON' => '{"workspace_roots":',
+        'no roots' => '{"loop_count":0}',
+        'only blank roots' => '{"workspace_roots":["", " "]}',
+    ]);
+
+    it('says it for a payload cut off at the read limit', function (): void {
+        // Past the 1 MiB read limit the JSON is truncated mid-document, so it names no folder
+        $padding = str_repeat('x', 1_048_576);
+
+        [, $stderr] = workspaceHookStreams(json_encode(['padding' => $padding, 'workspace_roots' => [$this->one]], JSON_THROW_ON_ERROR));
+
+        expect($stderr)->toContain('No workspace folder was found');
+    });
+
+    it('stays quiet when a folder is named, by the payload or by the environment', function (): void {
+        [, $fromPayload] = workspaceHookStreams(json_encode(['workspace_roots' => [$this->one]], JSON_THROW_ON_ERROR));
+
+        putenv('CURSOR_PROJECT_DIR='.$this->one);
+
+        [, $fromEnvironment] = workspaceHookStreams('');
+
+        expect($fromPayload)->toBeEmpty()->and($fromEnvironment)->toBeEmpty();
+    });
+
+    it('stays quiet for a named project and for another harness, whose keys ignore the folder', function (): void {
+        [, $named] = workspaceHookStreams('', 'cursor', 'org/repo');
+
+        putenv('ROBOT_COUNCIL_HARNESS=claude');
+
+        [, $claude] = workspaceHookStreams('', 'claude');
+
+        expect($named)->toBeEmpty()->and($claude)->toBeEmpty();
+    });
+});
+
+describe('a workspace with several roots (#386)', function (): void {
+    it('is read by the first root only, and never drains the sink of another root', function (): void {
+        workspaceSink($this->one)->add([workspaceEvent('first root')]);
+        workspaceSink($this->two)->add([workspaceEvent('second root')]);
+
+        $printed = workspaceHook(['workspace_roots' => [$this->one, $this->two]]);
+
+        expect($printed)->toContain('first root')->not->toContain('second root')
+            ->and(workspaceSink($this->two)->isEmpty())->toBeFalse();
     });
 });
 
