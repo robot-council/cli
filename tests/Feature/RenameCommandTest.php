@@ -163,6 +163,29 @@ it('falls back to the status for an answer it does not recognize', function (): 
         ->and($stdout.$stderr)->toContain('The service answered HTTP 500.');
 });
 
+it('has words for a 429, and for a 422 or 409 that carries none', function (int $status, string $expected): void {
+    renameStore();
+    renameAnswers($status, []);
+
+    [$code, $stdout, $stderr] = renameRun();
+
+    expect($code)->toBe(1)->and($stdout.$stderr)->toContain($expected);
+})->with([
+    'rate limited' => [429, 'The service is rate limiting this machine.'],
+    'refused with no reason' => [422, 'The service refused that label.'],
+    'unchanged with no message' => [409, 'already has that label, so nothing changed'],
+    'missing with no message' => [404, 'does not offer renaming yet'],
+]);
+
+it('falls back to the top-level message of a 422 that names no machine_label reason', function (): void {
+    renameStore();
+    renameAnswers(422, ['message' => 'The given data was invalid.', 'errors' => ['other' => ['x']]]);
+
+    [, $stdout, $stderr] = renameRun();
+
+    expect($stdout.$stderr)->toContain('The given data was invalid.');
+});
+
 it('reduces a reason that carries control characters before printing it', function (): void {
     renameStore();
     renameAnswers(422, ['errors' => ['machine_label' => ["bad\x1b[31m reason\r"]]]);

@@ -70,7 +70,12 @@ final class RenameCommand extends Command
         } catch (Throwable $throwable) {
             // Only this command's own refusals are repeated. An unreachable service raises a
             // `ConnectionException`, which is not a `RuntimeException`, and its message is not ours
-            $this->components->error($throwable instanceof RuntimeException ? $throwable->getMessage() : 'Could not reach the service.');
+            $message = $throwable instanceof RuntimeException ? $throwable->getMessage() : 'Could not reach the service.';
+
+            // `-v` names the class and message, so a defect here does not read as a network error
+            $this->components->error($this->output->isVerbose() && ! $throwable instanceof RuntimeException
+                ? sprintf('%s (%s: %s)', $message, $throwable::class, $throwable->getMessage())
+                : $message);
 
             return self::FAILURE;
         }

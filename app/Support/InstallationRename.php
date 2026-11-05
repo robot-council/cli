@@ -85,7 +85,7 @@ final class InstallationRename
 
         return match (true) {
             $status === 401 => 'This machine is not enrolled, or its credential was revoked. Run `robot-council enroll`.',
-            $status === 422 => $this->reason($body) ?? 'The service refused that label.',
+            $status === 422 => $this->reason($body) ?? $message ?? 'The service refused that label.',
             $status === 409 => $message ?? 'The installation already has that label, so nothing changed.',
             $status === 404 => $message ?? 'The service has no such installation to rename, or does not offer renaming yet.',
             $status === 429 => 'The service is rate limiting this machine. Wait a moment and try again.',
