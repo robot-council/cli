@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Commands;
 
+use App\Support\HookPayload;
 use App\Support\MachineIdentity;
 use App\Support\PendingEvents;
 use App\Support\Stderr;
@@ -76,7 +77,7 @@ final class PendingCommand extends Command
      *
      * @return int The exit code.
      */
-    public function handle(): int
+    public function handle(HookPayload $payload): int
     {
         $service = $this->resolveService();
 
@@ -103,7 +104,20 @@ final class PendingCommand extends Command
         }
 
         // The bridge's recorded key where it left one, so the hook needs no git lookup (cli#346)
-        $pending = new PendingEvents($service, $harness, $this->stringOption('project'), $this->projectDirectory(), useRecordedKey: true);
+        $project = $this->stringOption('project');
+        $pending = new PendingEvents($service, $harness, $project, $this->projectDirectory($harness, $payload), useRecordedKey: true);
+
+        // **A Cursor seat's events may still be in the sink every Cursor bridge shared before sinks were
+        // keyed by workspace folder (#356).** Drained along with the workspace's own, so an upgrade
+        // loses none that an older bridge left or is still leaving. Only where that file exists, and
+        // not when a project is named, whose key never changed
+        $shared = $harness === PendingEvents::APP_WIDE_HARNESS && $project === null
+            ? new PendingEvents($service, $harness, appWide: true)
+            : null;
+
+        if ($shared instanceof PendingEvents && ! is_file($shared->path())) {
+            $shared = null;
+        }
 
         $peeking = $this->option('peek') === true;
         $format = $this->stringOption('format');
@@ -124,6 +138,7 @@ final class PendingCommand extends Command
         // and exits non-zero, having marked and removed nothing
         try {
             $events = $peeking ? $pending->inspect() : $pending->deliver();
+            $sharedEvents = $shared instanceof PendingEvents ? ($peeking ? $shared->inspect() : $shared->deliver()) : [];
         } catch (UnreadableSink $unreadableSink) {
             $this->diagnostic($unreadableSink->getMessage());
 
@@ -137,11 +152,11 @@ final class PendingCommand extends Command
             $pending->markTurnEnded();
         }
 
-        if ($events === []) {
+        if ($events === [] && $sharedEvents === []) {
             return self::SUCCESS;
         }
 
-        $lines = implode("\n", array_map($this->describe(...), $events));
+        $lines = implode("\n", array_map($this->describe(...), [...$events, ...$sharedEvents]));
 
         $text = match ($format) {
             // The hook's whole answer, so the script hands it straight to the harness and no
@@ -156,6 +171,10 @@ final class PendingCommand extends Command
         // process ran on -- would otherwise be marked delivered into nothing (cli#341)
         if ($this->written((string) $text) && ! $peeking) {
             $pending->markDelivered($events);
+
+            if ($shared instanceof PendingEvents) {
+                $shared->markDelivered($sharedEvents);
+            }
         }
 
         return self::SUCCESS;
@@ -215,13 +234,35 @@ final class PendingCommand extends Command
      * an `--add-dir` repository the `Stop` hook ran in that repository, with `CLAUDE_PROJECT_DIR`
      * still naming the launch directory, which is also where the MCP server ran. So the hook
      * resolves its checkout from `CLAUDE_PROJECT_DIR` and would otherwise drain another checkout's
-     * sink (#299). Other harnesses set no such variable, and fall back to the working directory.
+     * sink (#299).
+     *
+     * **Cursor names the chat's folder instead (#356).** Its hook runs in `~/.cursor`, and its stdin
+     * JSON carries `workspace_roots`; `CURSOR_PROJECT_DIR` is the fallback when a hook script did not
+     * hand the payload on. A harness that sets none of these falls back to the working directory.
      */
-    private function projectDirectory(): ?string
+    private function projectDirectory(string $harness, HookPayload $payload): ?string
     {
-        $directory = getenv('CLAUDE_PROJECT_DIR');
+        $variables = ['CLAUDE_PROJECT_DIR'];
 
-        return \is_string($directory) && $directory !== '' ? $directory : null;
+        if ($harness === PendingEvents::APP_WIDE_HARNESS) {
+            $fromPayload = $payload->workspaceRoot();
+
+            if ($fromPayload !== null) {
+                return $fromPayload;
+            }
+
+            $variables = ['CURSOR_PROJECT_DIR', 'CLAUDE_PROJECT_DIR'];
+        }
+
+        foreach ($variables as $variable) {
+            $directory = getenv($variable);
+
+            if (\is_string($directory) && $directory !== '') {
+                return $directory;
+            }
+        }
+
+        return null;
     }
 
     /**
