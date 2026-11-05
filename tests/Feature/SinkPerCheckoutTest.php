@@ -204,20 +204,29 @@ it('asks git again after it could not answer, rather than keeping the fallback',
 
 it('gives a Cursor bridge and its hook one sink, whatever folders Cursor runs them in', function (): void {
     // #327, as measured on Cursor 3.17.19: the one app-wide bridge runs in the home folder and the
-    // stop hook in `~/.cursor`, neither of them the project
+    // stop hook in `~/.cursor`, neither of them the project. Still so for the user-level entry in
+    // `~/.cursor/mcp.json` (#356): a bridge started in the home folder keeps the app-wide sink, and
+    // a hook with no workspace folder to name drains it
     $home = $this->root.'/home';
     $config = $this->root.'/home/.cursor';
     File::ensureDirectoryExists($config);
 
-    new PendingEvents(SINK_SERVICE, 'cursor', null, $home)->add([sinkEvent('for the cursor seat')]);
+    $before = getenv('HOME');
+    putenv('HOME='.$home);
 
-    expect(sinkHook($config, $this->state, harness: 'cursor'))->toContain('for the cursor seat');
+    try {
+        new PendingEvents(SINK_SERVICE, 'cursor', null, $home)->add([sinkEvent('for the cursor seat')]);
+
+        expect(sinkHook($config, $this->state, harness: 'cursor'))->toContain('for the cursor seat');
+    } finally {
+        putenv($before === false ? 'HOME' : 'HOME='.$before);
+    }
 });
 
-it('keys a Cursor sink as it was before #299, so both sides agree with no checkout in it', function (): void {
+it('keys the app-wide Cursor sink as it was before #299, so both sides agree with no checkout in it', function (): void {
     $before = substr(hash('sha256', implode("\0", [SINK_SERVICE, 'cursor', ''])), 0, 32);
 
-    expect(basename(new PendingEvents(SINK_SERVICE, 'cursor', null, $this->root)->path(), '.json'))->toBe($before);
+    expect(basename(new PendingEvents(SINK_SERVICE, 'cursor', appWide: true)->path(), '.json'))->toBe($before);
 });
 
 it('still keeps Claude Code seats in different folders apart', function (): void {

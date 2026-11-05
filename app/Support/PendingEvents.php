@@ -132,6 +132,8 @@ final class PendingEvents
      * @param  string|null  $projectId  The checkout this bridge is working, when one was named.
      * @param  string|null  $checkoutDirectory  Where to resolve the checkout from when no project
      *                                          is named; the current working directory by default.
+     * @param  bool  $appWide  The sink an application-wide Cursor bridge used before sinks were keyed
+     *                         by workspace folder (#356), which a stop hook drains once more.
      */
     public function __construct(
         private readonly string $service,
@@ -139,6 +141,7 @@ final class PendingEvents
         private readonly ?string $projectId = null,
         private readonly ?string $checkoutDirectory = null,
         private readonly bool $useRecordedKey = false,
+        private readonly bool $appWide = false,
     ) {}
 
     /**
@@ -1008,11 +1011,12 @@ final class PendingEvents
         // part, which also keeps the new key from ever equalling the old shared one: joined, even an
         // empty fourth part adds a separator the three-part key never had (#299).
         //
-        // **Not for Cursor** (#327). Cursor runs one bridge for the whole app, in the home folder,
-        // and runs its stop hook in `~/.cursor`, so neither folder is the project and the two keys
-        // never matched: a Cursor seat's hook drained an empty sink while its bridge's filled.
-        // Measured on Cursor 3.17.19. One bridge per app means one sink per app is the right match,
-        // which is the key it had before #299
+        // **Not for an app-wide Cursor bridge** (#327, #356). That one runs for the whole app, in the
+        // home folder, and its stop hook runs in `~/.cursor`, so neither folder is the project and the
+        // two keys never matched: a Cursor seat's hook drained an empty sink while its bridge's
+        // filled. Measured on Cursor 3.17.19. A project-level server runs in its workspace folder and
+        // its hook names that folder, so it is keyed like any other checkout; one app-wide bridge
+        // keeps the key it had before #299
         if ($this->keyedByCheckout()) {
             // **The bridge's own answer, where it left one** (cli#346). Resolving the checkout again
             // is what let a hook and its bridge key two different sinks: the git lookup that times
@@ -1032,11 +1036,41 @@ final class PendingEvents
     }
 
     /**
-     * Whether this sink's key depends on the checkout: no project named, and not Cursor (#299, #327).
+     * Whether this sink's key depends on the checkout: no project named, and not the app-wide sink (#299, #356).
+     *
+     * **Cursor is keyed by its workspace folder like any other harness (#356).** It was exempt
+     * while it ran one bridge for the whole application (#327); a project-level `.cursor/mcp.json`
+     * server runs one per repository, in that repository, and its hook learns the folder from the
+     * chat's `workspace_roots`. **A bridge still launched from the user's home folder** -- the
+     * user-level entry in `~/.cursor/mcp.json`, one process for every window -- keeps the sink it
+     * always had, so an upgrade changes nothing until the operator moves to a project-level entry.
      */
     private function keyedByCheckout(): bool
     {
-        return $this->projectId === null && $this->harness !== self::APP_WIDE_HARNESS;
+        if ($this->projectId !== null || $this->appWide) {
+            return false;
+        }
+
+        return $this->harness !== self::APP_WIDE_HARNESS || ! $this->launchedFromHome();
+    }
+
+    /**
+     * Whether the checkout directory is the user's home folder, where a user-level bridge is started.
+     */
+    private function launchedFromHome(): bool
+    {
+        $directory = $this->checkoutDirectory ?? getcwd();
+
+        foreach (['HOME', 'USERPROFILE'] as $variable) {
+            $home = getenv($variable);
+
+            if (\is_string($home) && trim($home) !== ''
+                && $this->comparable($this->realDirectory(\is_string($directory) ? $directory : '')) === $this->comparable($this->realDirectory($home))) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

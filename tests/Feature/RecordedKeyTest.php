@@ -212,7 +212,6 @@ it('records nothing for a sink whose key does not depend on the checkout', funct
     expect(recordedFiles($this->state))->toHaveCount(1);
 })->with([
     'a named project' => ['claude', 'org/repo'],
-    'Cursor, one sink per application' => ['cursor', null],
 ]);
 
 it('records the key while the bridge runs, lets a timed-out hook read it, and removes it on the way out', function (): void {
