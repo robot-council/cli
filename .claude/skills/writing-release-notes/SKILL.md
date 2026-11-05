@@ -69,6 +69,23 @@ A suffixed tag is resolved only by a caller whose `minimum-stability` admits it.
 and `robot-council/core#154` record this, including why the releases already flagged this way are
 better accepted than re-tagged: Packagist has served them, and a consumer may have resolved them.
 
+**This file and `robot-council/core`'s copy at the same path are adapted per repository, and are not
+shared.** This copy is for a command line whose tag is a release marker; core's is for a Composer
+library whose consumers resolve a tag through a version constraint, and its versioning section says
+different things for that reason. `robot-council/cli#153` made one shared document the default for
+the skills the two repositories hold in common, and this is the exception: what a version number
+promises is not the same promise in both. Measured on 2026-11-05 from the committed blobs on each
+default branch (not a working tree):
+
+| | blob | `sha256` | bytes |
+| --- | --- | --- | --- |
+| this copy, `robot-council/cli` `main` before this change | `a7bea2f4` | `576d6d2eea5bade9415d3fd8969f1caab1f454956d65e64a64bdbb8353d8f2f0` | 22,458 |
+| `robot-council/core` `main` before its matching change | `3e847466` | `49d58d1e97311c54c444f6c3b671b15bfacb9ae79c071ddd82b7ebe249309fc4` | 18,771 |
+
+So never bring one into line by copying the other over it: that replaces a command line's release
+conventions with a library's, or the reverse. A change to a convention both need is made in both
+files.
+
 **Breaking, for a command, is a change to what somebody types or parses**: a command or flag removed
 or renamed, output another program reads changed, a config key moved, or an enrolled machine having
 to re-enroll. It is not a changed class name — nothing requires this package and calls into it.
