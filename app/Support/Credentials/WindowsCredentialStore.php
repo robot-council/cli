@@ -586,15 +586,54 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
      * reason `robot-council/cli#91` wanted the reason rather than the fact.
      *
      * @param  string|null  $reason  What `error_get_last()` held, if anything.
+     * @param  string  $launch  What `launchShape()` measured about the call, if it is to be named.
      * @return string The message for `CredentialStoreFailed`.
      */
-    public static function unreachableBecause(?string $reason): string
+    public static function unreachableBecause(?string $reason, string $launch = ''): string
     {
+        $suffix = $launch === '' ? '' : sprintf(' (%s)', $launch);
+
         if ($reason === null || trim($reason) === '') {
-            return 'Windows Credential Manager could not be reached, and the reason was not recorded.';
+            return 'Windows Credential Manager could not be reached, and the reason was not recorded.'.$suffix;
         }
 
-        return sprintf('Windows Credential Manager could not be reached: %s', trim($reason));
+        return sprintf('Windows Credential Manager could not be reached: %s', trim($reason)).$suffix;
+    }
+
+    /**
+     * The size of what `proc_open()` was given, for a failure message (#215).
+     *
+     * **`The parameter is incorrect` is Windows's generic answer and names none of the parameters.**
+     * `proc_open()` was handed a command, an environment and a working directory, and the message
+     * does not say which was refused. It recurred four times on `windows-latest`, on changes that
+     * touch no PHP, so the next occurrence has to carry what those four could not: how large the
+     * command line and the environment block were, and whether the environment held two names that
+     * differ only by case, which Windows treats as one.
+     *
+     * **Counts only, never a name or a value.** The environment of this process is a third-party
+     * input, and `ROBOT_COUNCIL_TARGET` is a credential key.
+     *
+     * @param  non-empty-list<string>  $command  The command, as `proc_open()` takes it.
+     * @param  array<string, string>  $environment  The environment the child was given.
+     * @return string A fragment such as `command line 7099 characters, environment 5334 characters in 61 variables, 0 names differing only by case`.
+     */
+    public static function launchShape(array $command, array $environment): string
+    {
+        $block = 1;
+        $folded = [];
+
+        foreach ($environment as $name => $value) {
+            $block += mb_strlen($name.'='.$value, 'UTF-8') + 1;
+            $folded[mb_strtolower((string) $name, 'UTF-8')] = true;
+        }
+
+        return sprintf(
+            'command line %d characters, environment %d characters in %d variables, %d names differing only by case',
+            mb_strlen(implode(' ', $command), 'UTF-8'),
+            $block,
+            \count($environment),
+            \count($environment) - \count($folded),
+        );
     }
 
     /**
@@ -703,16 +742,18 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
         // could be reported with a message some earlier, unrelated warning left behind.
         error_clear_last();
 
+        $environment = [
+            'ROBOT_COUNCIL_OPERATION' => $operation,
+            'ROBOT_COUNCIL_TARGET' => $target,
+            'ROBOT_COUNCIL_USERNAME' => '',
+        ] + $this->inheritedEnvironment();
+
         $handle = @proc_open(
             $this->arguments(),
             $descriptors,
             $pipes,
             null,
-            [
-                'ROBOT_COUNCIL_OPERATION' => $operation,
-                'ROBOT_COUNCIL_TARGET' => $target,
-                'ROBOT_COUNCIL_USERNAME' => '',
-            ] + $this->inheritedEnvironment(),
+            $environment,
             ['bypass_shell' => true, 'suppress_errors' => true],
         );
 
@@ -727,7 +768,10 @@ final class WindowsCredentialStore implements CredentialStore, ReadsManyCredenti
             //
             // The warning the `@` suppressed is still in `error_get_last()`, so the reason costs a
             // read rather than a re-run.
-            throw new CredentialStoreFailed(self::unreachableBecause(error_get_last()['message'] ?? null));
+            throw new CredentialStoreFailed(self::unreachableBecause(
+                error_get_last()['message'] ?? null,
+                self::launchShape($this->arguments(), $environment),
+            ));
         }
 
         // **Written before stdin closes, and the close is what ends the child's read.** The

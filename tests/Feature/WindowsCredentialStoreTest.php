@@ -679,6 +679,35 @@ it('names why a process could not start, and says so when it cannot', function (
     ],
 ]);
 
+it('appends what the launch measured to a refusal, and nothing when it measured nothing (#215)', function (): void {
+    $reason = 'proc_open(): CreateProcess failed: The parameter is incorrect';
+
+    expect(WindowsCredentialStore::unreachableBecause($reason, 'command line 9 characters'))
+        ->toBe('Windows Credential Manager could not be reached: '.$reason.' (command line 9 characters)')
+        ->and(WindowsCredentialStore::unreachableBecause(null, 'command line 9 characters'))
+        ->toBe('Windows Credential Manager could not be reached, and the reason was not recorded. (command line 9 characters)')
+        ->and(WindowsCredentialStore::unreachableBecause($reason))
+        ->toBe('Windows Credential Manager could not be reached: '.$reason);
+});
+
+it('measures the command line and environment it was given, counting names that differ only by case (#215)', function (): void {
+    // Two names Windows treats as one, one of them carrying a multi-byte character, so a count of
+    // bytes would read differently from a count of characters. The block is each `NAME=value`
+    // plus its terminator, and one more for the end of the block.
+    $shape = WindowsCredentialStore::launchShape(
+        ['abc', 'de'],
+        ['Path' => 'x', 'PATH' => 'y', 'Z' => "\u{00E9}"],
+    );
+
+    expect($shape)->toBe('command line 6 characters, environment 19 characters in 3 variables, 1 names differing only by case');
+});
+
+it('names no variable and no value in what it measured (#215)', function (): void {
+    $shape = WindowsCredentialStore::launchShape([WINDOWS_TOKEN], ['ROBOT_COUNCIL_TARGET' => WINDOWS_TOKEN]);
+
+    expect($shape)->not->toContain(WINDOWS_TOKEN)->not->toContain('ROBOT_COUNCIL_TARGET');
+});
+
 it('says nothing about the credential when it cannot reach the store', function (): void {
     // The refusal is built from an operating-system message and a fixed prefix, and neither can
     // carry a credential -- but this store has leaked one through an exception before
