@@ -351,11 +351,19 @@ it('never puts the token on the child command line', function (): void {
 
         expect($pid)->toBeInt();
 
+        $started = microtime(true);
         $own = commandLineOf((int) $pid);
+        $took = microtime(true) - $started;
 
         // **The control.** Without it, an unreadable command line and a clean one are the same
         // empty string, and the assertion below would pass by being blind.
-        expect($own)->toContain('mcp:reader');
+        //
+        // **It says why it failed (#203).** It failed twice on `windows-latest` with an empty
+        // string and nothing to tell a query that returned nothing from a process that was gone,
+        // so a failure carries the read's duration and a second look at the same process.
+        expect(str_contains($own, 'mcp:reader'))->toBeTrue(
+            $own === '' ? readFailureOf((int) $pid, $took) : 'the command line read as: '.$own
+        );
 
         expect(commandLinesMentioning('mcp:reader'))->each->not->toContain('ROBOT_COUNCIL_READER_TOKEN');
     } finally {
@@ -405,6 +413,35 @@ function commandLineOf(int $pid): string
     }
 
     return trim(powerShell(sprintf('(Get-CimInstance Win32_Process -Filter "ProcessId=%d").CommandLine', $pid)));
+}
+
+/**
+ * Why a command line read came back empty, for a failure message (#203).
+ *
+ * An empty string has three causes that point in different directions: the process had already
+ * exited, the operating system holds a row for it with no command line (a permissions boundary),
+ * or the query itself stalled or failed. The first read cannot tell them apart, so this looks again
+ * at the same pid and says what it found. It reports no command line, so it cannot hold a token.
+ */
+function readFailureOf(int $pid, float $took): string
+{
+    $head = sprintf('the command line of pid %d read as empty after %.2f s; ', $pid, $took);
+
+    if (PHP_OS_FAMILY === 'Linux') {
+        return $head.(is_dir(sprintf('/proc/%d', $pid)) ? 'the process is alive but its cmdline is empty' : 'the process has exited');
+    }
+
+    $started = microtime(true);
+    $found = trim(powerShell(sprintf(
+        '$p = Get-CimInstance Win32_Process -Filter "ProcessId=%d"; '
+        .'if (-not $p) { "no Win32_Process row (the process has exited)" } '
+        .'elseif ($null -eq $p.CommandLine) { "row found, CommandLine is null" } '
+        .'elseif ($p.CommandLine -eq "") { "row found, CommandLine is empty" } '
+        .'else { "row found, CommandLine has " + $p.CommandLine.Length + " characters" }',
+        $pid
+    )));
+
+    return $head.sprintf('a second look took %.2f s and found: %s', microtime(true) - $started, $found === '' ? 'nothing printed (the query failed or stalled)' : $found);
 }
 
 /**
