@@ -78,7 +78,7 @@ agents start, which costs one command and is the difference between a finding an
 
 ### 1. Resolve scope → build `args` for the workflow
 
-- **Default / no args** → `{ mode: 'full' }`.
+- **Default / no args** → `{ mode: 'full', scope: [<the directories the *Scope* command printed>], package: '<name from composer.json>' }`. The workflow refuses a full run with an empty `scope`, so a checkout it cannot resolve fails loudly rather than reporting clean.
 - **Path args** (`app/Commands …`, or `src/Commands …` in the package) → `{ mode: 'paths', files: [<those paths>] }`.
 - **`--since <ref>`** → run `git diff --name-only <ref>...HEAD`, keep only first-party paths
   (resolved from the checkout, per *Scope* above), and pass

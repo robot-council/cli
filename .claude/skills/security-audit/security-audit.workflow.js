@@ -1,6 +1,6 @@
 export const meta = {
   name: 'security-audit',
-  description: 'Fan out security finders across domains for the robot-council Laravel package, adversarially verify each finding against the package trust model, then dedup and severity-rank the confirmed set.',
+  description: 'Fan out security finders across domains for the Laravel package in the checkout, adversarially verify each finding against the package trust model, then dedup and severity-rank the confirmed set.',
   phases: [
     { title: 'Find', detail: 'one agent per security domain sweeps the scope' },
     { title: 'Verify', detail: 'two adversarial lenses (sink + reachability) refute each finding' },
@@ -11,20 +11,23 @@ export const meta = {
 // ---------------------------------------------------------------------------
 // Scope (passed by the /security-audit skill via Workflow args)
 //   args.mode    : 'full' | 'paths' | 'diff'
+//   args.scope   : string[] of first-party directories resolved from the checkout (full mode; required)
+//   args.package : Composer package name from composer.json, used only to name the package in prompts
 //   args.files   : string[] of first-party paths to focus on (paths/diff modes)
 //   args.baseRef : git ref the diff was taken against (diff mode, for the prose)
 // ---------------------------------------------------------------------------
 const mode = (args && args.mode) || 'full'
 const files = (args && args.files) || []
 const baseRef = (args && args.baseRef) || 'main'
+const packageName = (args && args.package) || 'the package in this checkout'
 
-const FIRST_PARTY = [
-  'src/',
-  'config/',
-  'database/',
-  'resources/views/',
-  'routes/',
-]
+// Resolved from the checkout by the skill, never named here: a list that names directories this checkout
+// lacks sweeps nothing and reports the same clean result as an audit that looked everywhere.
+const FIRST_PARTY = ((args && args.scope) || []).map((d) => (d.endsWith('/') ? d : d + '/'))
+
+if (mode === 'full' && FIRST_PARTY.length === 0) {
+  throw new Error('security-audit: full mode needs args.scope, the first-party directories resolved from this checkout. An empty scope is a setup failure, not a clean audit.')
+}
 
 const scopeDescription =
   mode === 'diff'
@@ -37,7 +40,7 @@ const scopeDescription =
 // Shared context — the quality lever. Every finder and verifier reasons from
 // this trust model so we surface real issues and reject framework false-positives.
 // ---------------------------------------------------------------------------
-const SHARED_CONTEXT = `PACKAGE UNDER TEST: \`robot-council/core\`, a Laravel package (namespace \`RobotCouncil\\\`, PHP ^8.4, Laravel 13 via \`illuminate/contracts\`) built on \`spatie/laravel-package-tools\`. It has no application of its own: it is installed into consuming Laravel applications, and \`src/RobotCouncilServiceProvider.php\` (\`configurePackage()\`) declares everything it registers — config file, views, view components, migrations, commands, routes, translations, assets. The package is young, so several domains may have no surface at all; confirm a surface exists before hunting for flaws in it.
+const SHARED_CONTEXT = `PACKAGE UNDER TEST: \`${packageName}\`, a Laravel package (namespace \`RobotCouncil\\\`, PHP ^8.4, Laravel 13 via \`illuminate/contracts\`) built on \`spatie/laravel-package-tools\`. It has no application of its own: it is installed into consuming Laravel applications, and \`src/RobotCouncilServiceProvider.php\` (\`configurePackage()\`) declares everything it registers — config file, views, view components, migrations, commands, routes, translations, assets. The package is young, so several domains may have no surface at all; confirm a surface exists before hunting for flaws in it.
 
 TRUST BOUNDARIES — decide WHO controls each input before you rate severity:
 - END USER OF A CONSUMING APPLICATION (anonymous, or authenticated in that app) — reaches package code ONLY through what the package registers: routes and their controllers, middleware, Blade views and components rendered with request or stored data, jobs and listeners fed by user actions, and commands that process user-stored data. Controls request input, headers, uploaded files, and anything they stored that the package later reads back. Highest concern; anonymous outranks authenticated. Judge reachability under the package's SHIPPED DEFAULTS — the package cannot assume the consuming app puts auth or any other middleware in front of what it registers.
@@ -47,7 +50,7 @@ TRUST BOUNDARIES — decide WHO controls each input before you rate severity:
 FRAMEWORK FALSE-POSITIVE TRAPS — do NOT report these unless you prove the protection is bypassed:
 - Blade \`{{ }}\` ESCAPES: it compiles to \`e()\`, which is \`htmlspecialchars\` with ENT_QUOTES. A plain \`{{ $value }}\` in HTML body text or a QUOTED attribute is not an XSS sink. \`{!! !!}\` does NOT escape and is a real sink for attacker data. \`{{ }}\` still does not protect: an \`Htmlable\` value (\`HtmlString\` and friends — \`e()\` prints \`toHtml()\` verbatim), a \`javascript:\` URL in \`href\`/\`src\`/\`action\`, an unquoted attribute, or a \`<script>\`/inline-handler JS context (safe form: \`@js\` / \`Js::from\`).
 - Eloquent and the query builder bind VALUES. SQL injection needs a raw method (\`DB::raw\`, \`whereRaw\`, \`orderByRaw\`, \`selectRaw\`, \`havingRaw\`), \`DB::statement\`/\`DB::select\`/\`DB::unprepared\` with interpolation, or string concatenation into a query — OR input used as an IDENTIFIER (a column or table name, e.g. \`orderBy($request->input('sort'))\`), which PDO cannot bind.
-- Config values are developer-controlled. \`config('robot-council.*')\` flowing into a sink is not an end-user injection path; only the shipped default is the package's responsibility.
+- Config values are developer-controlled. \`config('<package namespace>.*')\` flowing into a sink is not an end-user injection path; only the shipped default is the package's responsibility.
 - A package route is reachable only if the service provider registers its route file (\`hasRoute\`/\`hasRoutes\`/\`loadRoutesFrom\`); a route file nothing registers is not reachable. A registered one carries ONLY the middleware the route file itself (or a config default it reads) applies: \`loadRoutesFrom\` just requires the file, so there is no \`web\` group, session, CSRF, or auth unless the package declares it. Do not credit the consuming app's middleware the package cannot assume.
 - Package PHP API arguments and Blade component props are set by the consuming developer — UNLESS package code binds them to request input itself, or the API exists to process user-supplied data. Classify by who really controls the value.
 - Artisan commands are not reachable over HTTP unless code calls \`Artisan::call\` with request data.
@@ -337,7 +340,7 @@ Set adjustedSeverity to the REAL impact given the trust boundary (an issue only 
 }
 
 function synthPrompt(reviewed) {
-  return `You are the security lead compiling the FINAL audit report for \`robot-council/core\`, a Laravel package (PHP 8.4, Laravel 13) installed into consuming applications.
+  return `You are the security lead compiling the FINAL audit report for \`${packageName}\`, a Laravel package (PHP 8.4, Laravel 13) installed into consuming applications.
 
 ${SHARED_CONTEXT}
 
