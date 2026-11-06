@@ -6,7 +6,7 @@ Before a branch is validated and before its pull request is opened, bring it **c
 
 ## How to apply
 
-1. **Author side: sync before running the gate and before opening the PR.** Run `git fetch origin && git merge origin/main`, and only after that run `composer test`, `composer analyse`, `vendor/bin/pint --test`, and `gh pr create`. A conflict found here is caught before review rather than after merge.
+1. **Author side: sync before running the gate and before opening the PR.** Run `git fetch origin && git merge origin/main`, and only after that run `composer test`, `composer analyse`, `vendor/bin/pint --test`, and open the pull request. A conflict found here is caught before review rather than after merge.
 
 2. **The ruleset enforces this at merge time.** It requires the branch to be up to date with `main` and `ci-passed` to succeed on it, so a branch behind `main` cannot merge until it is synced and the checks re-run (see [`pre-merge-check`](pre-merge-check.md)). Syncing earlier is still cheaper: a conflict or an interaction found before review costs less than one found at the merge button.
 

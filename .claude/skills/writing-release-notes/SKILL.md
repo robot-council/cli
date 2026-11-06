@@ -150,7 +150,7 @@ Do **not** invent headings outside this closed set. If something doesn't obvious
 ## Line format
 
 - One bullet per change: `- <PR title> [#N](https://github.com/robot-council/cli/pull/N)`.
-- **Use the PR title from the GitHub API** (`gh pr view N --json title`), **never the commit
+- **Use the PR title from the GitHub API** (`gh api 'repos/{owner}/{repo}/pulls/N' --jq .title`), **never the commit
   subject on `main`.** A merge commit's subject is a branch slug (`Merge pull request #N from
   robot-council/<branch>`), and this repo's squash setting (`COMMIT_OR_PR_TITLE`) takes the
   *commit's* title when a PR has a single commit, so neither is reliably the PR title. For a change
