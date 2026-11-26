@@ -123,7 +123,9 @@ final class McpCommand extends Command
         // only turn over when the harness sends a frame -- so an idle agent would get no heartbeat,
         // no renewal and no directives, which is the agent all three exist for (#131).
         try {
-            $reader = new StdinReader;
+            // Resolved rather than constructed, so a test can hand the command a reader whose input
+            // stays open (#402). The container builds it with its defaults, which is `new StdinReader`.
+            $reader = app(StdinReader::class);
         } catch (RuntimeException $runtimeException) {
             $this->diagnostic($runtimeException->getMessage());
 
