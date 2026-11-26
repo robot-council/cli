@@ -15,7 +15,9 @@ use App\Support\StopRecord;
 
 require __DIR__.'/../../vendor/autoload.php';
 
-[, $path, $number] = $argv + [null, null, null];
+$arguments = \is_array($_SERVER['argv'] ?? null) ? array_values($_SERVER['argv']) : [];
+$path = $arguments[1] ?? null;
+$number = $arguments[2] ?? null;
 
 if (! \is_string($path) || ! \is_string($number)) {
     fwrite(STDERR, "usage: append-stop-record.php <path> <number>\n");
