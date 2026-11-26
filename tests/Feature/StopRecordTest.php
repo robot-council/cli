@@ -16,6 +16,7 @@ declare(strict_types=1);
 use App\Support\PendingEvents;
 use App\Support\StopReason;
 use App\Support\StopRecord;
+use Illuminate\Support\Sleep;
 use Symfony\Component\Process\Process;
 
 beforeEach(function (): void {
@@ -177,4 +178,75 @@ it('records a throwable that escaped over whatever the bridge noted, and other w
         ->and(StopReason::recordedFor('LogicException', null))->toBe(StopReason::Unhandled)
         ->and(StopReason::recordedFor(null, StopReason::Signal))->toBe(StopReason::Signal)
         ->and(StopReason::recordedFor(null, null))->toBe(StopReason::Other);
+});
+
+it('writes no path for an anonymous class', function (): void {
+    $anonymous = new class extends RuntimeException {};
+
+    new StopRecord($this->path)->append(StopReason::Unhandled, ['exception' => $anonymous::class]);
+
+    $raw = (string) file_get_contents($this->path);
+
+    expect(stopLines($this->path)[0]['exception'])->toBe('RuntimeException')
+        ->and($raw)->not->toContain('StopRecordTest')
+        ->and($raw)->not->toContain('Users');
+});
+
+it('says why it wrote nothing when the path is a directory', function (): void {
+    mkdir($this->path, 0777, true);
+
+    $failure = new StopRecord($this->path)->append(StopReason::Other);
+
+    expect($failure)->toBeString()->toContain('Could not');
+
+    rmdir($this->path);
+});
+
+it('drops blank and padded lines already in the file, and keeps the rest', function (): void {
+    mkdir($this->directory);
+    file_put_contents($this->path, "{\"old\":1}\n\n   \n{\"old\":2}\n");
+
+    new StopRecord($this->path)->append(StopReason::Other, ['status' => 3]);
+
+    $lines = stopLines($this->path);
+
+    expect($lines)->toHaveCount(3)
+        ->and($lines[0]['old'])->toBe(1)
+        ->and($lines[2]['status'])->toBe(3);
+});
+
+it('starts again rather than read a file far past its bound', function (): void {
+    mkdir($this->directory);
+    file_put_contents($this->path, str_repeat("{\"old\":1}\n", 600_000));
+
+    $failure = new StopRecord($this->path)->append(StopReason::Other, ['status' => 7]);
+
+    expect($failure)->toBeNull()
+        ->and(stopLines($this->path))->toHaveCount(1);
+});
+
+it('says it could not lock when another holder keeps the file', function (): void {
+    mkdir($this->directory);
+    file_put_contents($this->path, '');
+
+    $holder = fopen($this->path, 'c+');
+
+    expect($holder)->toBeResource();
+
+    if (! \is_resource($holder)) {
+        return;
+    }
+
+    flock($holder, LOCK_EX);
+
+    Sleep::fake();
+
+    $failure = new StopRecord($this->path)->append(StopReason::Other);
+
+    flock($holder, LOCK_UN);
+    fclose($holder);
+    Sleep::fake(false);
+
+    expect($failure)->toBeString()->toContain('Could not lock')
+        ->and((string) file_get_contents($this->path))->toBeEmpty();
 });

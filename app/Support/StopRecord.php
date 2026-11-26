@@ -49,6 +49,11 @@ final readonly class StopRecord
     private const int FACT_LENGTH = 120;
 
     /**
+     * The most of an existing file that is read back, in bytes; a full file is about 150 KB.
+     */
+    private const int READ_LIMIT = 4_194_304;
+
+    /**
      * How many times to try for the lock, and how long between tries.
      */
     private const int LOCK_TRIES = 40;
@@ -104,11 +109,14 @@ final readonly class StopRecord
 
                 $lines = $this->kept($handle);
                 $lines[] = $line;
+                $contents = implode("\n", $lines)."\n";
 
                 rewind($handle);
-                ftruncate($handle, 0);
-                fwrite($handle, implode("\n", $lines)."\n");
-                fflush($handle);
+
+                if (! ftruncate($handle, 0) || fwrite($handle, $contents) !== \strlen($contents) || ! fflush($handle)) {
+                    return \sprintf('Could not write `%s` to record why this bridge stopped.', $this->path);
+                }
+
                 flock($handle, LOCK_UN);
             } finally {
                 fclose($handle);
@@ -151,6 +159,9 @@ final readonly class StopRecord
      */
     private function plain(string $value): string
     {
+        // An anonymous class's name carries the file it was declared in after `@anonymous`, and a
+        // path has no place in a line
+        $value = explode('@anonymous', $value)[0];
         $plain = preg_replace('/[^A-Za-z0-9_.:\\\\-]/', '', $value) ?? '';
 
         return substr($plain, 0, self::FACT_LENGTH);
@@ -184,7 +195,9 @@ final readonly class StopRecord
     {
         rewind($handle);
 
-        $contents = stream_get_contents($handle);
+        // A file far past its bound was not written by this class, so it is replaced rather than
+        // read into memory
+        $contents = (fstat($handle)['size'] ?? 0) > self::READ_LIMIT ? '' : stream_get_contents($handle);
         $lines = $contents === false || $contents === ''
             ? []
             : array_values(array_filter(explode("\n", $contents), static fn (string $line): bool => trim($line) !== ''));

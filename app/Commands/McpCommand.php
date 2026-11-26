@@ -257,14 +257,14 @@ final class McpCommand extends Command
             // it went first or the harness closed stdin (#396)
             $readerState = $reader->state();
 
+            // **Before anything below can fail, so nothing after it can lose it** (#396). One line
+            // saying which end of the loop ran: the service records the stop as `ended` and
+            // nothing else on the machine said more (#362)
+            $this->recordStop($bridge, $parent, $escaped, $readerState);
+
             // Before the session ends, because the child holds the harness's stdin and would
             // otherwise outlive the bridge that started it.
             $reader->stop();
-
-            // **Before the session ends, so a failure in the steps below cannot lose it** (#396).
-            // One line saying which end of the loop ran: the service records the stop as `ended`
-            // and nothing else on the machine said more (#362)
-            $this->recordStop($bridge, $parent, $escaped, $readerState);
 
             // The session must not outlive the harness. Ending it marks it gone now, rather than
             // leaving it to the presence sweep's stale and gone thresholds, and core's next sweep

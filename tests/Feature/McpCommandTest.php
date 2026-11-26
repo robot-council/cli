@@ -552,7 +552,8 @@ it('leaves one line saying stdin closed when the harness goes away', function ()
         ->and($stops[0]['reason'])->toBe('stdin-closed')
         ->and($stops[0]['session'])->toBe(MCP_SESSION)
         ->and($stops[0]['pid'])->toBe(getmypid())
-        ->and($stops[0]['reader'])->toMatch('/^(running|exited-(-1|\d+)|none)$/')
+        // The reader saw the harness close stdin and went with exit 0; read before it was stopped, so not `none`
+        ->and($stops[0]['reader'])->toMatch('/^(exited-0|running)$/')
         ->and($stops[0]['version'])->toBeString()->not->toBe('');
 });
 

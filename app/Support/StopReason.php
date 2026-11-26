@@ -13,9 +13,9 @@ namespace App\Support;
 enum StopReason: string
 {
     /**
-     * The harness side of stdin closed, or the reader child that holds it went away. The record's
-     * `reader` fact says which: a reader that is still running closed it from the harness, one that
-     * has exited went first.
+     * The bridge's input ended. The record's `reader` fact says how: `exited-0` is the reader child
+     * seeing the harness close stdin, which is the ordinary case; any other exit code is the child
+     * failing; `running` is the socket ending while the child lived, which is unexpected.
      */
     case StdinClosed = 'stdin-closed';
 
