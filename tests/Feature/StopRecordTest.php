@@ -16,8 +16,10 @@ declare(strict_types=1);
 use App\Support\PendingEvents;
 use App\Support\StopReason;
 use App\Support\StopRecord;
+use Carbon\CarbonInterval;
 use Illuminate\Support\Sleep;
 use Symfony\Component\Process\Process;
+use Tests\Fixtures\FailingWriteStream;
 
 beforeEach(function (): void {
     $this->directory = sys_get_temp_dir().'/rc-stops-'.bin2hex(random_bytes(6));
@@ -197,7 +199,8 @@ it('says why it wrote nothing when the path is a directory', function (): void {
 
     $failure = new StopRecord($this->path)->append(StopReason::Other);
 
-    expect($failure)->toBeString()->toContain('Could not');
+    // Named, because the next step fails differently if the open's failure is not returned
+    expect($failure)->toBeString()->toContain('Could not open');
 
     rmdir($this->path);
 });
@@ -243,10 +246,99 @@ it('says it could not lock when another holder keeps the file', function (): voi
 
     $failure = new StopRecord($this->path)->append(StopReason::Other);
 
+    // Tried for as long as it says: one wait after each of the 40 tries
+    Sleep::assertSleptTimes(40);
+
     flock($holder, LOCK_UN);
     fclose($holder);
     Sleep::fake(false);
 
     expect($failure)->toBeString()->toContain('Could not lock')
         ->and((string) file_get_contents($this->path))->toBeEmpty();
+});
+
+it('returns a throwable the write raises as a reason, and does not throw', function (): void {
+    // A path with a NUL byte makes PHP raise a `ValueError` rather than return false
+    $failure = new StopRecord($this->directory."/a\0b.jsonl")->append(StopReason::Other);
+
+    expect($failure)->toBe('Could not record why this bridge stopped (ValueError).');
+});
+
+it('says why when a write is refused, and not that the line is in the file', function (): void {
+    stream_wrapper_register('failwrite', FailingWriteStream::class);
+
+    try {
+        $failure = new StopRecord('failwrite://dir/stops.jsonl')->append(StopReason::Other);
+    } finally {
+        stream_wrapper_unregister('failwrite');
+    }
+
+    expect($failure)->toBe('Could not write `failwrite://dir/stops.jsonl` to record why this bridge stopped.');
+});
+
+it('pins the bound the file keeps', function (): void {
+    // A literal, because a test that compares against the constant passes whatever it is changed to
+    expect(StopRecord::KEEP)->toBe(1000);
+});
+
+it('writes every fact it allows, each under its own name', function (): void {
+    new StopRecord($this->path)->append(StopReason::Signal, [
+        'parent' => 11,
+        'session' => 22,
+        'version' => 'v1.2.3',
+        'reader' => 'exited-0',
+        'status' => 409,
+        'signal' => 'SIGTERM',
+        'exception' => 'LogicException',
+    ]);
+
+    $line = stopLines($this->path)[0];
+
+    expect($line['parent'])->toBe(11)
+        ->and($line['session'])->toBe(22)
+        ->and($line['version'])->toBe('v1.2.3')
+        ->and($line['reader'])->toBe('exited-0')
+        ->and($line['status'])->toBe(409)
+        ->and($line['signal'])->toBe('SIGTERM')
+        ->and($line['exception'])->toBe('LogicException');
+});
+
+it('reads a file of exactly the read limit back, and replaces one a byte larger', function (int $extraBytes, int $expectedLines): void {
+    mkdir($this->directory);
+
+    // 8 bytes a line, so 524,288 lines is exactly 4,194,304 bytes; an extra blank line adds one byte
+    file_put_contents($this->path, str_repeat("{\"o\":1}\n", 524_288).str_repeat("\n", $extraBytes));
+
+    $failure = new StopRecord($this->path)->append(StopReason::Other);
+
+    expect($failure)->toBeNull()
+        ->and(stopLines($this->path))->toHaveCount($expectedLines);
+})->with([
+    'at the limit is read, and the newest 1,000 kept' => [0, 1000],
+    'one byte over is replaced' => [1, 1],
+]);
+
+it('waits fifty milliseconds between lock attempts', function (): void {
+    mkdir($this->directory);
+    file_put_contents($this->path, '');
+
+    $holder = fopen($this->path, 'c+');
+
+    expect($holder)->toBeResource();
+
+    if (! \is_resource($holder)) {
+        return;
+    }
+
+    flock($holder, LOCK_EX);
+
+    Sleep::fake();
+
+    new StopRecord($this->path)->append(StopReason::Other);
+
+    Sleep::assertSlept(fn (CarbonInterval $duration): bool => (int) $duration->totalMilliseconds === 50, 40);
+
+    flock($holder, LOCK_UN);
+    fclose($holder);
+    Sleep::fake(false);
 });
