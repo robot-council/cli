@@ -20,6 +20,7 @@ use App\Support\Bridge;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
 use App\Support\PendingEvents;
+use App\Support\WakeAdapters;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
@@ -602,4 +603,48 @@ it('still ends cleanly, and says so on stderr, when the record cannot be written
         ->and(bridgeEndCalls())->toBe(1);
 
     @unlink($this->stateDirectory.'/robot-council');
+});
+
+it('leaves one line, and says nothing on stdout, when setup throws after the reader started (#400)', function (): void {
+    putenv('ROBOT_COUNCIL_HARNESS=amp');
+
+    // A factory that throws something `WakeAdapters::for()` does not catch, so it escapes the setup
+    // between the reader and the loop
+    app()->instance(WakeAdapters::class, new WakeAdapters([
+        'amp' => fn (string $target): never => throw new LogicException('boom rcouncil_2|PLANTED-SECRET'),
+    ]));
+
+    $output = new TwoStreamOutput;
+
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE, '--wake-target' => 'thread-9'], $output);
+
+    // Settled as the test above settles it: a reader still exiting is not a leak, one that stays is.
+    // **This cannot see `abandon()` fail to stop the reader.** Stdin is already at end of file under
+    // a test runner, so the child has exited by itself before `abandon()` runs: with its
+    // `$reader->stop()` removed this test still passes (measured, #400). That call is held by reading,
+    // not by this test.
+    $running = readersRunning();
+
+    for ($attempt = 0; $attempt < 30 && $running > 0 && in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true); $attempt++) {
+        usleep(100_000);
+
+        $running = readersRunning();
+    }
+
+    $stops = bridgeStops();
+    $raw = (string) file_get_contents(getenv('XDG_STATE_HOME').'/robot-council/stops.jsonl');
+
+    expect($exit)->toBe(Command::FAILURE)
+        ->and($stops)->toHaveCount(1)
+        ->and($stops[0]['reason'])->toBe('unhandled-exception')
+        ->and($stops[0]['exception'])->toBe('LogicException')
+        // Read before the reader was stopped, so the child was seen rather than already gone
+        ->and($stops[0]['reader'])->toMatch('/^(exited-0|running)$/')
+        ->and($stops[0])->not->toHaveKey('session')
+        // Nothing of the message, on the line or on the protocol stream
+        ->and($raw)->not->toContain('PLANTED-SECRET')
+        ->and($output->stdout())->toBeEmpty()
+        ->and($output->stderr())->toContain('The bridge stopped unexpectedly.')
+        // Counted only where counting is implemented; elsewhere `readersRunning()` has no basis
+        ->and(in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true) ? $running : 0)->toBe(0);
 });
