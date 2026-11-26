@@ -42,6 +42,13 @@ enum StopReason: string
     case Other = 'other';
 
     /**
+     * The bridge returned before it could start: no service URL, or the stdin reader would not start
+     * (#403). There is no reader and no session on the line, and a throwable contributes its class
+     * name only.
+     */
+    case StartFailed = 'start-failed';
+
+    /**
      * Which reason a stop is recorded under.
      *
      * **A throwable that escaped wins over what the bridge noted**, because the loop may have been

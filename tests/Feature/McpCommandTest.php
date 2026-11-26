@@ -675,3 +675,50 @@ it('leaves one line, and says nothing on stdout, when setup throws after the rea
         ->and($countable ? $aliveBefore : 1)->toBe(1)
         ->and($countable ? $running : 0)->toBe(0);
 });
+
+it('leaves one start-failed line, and nothing else on it, when there is no service URL (#403)', function (): void {
+    putenv('ROBOT_COUNCIL_SERVICE');
+
+    $output = new TwoStreamOutput;
+
+    $exit = Artisan::call('mcp', [], $output);
+
+    $stops = bridgeStops();
+
+    expect($exit)->toBe(Command::FAILURE)
+        ->and($stops)->toHaveCount(1)
+        ->and($stops[0]['reason'])->toBe('start-failed')
+        // No reader and no session exist at this return, and no throwable caused it
+        ->and($stops[0])->not->toHaveKey('reader')
+        ->and($stops[0])->not->toHaveKey('session')
+        ->and($stops[0])->not->toHaveKey('exception')
+        ->and($stops[0]['pid'])->toBe(getmypid())
+        ->and($output->stdout())->toBeEmpty()
+        ->and($output->stderr())->toContain('Pass --service');
+});
+
+it('leaves one start-failed line naming the class, and none of the message, when the reader will not start (#403)', function (): void {
+    // A reader that cannot start, carrying something that must never reach the line
+    app()->bind(StdinReader::class, function (): never {
+        throw new RuntimeException('Could not listen: rcouncil_2|PLANTED-SECRET https://bridge.example.test/?token=PLANTED-SECRET');
+    });
+
+    $output = new TwoStreamOutput;
+
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE], $output);
+
+    $stops = bridgeStops();
+    $path = getenv('XDG_STATE_HOME').'/robot-council/stops.jsonl';
+    // Guarded, so a missing file fails the count below rather than raising before any assertion
+    $raw = is_file($path) ? (string) file_get_contents($path) : '';
+
+    expect($exit)->toBe(Command::FAILURE)
+        ->and($stops)->toHaveCount(1)
+        ->and($stops[0]['reason'])->toBe('start-failed')
+        ->and($stops[0]['exception'])->toBe('RuntimeException')
+        ->and($stops[0])->not->toHaveKey('reader')
+        ->and($stops[0])->not->toHaveKey('session')
+        ->and($raw)->not->toContain('PLANTED-SECRET')
+        ->and($raw)->not->toContain('bridge.example.test')
+        ->and($output->stdout())->toBeEmpty();
+});
