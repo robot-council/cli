@@ -54,6 +54,7 @@ beforeEach(function (): void {
 
 afterEach(function (): void {
     array_map(unlink(...), glob($this->stateDirectory.'/robot-council/pending/*') ?: []);
+    array_map(unlink(...), glob($this->stateDirectory.'/robot-council/*.jsonl') ?: []);
     @rmdir($this->stateDirectory.'/robot-council/pending');
     @rmdir($this->stateDirectory.'/robot-council');
     @rmdir($this->stateDirectory);
@@ -509,4 +510,96 @@ it('describes --capacity as taking the seat setting when omitted (#361)', functi
 
     expect($command->getDefinition()->getOption('capacity')->getDescription())->toContain('Tasks at once setting of its seat')
         ->toContain('1 keeps it at one');
+});
+
+/**
+ * The lines the command left in this test's record of why bridges stop (#396).
+ *
+ * @return list<array<array-key, mixed>>
+ */
+function bridgeStops(): array
+{
+    $path = getenv('XDG_STATE_HOME').'/robot-council/stops.jsonl';
+
+    if (! is_file($path)) {
+        return [];
+    }
+
+    $stops = [];
+
+    foreach (explode("\n", (string) file_get_contents($path)) as $line) {
+        $decoded = $line === '' ? null : json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+
+        if (\is_array($decoded)) {
+            $stops[] = $decoded;
+        }
+    }
+
+    return $stops;
+}
+
+it('leaves one line saying stdin closed when the harness goes away', function (): void {
+    bridgeEnrolled();
+    bridgeService();
+
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true]);
+
+    $stops = bridgeStops();
+
+    // Exactly one: a stop that writes two lines would double every count made from the file
+    expect($exit)->toBe(0)
+        ->and($stops)->toHaveCount(1)
+        ->and($stops[0]['reason'])->toBe('stdin-closed')
+        ->and($stops[0]['session'])->toBe(MCP_SESSION)
+        ->and($stops[0]['pid'])->toBe(getmypid())
+        // The reader saw the harness close stdin and went with exit 0; read before it was stopped, so not `none`
+        ->and($stops[0]['reader'])->toMatch('/^(exited-0|running)$/')
+        ->and($stops[0]['version'])->toBeString()->not->toBe('');
+});
+
+it('writes the line before it ends the session', function (): void {
+    bridgeEnrolled();
+
+    // The record is read at the instant the session-end request arrives: a line written after it
+    // would be lost to any failure in the steps in between
+    $seenAtEnd = null;
+
+    Http::fake([
+        '*/api/sessions/*' => function (Request $request) use (&$seenAtEnd) {
+            if ($request->method() === 'DELETE') {
+                $seenAtEnd = bridgeStops();
+            }
+
+            return Http::response('', 204);
+        },
+        '*/api/sessions' => Http::response([
+            'session_id' => MCP_SESSION,
+            'token' => 'rcouncil_2|SESSION-TOKEN',
+            'abilities' => ['tasks:create'],
+            'expires_in' => 3600,
+        ], 201),
+        '*' => Http::response('', 200),
+    ]);
+
+    Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true]);
+
+    expect($seenAtEnd)->toBeArray()->toHaveCount(1)
+        ->and(($seenAtEnd ?? [])[0]['reason'] ?? null)->toBe('stdin-closed');
+});
+
+it('still ends cleanly, and says so on stderr, when the record cannot be written', function (): void {
+    bridgeEnrolled();
+    bridgeService();
+
+    // A file where the state directory's `robot-council` folder has to be
+    mkdir($this->stateDirectory);
+    file_put_contents($this->stateDirectory.'/robot-council', 'not a directory');
+
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE, '--auto-join' => true]);
+
+    expect($exit)->toBe(0)
+        // The session still ended, once, and the failure did not stop the steps after the record
+        ->and(bridgeEndCalls())->toBe(1);
+
+    @unlink($this->stateDirectory.'/robot-council');
 });

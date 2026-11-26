@@ -33,6 +33,7 @@ use App\Support\FleetFollower;
 use App\Support\PendingEvents;
 use App\Support\Session;
 use App\Support\SessionHasGone;
+use App\Support\StopReason;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
@@ -271,6 +272,18 @@ it('ends when a tool call is refused and the renewal says the session has gone',
     $bridge->run(goneStream(), tmpfile(), fn (string $m): null => null);
 
     expect(goneForwarded())->toBe(1);
+});
+
+it('notes that the fleet ended the session, with the renewal status, as the reason it stopped (#396)', function (): void {
+    goneService(renewStatus: 409, sessionTokenStatus: 401);
+
+    $bridge = new Bridge(goneSession(), GONE_SERVICE, Bridge::HEARTBEAT_SECONDS);
+
+    expect($bridge->stoppedBecause())->toBeNull();
+
+    $bridge->run(goneStream(), tmpfile(), fn (string $message): null => null);
+
+    expect($bridge->stoppedBecause())->toBe(['reason' => StopReason::SessionGone, 'facts' => ['status' => 409]]);
 });
 
 it('ends an idle bridge too, from a refused heartbeat', function (): void {

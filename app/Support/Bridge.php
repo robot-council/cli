@@ -417,6 +417,14 @@ final class Bridge
     private bool $stopping = false;
 
     /**
+     * Which end of the loop ran, and the short facts that go with it (#396). The first one set wins,
+     * because a later `stop()` with no reason is the same ending reached a second time.
+     *
+     * @var array{reason: StopReason, facts: array<string, int|string>}|null
+     */
+    private ?array $stoppedBecause = null;
+
+    /**
      * Whether the harness has said it finished initializing, after which a notice may be sent.
      *
      * A notification written before `notifications/initialized` goes into a transport the harness
@@ -490,10 +498,25 @@ final class Bridge
 
     /**
      * Ask the loop to finish after the message it is handling.
+     *
+     * @param  StopReason|null  $reason  Which end this is, for the record of why the bridge stopped (#396).
+     * @param  array<string, int|string>  $facts  Short facts that go with it, such as a signal's name.
      */
-    public function stop(): void
+    public function stop(?StopReason $reason = null, array $facts = []): void
     {
         $this->stopping = true;
+
+        $this->stoppedBecause ??= ['reason' => $reason ?? StopReason::Other, 'facts' => $facts];
+    }
+
+    /**
+     * Why the loop ended, or null while it has not.
+     *
+     * @return array{reason: StopReason, facts: array<string, int|string>}|null
+     */
+    public function stoppedBecause(): ?array
+    {
+        return $this->stoppedBecause;
     }
 
     /**
@@ -562,7 +585,7 @@ final class Bridge
             }
         }
 
-        $this->stop();
+        $this->stop(StopReason::SessionGone, ['status' => 409]);
     }
 
     /**
@@ -635,6 +658,8 @@ final class Bridge
 
                 if ($chunk === false || ($chunk === '' && feof($in))) {
                     // stdin closed: the harness has gone, and the session should not outlive it
+                    $this->stoppedBecause ??= ['reason' => StopReason::StdinClosed, 'facts' => []];
+
                     return;
                 }
 

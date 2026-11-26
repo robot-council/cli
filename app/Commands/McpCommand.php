@@ -16,6 +16,9 @@ use App\Support\Session;
 use App\Support\Stderr;
 use App\Support\StdinReader;
 use App\Support\StopHooks;
+use App\Support\StopReason;
+use App\Support\StopRecord;
+use App\Support\Version;
 use App\Support\WakeAdapter;
 use App\Support\WakeAdapters;
 use App\Support\WakeDelivery;
@@ -212,6 +215,9 @@ final class McpCommand extends Command
 
         $this->listenForSignals($bridge);
 
+        // Set only when something escapes the loop, so the record can name the class (#396)
+        $escaped = null;
+
         try {
             // After the signal handlers, so a `SIGTERM` arriving during the join's network calls
             // is caught and the session it started is still ended below
@@ -234,6 +240,8 @@ final class McpCommand extends Command
 
             $bridge->run($reader->stream(), STDOUT, $this->diagnostic(...));
         } catch (Throwable $throwable) {
+            $escaped = $throwable::class;
+
             // **Nothing may escape to the renderer.** `Illuminate\Console\Application` sets
             // `setCatchExceptions(false)`, so an uncaught throwable reaches the kernel's own
             // handler, which renders it through Collision to plain STDOUT -- measured at ~915 bytes
@@ -245,6 +253,15 @@ final class McpCommand extends Command
 
             return self::FAILURE;
         } finally {
+            // Read before the child is stopped, because a stopped child says nothing about whether
+            // it went first or the harness closed stdin (#396)
+            $readerState = $reader->state();
+
+            // **Before anything below can fail, so nothing after it can lose it** (#396). One line
+            // saying which end of the loop ran: the service records the stop as `ended` and
+            // nothing else on the machine said more (#362)
+            $this->recordStop($bridge, $parent, $escaped, $readerState);
+
             // Before the session ends, because the child holds the harness's stdin and would
             // otherwise outlive the bridge that started it.
             $reader->stop();
@@ -265,6 +282,40 @@ final class McpCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Leave the one line that says why this bridge stopped (#396).
+     *
+     * **Never throws and never changes the exit code.** A line that cannot be written is said on
+     * stderr and the stop carries on, the same rule `Bridge::endBecauseTheSessionIsGone()` follows for
+     * its own notice. The parent's pid is absent on Windows, where PHP cannot read it.
+     *
+     * @param  string|null  $escaped  The class of a throwable that left the loop, when one did.
+     * @param  string  $readerState  What the stdin reader child was doing when the loop ended.
+     */
+    private function recordStop(Bridge $bridge, ParentProcess $parent, ?string $escaped, string $readerState): void
+    {
+        $stopped = $bridge->stoppedBecause();
+
+        $reason = StopReason::recordedFor($escaped, $stopped['reason'] ?? null);
+
+        try {
+            $failure = StopRecord::atDefaultPath()->append($reason, [
+                ...($stopped['facts'] ?? []),
+                'exception' => $escaped,
+                'parent' => $parent->identity()['pid'] ?? null,
+                'session' => $bridge->session()?->id(),
+                'version' => Version::current(),
+                'reader' => $readerState,
+            ]);
+        } catch (Throwable $throwable) {
+            $failure = \sprintf('Could not record why this bridge stopped (%s).', $throwable::class);
+        }
+
+        if ($failure !== null) {
+            $this->diagnostic($failure);
+        }
     }
 
     /**
@@ -470,8 +521,8 @@ final class McpCommand extends Command
         pcntl_async_signals(true);
 
         foreach ([SIGTERM, SIGINT] as $signal) {
-            pcntl_signal($signal, static function () use ($bridge): void {
-                $bridge->stop();
+            pcntl_signal($signal, static function (int $received) use ($bridge): void {
+                $bridge->stop(StopReason::Signal, ['signal' => $received === SIGTERM ? 'SIGTERM' : 'SIGINT']);
             });
         }
     }

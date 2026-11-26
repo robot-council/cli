@@ -169,6 +169,28 @@ final class StdinReader
     }
 
     /**
+     * Whether the child is still reading, or how it ended, for the record of why the bridge stopped (#396).
+     *
+     * **`exited-0` is the ordinary harness close.** The child breaks out of its read at the end of
+     * its stdin, closes the socket and exits `0`, and the bridge sees the end of the socket only
+     * because the child has already gone, so this is read after the child has usually exited.
+     * `exited-<other>` means the child failed. `running` means the socket ended while the child
+     * lived, which is a race or something unexpected. `none` is a reader that was never started or
+     * has already been stopped. The code is `-1` when PHP has already reaped the child and no
+     * longer holds its status.
+     */
+    public function state(): string
+    {
+        if (! \is_resource($this->process)) {
+            return 'none';
+        }
+
+        $status = proc_get_status($this->process);
+
+        return $status['running'] ? 'running' : 'exited-'.$status['exitcode'];
+    }
+
+    /**
      * Stop the child and close the socket.
      *
      * **Called whatever ended the loop**, including a signal, because the child holds the harness's
