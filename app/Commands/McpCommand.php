@@ -128,92 +128,99 @@ final class McpCommand extends Command
             return self::FAILURE;
         }
 
-        // **Held for the life of this process**, which is what makes it a seat: the lock goes when
-        // the process does, however it goes (#320). **Taken after the reader starts**, so the
-        // long-lived child never holds a copy of the lock: a child that inherited it would keep
-        // the seat held after this process was killed, for as long as the harness kept stdin open.
-        // Close-on-exec covers this on POSIX (`SeatTest`); the order is what covers Windows
-        $seat = new PendingEvents($service, $harness, $this->stringOption('project'), useRecordedKey: true);
+        // **Everything between the reader and the loop is inside this `try`** (#400). The reader
+        // child is already running, so a throwable here would otherwise leave it behind, leave no
+        // line saying why, and reach the renderer.
+        try {
+            // **Held for the life of this process**, which is what makes it a seat: the lock goes when
+            // the process does, however it goes (#320). **Taken after the reader starts**, so the
+            // long-lived child never holds a copy of the lock: a child that inherited it would keep
+            // the seat held after this process was killed, for as long as the harness kept stdin open.
+            // Close-on-exec covers this on POSIX (`SeatTest`); the order is what covers Windows
+            $seat = new PendingEvents($service, $harness, $this->stringOption('project'), useRecordedKey: true);
 
-        // **Resolved once, here, and recorded for everything else to use** (cli#346): the seat, the
-        // follower, the keep-alive and the stop hook then key one sink, whatever git says later
-        $recorded = $seat->recordKey();
+            // **Resolved once, here, and recorded for everything else to use** (cli#346): the seat, the
+            // follower, the keep-alive and the stop hook then key one sink, whatever git says later
+            $recorded = $seat->recordKey();
 
-        if ($recorded !== null) {
-            $this->diagnostic($recorded);
-        }
-
-        // **Cursor only, and only when named** (#333). Cursor restarts its MCP servers by itself and
-        // each stop ends the session, so a Cursor seat needs a record to rejoin from. No other
-        // harness restarts the bridge under a live session, and none gets one: joining stays the
-        // agent's act there. Named rather than detected, because the detector reads `CURSOR_AGENT`
-        // before `CLAUDECODE`, so Claude Code started from a Cursor terminal detects as `cursor`;
-        // the Cursor wiring names it (`ROBOT_COUNCIL_HARNESS=cursor` in `mcp.json`).
-        $record = MachineIdentity::namedHarness($this->stringOption('harness')) === 'cursor'
-            ? new JoinRecord($seat->joinRecordPath(), $parent->identity())
-            : null;
-
-        // Not with `--auto-join`, which joins anyway and with what its own options say
-        $recalled = $this->option('auto-join') === true ? null : $record?->recall();
-        $sameParent = $record instanceof JoinRecord && $recalled !== null && $record->sameParent($recalled['parent']);
-
-        // **A reload overlaps the bridge it replaces**, which is still ending its session and
-        // clearing the sink when this one starts. Rejoining before it has gone would warn of a
-        // second bridge that is on its way out, and let its clearing take this session's first
-        // events. So a rejoin waits for the seat, briefly; a seat still held after that is a bridge
-        // that is not leaving, and nothing rejoins beside it.
-        $sharedSink = $this->sharedSinkWarning($seat, $sameParent ? self::REJOIN_SEAT_WAIT_MILLISECONDS : 0);
-
-        $wake = $this->wakeDelivery($harness, $adapters);
-
-        $bridge = new Bridge(
-            null,
-            $service,
-            Bridge::HEARTBEAT_SECONDS,
-
-            // **Claude Code only**, the one harness that reads `claude/channel`. A session started
-            // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
-            channel: $harness === 'claude',
-            join: $join(...),
-            keepWarm: $this->keepWarm($service, $harness),
-
-            // **A woken seat assumes no hook**, so the agent is told to read the feed itself (#381)
-            stopHook: $wake instanceof WakeDelivery ? false : $this->stopHookDelivers($harness),
-            sharedSink: $sharedSink,
-            joinRecord: $record,
-            afterJoinNotice: Bridge::afterJoinNoticeFor($harness),
-            wake: $wake,
-        );
-
-        $rejoin = null;
-
-        if ($record instanceof JoinRecord && $recalled !== null) {
-            if ($sameParent && $sharedSink === null) {
-                $rejoin = $recalled['arguments'];
-            } elseif (time() - $recalled['joined_at'] > self::DROPPED_NOTICE_SECONDS) {
-                // Old news: an operator who quit Cursor to stay off the fleet is not told on every launch
-                $record->forget();
-            } else {
-                // A quit and relaunch, or another Cursor: tell, and never join (#321's option A)
-                $this->tellAtConnect($bridge, $this->droppedNotice($recalled['joined_at']));
+            if ($recorded !== null) {
+                $this->diagnostic($recorded);
             }
+
+            // **Cursor only, and only when named** (#333). Cursor restarts its MCP servers by itself and
+            // each stop ends the session, so a Cursor seat needs a record to rejoin from. No other
+            // harness restarts the bridge under a live session, and none gets one: joining stays the
+            // agent's act there. Named rather than detected, because the detector reads `CURSOR_AGENT`
+            // before `CLAUDECODE`, so Claude Code started from a Cursor terminal detects as `cursor`;
+            // the Cursor wiring names it (`ROBOT_COUNCIL_HARNESS=cursor` in `mcp.json`).
+            $record = MachineIdentity::namedHarness($this->stringOption('harness')) === 'cursor'
+                ? new JoinRecord($seat->joinRecordPath(), $parent->identity())
+                : null;
+
+            // Not with `--auto-join`, which joins anyway and with what its own options say
+            $recalled = $this->option('auto-join') === true ? null : $record?->recall();
+            $sameParent = $record instanceof JoinRecord && $recalled !== null && $record->sameParent($recalled['parent']);
+
+            // **A reload overlaps the bridge it replaces**, which is still ending its session and
+            // clearing the sink when this one starts. Rejoining before it has gone would warn of a
+            // second bridge that is on its way out, and let its clearing take this session's first
+            // events. So a rejoin waits for the seat, briefly; a seat still held after that is a bridge
+            // that is not leaving, and nothing rejoins beside it.
+            $sharedSink = $this->sharedSinkWarning($seat, $sameParent ? self::REJOIN_SEAT_WAIT_MILLISECONDS : 0);
+
+            $wake = $this->wakeDelivery($harness, $adapters);
+
+            $bridge = new Bridge(
+                null,
+                $service,
+                Bridge::HEARTBEAT_SECONDS,
+
+                // **Claude Code only**, the one harness that reads `claude/channel`. A session started
+                // without `--channels` drops the notices, and the stop hook delivers as before (cli#62).
+                channel: $harness === 'claude',
+                join: $join(...),
+                keepWarm: $this->keepWarm($service, $harness),
+
+                // **A woken seat assumes no hook**, so the agent is told to read the feed itself (#381)
+                stopHook: $wake instanceof WakeDelivery ? false : $this->stopHookDelivers($harness),
+                sharedSink: $sharedSink,
+                joinRecord: $record,
+                afterJoinNotice: Bridge::afterJoinNoticeFor($harness),
+                wake: $wake,
+            );
+
+            $rejoin = null;
+
+            if ($record instanceof JoinRecord && $recalled !== null) {
+                if ($sameParent && $sharedSink === null) {
+                    $rejoin = $recalled['arguments'];
+                } elseif (time() - $recalled['joined_at'] > self::DROPPED_NOTICE_SECONDS) {
+                    // Old news: an operator who quit Cursor to stay off the fleet is not told on every launch
+                    $record->forget();
+                } else {
+                    // A quit and relaunch, or another Cursor: tell, and never join (#321's option A)
+                    $this->tellAtConnect($bridge, $this->droppedNotice($recalled['joined_at']));
+                }
+            }
+
+            if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
+                // A role is asked for at the join, and without `--auto-join` this process does not join
+                $this->diagnostic('--role applies only with --auto-join; pass the role to the `join` tool instead.');
+            }
+
+            if ($this->input->hasParameterOption('--capacity') && $this->option('auto-join') !== true) {
+                $this->diagnostic('--capacity applies only with --auto-join; pass the capacity to the `join` tool instead.');
+            }
+
+            // **Refused before any request** (#302), and the automatic join with it, since joining
+            // with a different capacity than asked is worse than not joining: `join` still works.
+            // Read only for an automatic join, the one thing it applies to
+            $capacity = $this->option('auto-join') === true ? $this->capacityOption() : null;
+
+            $this->listenForSignals($bridge);
+        } catch (Throwable $throwable) {
+            return $this->abandon($reader, $parent, $throwable, $seat ?? null);
         }
-
-        if ($this->stringOption('role') !== null && $this->option('auto-join') !== true) {
-            // A role is asked for at the join, and without `--auto-join` this process does not join
-            $this->diagnostic('--role applies only with --auto-join; pass the role to the `join` tool instead.');
-        }
-
-        if ($this->input->hasParameterOption('--capacity') && $this->option('auto-join') !== true) {
-            $this->diagnostic('--capacity applies only with --auto-join; pass the capacity to the `join` tool instead.');
-        }
-
-        // **Refused before any request** (#302), and the automatic join with it, since joining
-        // with a different capacity than asked is worse than not joining: `join` still works.
-        // Read only for an automatic join, the one thing it applies to
-        $capacity = $this->option('auto-join') === true ? $this->capacityOption() : null;
-
-        $this->listenForSignals($bridge);
 
         // Set only when something escapes the loop, so the record can name the class (#396)
         $escaped = null;
@@ -242,14 +249,7 @@ final class McpCommand extends Command
         } catch (Throwable $throwable) {
             $escaped = $throwable::class;
 
-            // **Nothing may escape to the renderer.** `Illuminate\Console\Application` sets
-            // `setCatchExceptions(false)`, so an uncaught throwable reaches the kernel's own
-            // handler, which renders it through Collision to plain STDOUT -- measured at ~915 bytes
-            // of formatted exception written straight into the protocol stream. A harness reads
-            // that as a malformed message.
-            $this->diagnostic($throwable instanceof RuntimeException
-                ? $throwable->getMessage()
-                : 'The bridge stopped unexpectedly.');
+            $this->sayWhyItStopped($throwable);
 
             return self::FAILURE;
         } finally {
@@ -285,6 +285,50 @@ final class McpCommand extends Command
     }
 
     /**
+     * End a bridge whose setup threw after the reader started, before the loop could (#400).
+     *
+     * Nothing has joined by then, so there is no session to end and no sink to clear. What is left
+     * to undo is the reader child, which would outlive this process, and the record of the sink's
+     * key if the seat got as far as writing one (cli#346), so a hook is not pointed at a bridge
+     * that is gone. The line says which class escaped.
+     *
+     * @param  StdinReader  $reader  The child that was started.
+     * @param  ParentProcess  $parent  The process that started this one, for the line.
+     * @param  PendingEvents|null  $seat  The seat, when setup got far enough to make it.
+     */
+    private function abandon(StdinReader $reader, ParentProcess $parent, Throwable $throwable, ?PendingEvents $seat): int
+    {
+        try {
+            // Before the child is stopped, as in the loop's own ending
+            $this->recordStop(null, $parent, $throwable::class, $reader->state());
+        } finally {
+            // Stopped whatever the record did, because the child is the one thing that outlives us
+            $reader->stop();
+
+            $seat?->forgetKey();
+        }
+
+        $this->sayWhyItStopped($throwable);
+
+        return self::FAILURE;
+    }
+
+    /**
+     * Say on stderr that the bridge stopped on a throwable, without letting it reach stdout.
+     *
+     * **Nothing may escape to the renderer.** `Illuminate\Console\Application` sets
+     * `setCatchExceptions(false)`, so an uncaught throwable reaches the kernel's own handler, which
+     * renders it through Collision to plain STDOUT -- measured at ~915 bytes of formatted exception
+     * written straight into the protocol stream. A harness reads that as a malformed message.
+     */
+    private function sayWhyItStopped(Throwable $throwable): void
+    {
+        $this->diagnostic($throwable instanceof RuntimeException
+            ? $throwable->getMessage()
+            : 'The bridge stopped unexpectedly.');
+    }
+
+    /**
      * Leave the one line that says why this bridge stopped (#396).
      *
      * **Never throws and never changes the exit code.** A line that cannot be written is said on
@@ -294,9 +338,9 @@ final class McpCommand extends Command
      * @param  string|null  $escaped  The class of a throwable that left the loop, when one did.
      * @param  string  $readerState  What the stdin reader child was doing when the loop ended.
      */
-    private function recordStop(Bridge $bridge, ParentProcess $parent, ?string $escaped, string $readerState): void
+    private function recordStop(?Bridge $bridge, ParentProcess $parent, ?string $escaped, string $readerState): void
     {
-        $stopped = $bridge->stoppedBecause();
+        $stopped = $bridge?->stoppedBecause();
 
         $reason = StopReason::recordedFor($escaped, $stopped['reason'] ?? null);
 
@@ -305,7 +349,7 @@ final class McpCommand extends Command
                 ...($stopped['facts'] ?? []),
                 'exception' => $escaped,
                 'parent' => $parent->identity()['pid'] ?? null,
-                'session' => $bridge->session()?->id(),
+                'session' => $bridge?->session()?->id(),
                 'version' => Version::current(),
                 'reader' => $readerState,
             ]);
@@ -520,10 +564,10 @@ final class McpCommand extends Command
 
         pcntl_async_signals(true);
 
+        $handler = $bridge->stopsOnSignal(SIGTERM);
+
         foreach ([SIGTERM, SIGINT] as $signal) {
-            pcntl_signal($signal, static function (int $received) use ($bridge): void {
-                $bridge->stop(StopReason::Signal, ['signal' => $received === SIGTERM ? 'SIGTERM' : 'SIGINT']);
-            });
+            pcntl_signal($signal, $handler);
         }
     }
 

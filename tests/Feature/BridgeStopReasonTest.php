@@ -53,3 +53,39 @@ it('keeps the first reason when it is stopped again', function (): void {
 
     expect($bridge->stoppedBecause())->toBe(['reason' => StopReason::Signal, 'facts' => ['signal' => 'SIGINT']]);
 });
+
+it('names the signal it was stopped by, and keeps the interrupt for anything that is not terminate', function (int $received, string $name): void {
+    $bridge = new Bridge(null, 'https://stop.example.test', Bridge::HEARTBEAT_SECONDS);
+
+    // 15 stands in for the terminate signal, so this runs where `SIGTERM` is not defined
+    $bridge->stopsOnSignal(15)($received);
+
+    expect($bridge->stoppedBecause())->toBe(['reason' => StopReason::Signal, 'facts' => ['signal' => $name]]);
+})->with([
+    'terminate' => [15, 'SIGTERM'],
+    'interrupt' => [2, 'SIGINT'],
+]);
+
+it('stops the loop when the signal handler runs, so the next pass forwards nothing', function (): void {
+    $bridge = new Bridge(null, 'https://stop.example.test', Bridge::HEARTBEAT_SECONDS);
+
+    $bridge->stopsOnSignal(15)(15);
+
+    $stream = tmpfile();
+
+    expect($stream)->not->toBeFalse();
+
+    fwrite($stream, "{\"jsonrpc\":\"2.0\",\"id\":1}\n");
+    rewind($stream);
+
+    $said = [];
+    $bridge->run($stream, tmpfile(), function (string $message) use (&$said): void {
+        $said[] = $message;
+    });
+
+    // **A stopped loop reads nothing**, so the message is still unread: the stream is where it was.
+    // The first reason stands too, because reaching the end of input afterwards does not replace it
+    expect(ftell($stream))->toBe(0)
+        ->and($said)->toBeEmpty()
+        ->and($bridge->stoppedBecause()['reason'] ?? null)->toBe(StopReason::Signal);
+});

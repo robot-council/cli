@@ -510,6 +510,23 @@ final class Bridge
     }
 
     /**
+     * What to run when the process is told to stop: end the loop and note which signal did it (#400).
+     *
+     * **The terminate signal's number is passed in** because `SIGTERM` is not defined where PHP has
+     * no process control, and the other signal this is installed for is the interrupt. Passing it
+     * lets the mapping from number to name be tested on every platform.
+     *
+     * @param  int  $terminate  The number `SIGTERM` has on this platform.
+     * @return Closure(int): void
+     */
+    public function stopsOnSignal(int $terminate): Closure
+    {
+        return function (int $received) use ($terminate): void {
+            $this->stop(StopReason::Signal, ['signal' => $received === $terminate ? 'SIGTERM' : 'SIGINT']);
+        };
+    }
+
+    /**
      * Why the loop ended, or null while it has not.
      *
      * @return array{reason: StopReason, facts: array<string, int|string>}|null
