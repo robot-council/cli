@@ -25,6 +25,13 @@ use Throwable;
  * **Appended under an exclusive lock and bounded**, so forty bridges stopping together neither
  * interleave nor grow the file without limit. **A failure to write is returned, never thrown**: this
  * runs while the bridge is already ending, and replacing a clean stop with a worse failure helps nobody.
+ *
+ * **Mutation (#400).** `composer test:mutate` reports the 17 mutants on the constants below as
+ * uncovered, because coverage cannot attribute a constant declaration to a test, so the tool never
+ * runs one against them. Each was applied by hand and killed (`KEEP` and `FACT_LENGTH` pinned to
+ * their literals, every entry of `FACTS` read back, `READ_LIMIT` tested at the limit and one byte
+ * over, `LOCK_TRIES` and `LOCK_WAIT_MILLISECONDS` asserted through `Sleep`). The two returns marked
+ * below report a timeout in the tool and fail fast when applied by hand.
  */
 final readonly class StopRecord
 {
@@ -99,6 +106,7 @@ final readonly class StopRecord
             $handle = @fopen($this->path, 'c+');
 
             if ($handle === false) {
+                // Reported as a timeout by the mutation tool; applied by hand it fails the directory test
                 return \sprintf('Could not open `%s` to record why this bridge stopped.', $this->path);
             }
 
@@ -114,6 +122,7 @@ final readonly class StopRecord
                 rewind($handle);
 
                 if (! ftruncate($handle, 0) || fwrite($handle, $contents) !== \strlen($contents) || ! fflush($handle)) {
+                    // Reported as a timeout by the mutation tool; applied by hand it fails the refused-write test
                     return \sprintf('Could not write `%s` to record why this bridge stopped.', $this->path);
                 }
 
