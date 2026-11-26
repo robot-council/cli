@@ -20,6 +20,7 @@ use App\Support\Bridge;
 use App\Support\Credentials\Credential;
 use App\Support\Credentials\Credentials;
 use App\Support\PendingEvents;
+use App\Support\StdinReader;
 use App\Support\WakeAdapters;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
@@ -614,21 +615,44 @@ it('leaves one line, and says nothing on stdout, when setup throws after the rea
         'amp' => fn (string $target): never => throw new LogicException('boom rcouncil_2|PLANTED-SECRET'),
     ]));
 
+    // **A reader whose stdin stays open (#402).** Stdin is already at end of file under a test runner,
+    // so the command's own reader exits by itself and a missing `stop()` could never show. This one
+    // reads a pipe that a sleeping process holds, so only `abandon()` stopping it can end it.
+    $holder = proc_open([PHP_BINARY, '-r', 'usleep(60000000);'], [1 => ['pipe', 'w']], $pipes);
+
+    expect($holder)->toBeResource();
+
+    $countable = in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true);
+    $aliveBefore = null;
+
+    app()->bind(StdinReader::class, function () use ($pipes, &$aliveBefore): StdinReader {
+        $reader = new StdinReader($pipes[1]);
+
+        // The control: the child is running when setup begins, so its later absence is an absence
+        $aliveBefore = readersRunning();
+
+        return $reader;
+    });
+
     $output = new TwoStreamOutput;
 
-    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE, '--wake-target' => 'thread-9'], $output);
+    try {
+        $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE, '--wake-target' => 'thread-9'], $output);
 
-    // Settled as the test above settles it: a reader still exiting is not a leak, one that stays is.
-    // **This cannot see `abandon()` fail to stop the reader.** Stdin is already at end of file under
-    // a test runner, so the child has exited by itself before `abandon()` runs: with its
-    // `$reader->stop()` removed this test still passes (measured, #400). That call is held by reading,
-    // not by this test.
-    $running = readersRunning();
-
-    for ($attempt = 0; $attempt < 30 && $running > 0 && in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true); $attempt++) {
-        usleep(100_000);
-
+        // Settled: a reader still exiting is not a leak, one that stays is
         $running = readersRunning();
+
+        for ($attempt = 0; $attempt < 30 && $running > 0 && $countable; $attempt++) {
+            usleep(100_000);
+
+            $running = readersRunning();
+        }
+    } finally {
+        // Ends whatever a failing run left behind, so a red test does not leak a child
+        if (\is_resource($holder)) {
+            proc_terminate($holder);
+            proc_close($holder);
+        }
     }
 
     $stops = bridgeStops();
@@ -638,8 +662,8 @@ it('leaves one line, and says nothing on stdout, when setup throws after the rea
         ->and($stops)->toHaveCount(1)
         ->and($stops[0]['reason'])->toBe('unhandled-exception')
         ->and($stops[0]['exception'])->toBe('LogicException')
-        // Read before the reader was stopped, so the child was seen rather than already gone
-        ->and($stops[0]['reader'])->toMatch('/^(exited-0|running)$/')
+        // Read before the reader was stopped, and the child is still running: its stdin never closed
+        ->and($stops[0]['reader'])->toBe('running')
         ->and($stops[0])->not->toHaveKey('session')
         // Nothing of the message, on the line or on the protocol stream
         ->and($raw)->not->toContain('PLANTED-SECRET')
@@ -648,5 +672,6 @@ it('leaves one line, and says nothing on stdout, when setup throws after the rea
         // The seat's record of its sink key went with it (cli#346)
         ->and(glob(getenv('XDG_STATE_HOME').'/robot-council/pending/*.key') ?: [])->toBeEmpty()
         // Counted only where counting is implemented; elsewhere `readersRunning()` has no basis
-        ->and(in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true) ? $running : 0)->toBe(0);
+        ->and($countable ? $aliveBefore : 1)->toBe(1)
+        ->and($countable ? $running : 0)->toBe(0);
 });
