@@ -650,3 +650,24 @@ it('leaves one line, and says nothing on stdout, when setup throws after the rea
         // Counted only where counting is implemented; elsewhere `readersRunning()` has no basis
         ->and(in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true) ? $running : 0)->toBe(0);
 });
+
+it('leaves one start-failed line, and nothing else on it, when there is no service URL (#403)', function (): void {
+    putenv('ROBOT_COUNCIL_SERVICE');
+
+    $output = new TwoStreamOutput;
+
+    $exit = Artisan::call('mcp', [], $output);
+
+    $stops = bridgeStops();
+
+    expect($exit)->toBe(Command::FAILURE)
+        ->and($stops)->toHaveCount(1)
+        ->and($stops[0]['reason'])->toBe('start-failed')
+        // No reader and no session exist at this return, and no throwable caused it
+        ->and($stops[0])->not->toHaveKey('reader')
+        ->and($stops[0])->not->toHaveKey('session')
+        ->and($stops[0])->not->toHaveKey('exception')
+        ->and($stops[0]['pid'])->toBe(getmypid())
+        ->and($output->stdout())->toBeEmpty()
+        ->and($output->stderr())->toContain('Pass --service');
+});

@@ -97,6 +97,8 @@ final class McpCommand extends Command
         if ($service === null) {
             $this->diagnostic('Pass --service, or set ROBOT_COUNCIL_SERVICE, with the URL of your fleet.');
 
+            $this->recordStartFailure($parent);
+
             return self::FAILURE;
         }
 
@@ -124,6 +126,8 @@ final class McpCommand extends Command
             $reader = new StdinReader;
         } catch (RuntimeException $runtimeException) {
             $this->diagnostic($runtimeException->getMessage());
+
+            $this->recordStartFailure($parent, $runtimeException::class);
 
             return self::FAILURE;
         }
@@ -342,17 +346,45 @@ final class McpCommand extends Command
     {
         $stopped = $bridge?->stoppedBecause();
 
-        $reason = StopReason::recordedFor($escaped, $stopped['reason'] ?? null);
+        $this->writeRecord(StopReason::recordedFor($escaped, $stopped['reason'] ?? null), [
+            ...($stopped['facts'] ?? []),
+            'exception' => $escaped,
+            'parent' => $parent->identity()['pid'] ?? null,
+            'session' => $bridge?->session()?->id(),
+            'version' => Version::current(),
+            'reader' => $readerState,
+        ]);
+    }
 
+    /**
+     * Leave the one line for a bridge that returned before it could start (#403).
+     *
+     * No reader and no session exist at these returns, so the line has neither fact. A throwable
+     * contributes its class name only, never its message.
+     *
+     * @param  string|null  $escaped  The class of the throwable that stopped the start, when one did.
+     */
+    private function recordStartFailure(ParentProcess $parent, ?string $escaped = null): void
+    {
+        $this->writeRecord(StopReason::StartFailed, [
+            'exception' => $escaped,
+            'parent' => $parent->identity()['pid'] ?? null,
+            'version' => Version::current(),
+        ]);
+    }
+
+    /**
+     * Append one line, and say on stderr when it could not be written.
+     *
+     * **Never throws and never changes the exit code**, because this runs while the bridge is
+     * already ending.
+     *
+     * @param  array<string, int|string|null>  $facts  What the line carries; `StopRecord` drops the rest.
+     */
+    private function writeRecord(StopReason $reason, array $facts): void
+    {
         try {
-            $failure = StopRecord::atDefaultPath()->append($reason, [
-                ...($stopped['facts'] ?? []),
-                'exception' => $escaped,
-                'parent' => $parent->identity()['pid'] ?? null,
-                'session' => $bridge?->session()?->id(),
-                'version' => Version::current(),
-                'reader' => $readerState,
-            ]);
+            $failure = StopRecord::atDefaultPath()->append($reason, $facts);
         } catch (Throwable $throwable) {
             $failure = \sprintf('Could not record why this bridge stopped (%s).', $throwable::class);
         }
