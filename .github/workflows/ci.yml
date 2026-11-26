@@ -170,7 +170,11 @@ jobs:
 
   generator:
     name: generator (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # **Pinned, not `ubuntu-latest` (#398).** The 3.9 cell is the floor the skill documents, and
+    # `ubuntu-latest` moved to Ubuntu 26.04, which `actions/setup-python` has no 3.9 build for
+    # (`The version '3.9' with architecture 'x64' was not found for Ubuntu 26.04`). Unpin when the
+    # floor rises above what the image provides, not before.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     strategy:
       fail-fast: false
