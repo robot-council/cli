@@ -696,3 +696,27 @@ it('leaves one start-failed line, and nothing else on it, when there is no servi
         ->and($output->stdout())->toBeEmpty()
         ->and($output->stderr())->toContain('Pass --service');
 });
+
+it('leaves one start-failed line naming the class, and none of the message, when the reader will not start (#403)', function (): void {
+    // A reader that cannot start, carrying something that must never reach the line
+    app()->bind(StdinReader::class, function (): never {
+        throw new RuntimeException('Could not listen: rcouncil_2|PLANTED-SECRET https://bridge.example.test/?token=PLANTED-SECRET');
+    });
+
+    $output = new TwoStreamOutput;
+
+    $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE], $output);
+
+    $stops = bridgeStops();
+    $raw = (string) file_get_contents(getenv('XDG_STATE_HOME').'/robot-council/stops.jsonl');
+
+    expect($exit)->toBe(Command::FAILURE)
+        ->and($stops)->toHaveCount(1)
+        ->and($stops[0]['reason'])->toBe('start-failed')
+        ->and($stops[0]['exception'])->toBe('RuntimeException')
+        ->and($stops[0])->not->toHaveKey('reader')
+        ->and($stops[0])->not->toHaveKey('session')
+        ->and($raw)->not->toContain('PLANTED-SECRET')
+        ->and($raw)->not->toContain('bridge.example.test')
+        ->and($output->stdout())->toBeEmpty();
+});
