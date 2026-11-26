@@ -219,7 +219,7 @@ final class McpCommand extends Command
 
             $this->listenForSignals($bridge);
         } catch (Throwable $throwable) {
-            return $this->abandon($reader, $parent, $throwable);
+            return $this->abandon($reader, $parent, $throwable, $seat ?? null);
         }
 
         // Set only when something escapes the loop, so the record can name the class (#396)
@@ -287,20 +287,26 @@ final class McpCommand extends Command
     /**
      * End a bridge whose setup threw after the reader started, before the loop could (#400).
      *
-     * Nothing has joined by then, so there is no session to end and no sink to clear. The reader
-     * child is the one thing that would outlive this process, so it is stopped, and the line says
-     * which class escaped.
+     * Nothing has joined by then, so there is no session to end and no sink to clear. What is left
+     * to undo is the reader child, which would outlive this process, and the record of the sink's
+     * key if the seat got as far as writing one (cli#346), so a hook is not pointed at a bridge
+     * that is gone. The line says which class escaped.
      *
      * @param  StdinReader  $reader  The child that was started.
+     * @param  ParentProcess  $parent  The process that started this one, for the line.
+     * @param  PendingEvents|null  $seat  The seat, when setup got far enough to make it.
      */
-    private function abandon(StdinReader $reader, ParentProcess $parent, Throwable $throwable): int
+    private function abandon(StdinReader $reader, ParentProcess $parent, Throwable $throwable, ?PendingEvents $seat): int
     {
-        // Before the child is stopped, as in the loop's own ending
-        $readerState = $reader->state();
+        try {
+            // Before the child is stopped, as in the loop's own ending
+            $this->recordStop(null, $parent, $throwable::class, $reader->state());
+        } finally {
+            // Stopped whatever the record did, because the child is the one thing that outlives us
+            $reader->stop();
 
-        $this->recordStop(null, $parent, $throwable::class, $readerState);
-
-        $reader->stop();
+            $seat?->forgetKey();
+        }
 
         $this->sayWhyItStopped($throwable);
 

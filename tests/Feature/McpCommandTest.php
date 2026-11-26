@@ -645,6 +645,8 @@ it('leaves one line, and says nothing on stdout, when setup throws after the rea
         ->and($raw)->not->toContain('PLANTED-SECRET')
         ->and($output->stdout())->toBeEmpty()
         ->and($output->stderr())->toContain('The bridge stopped unexpectedly.')
+        // The seat's record of its sink key went with it (cli#346)
+        ->and(glob(getenv('XDG_STATE_HOME').'/robot-council/pending/*.key') ?: [])->toBeEmpty()
         // Counted only where counting is implemented; elsewhere `readersRunning()` has no basis
         ->and(in_array(PHP_OS_FAMILY, ['Windows', 'Linux'], true) ? $running : 0)->toBe(0);
 });

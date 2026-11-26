@@ -83,6 +83,9 @@ it('stops the loop when the signal handler runs, so the next pass forwards nothi
         $said[] = $message;
     });
 
-    // The first reason stands: reaching the end of input afterwards does not replace it
-    expect($bridge->stoppedBecause()['reason'] ?? null)->toBe(StopReason::Signal);
+    // **A stopped loop reads nothing**, so the message is still unread: the stream is where it was.
+    // The first reason stands too, because reaching the end of input afterwards does not replace it
+    expect(ftell($stream))->toBe(0)
+        ->and($said)->toBeEmpty()
+        ->and($bridge->stoppedBecause()['reason'] ?? null)->toBe(StopReason::Signal);
 });
