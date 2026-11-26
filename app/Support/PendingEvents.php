@@ -973,10 +973,22 @@ final class PendingEvents
      */
     private function directory(): string
     {
+        return self::stateDirectory().'/pending';
+    }
+
+    /**
+     * The directory this application keeps its local state in, whichever file asks.
+     *
+     * **One answer for every reader**, because two answers is how #268 delivered nothing: the sinks and
+     * the record of why a bridge stopped are found by different processes, and each must reach the same
+     * folder from the same environment.
+     */
+    public static function stateDirectory(): string
+    {
         $configured = getenv('XDG_STATE_HOME');
 
         if (\is_string($configured) && trim($configured) !== '') {
-            return rtrim($configured, '/\\').'/'.self::DIRECTORY.'/pending';
+            return rtrim($configured, '/\\').'/'.self::DIRECTORY;
         }
 
         // **`USERPROFILE` before the temp directory (#268).** Windows does not set `HOME`, so a bridge
@@ -994,7 +1006,7 @@ final class PendingEvents
             $home = sys_get_temp_dir();
         }
 
-        return rtrim($home, '/\\').'/.local/state/'.self::DIRECTORY.'/pending';
+        return rtrim($home, '/\\').'/.local/state/'.self::DIRECTORY;
     }
 
     /**
