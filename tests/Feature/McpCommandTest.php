@@ -708,7 +708,9 @@ it('leaves one start-failed line naming the class, and none of the message, when
     $exit = Artisan::call('mcp', ['--service' => MCP_SERVICE], $output);
 
     $stops = bridgeStops();
-    $raw = (string) file_get_contents(getenv('XDG_STATE_HOME').'/robot-council/stops.jsonl');
+    $path = getenv('XDG_STATE_HOME').'/robot-council/stops.jsonl';
+    // Guarded, so a missing file fails the count below rather than raising before any assertion
+    $raw = is_file($path) ? (string) file_get_contents($path) : '';
 
     expect($exit)->toBe(Command::FAILURE)
         ->and($stops)->toHaveCount(1)
