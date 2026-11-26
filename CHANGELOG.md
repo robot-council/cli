@@ -4,6 +4,28 @@ All notable changes to `robot-council/cli` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.4.34 — Stop Records, Rename, and Cursor Workspaces (2026-11-26)
+
+Every bridge now records why it stopped, a machine can rename its installation, and Cursor and idle-seat harnesses get workspace-keyed sinks and a wake-delivery seam.
+
+### What's new
+- Record a `start-failed` stop when the bridge exits before its reader starts [#405](https://github.com/robot-council/cli/pull/405)
+- Record and clean up a stop that happens before the loop [#401](https://github.com/robot-council/cli/pull/401)
+- Record why a bridge stops in `stops.jsonl` [#397](https://github.com/robot-council/cli/pull/397)
+- Add a `rename` command for the installation this machine is enrolled as [#390](https://github.com/robot-council/cli/pull/390)
+- Name what proc_open was given when it refuses to start the credential helper [#389](https://github.com/robot-council/cli/pull/389)
+- Say so when a Cursor stop hook finds no workspace folder [#388](https://github.com/robot-council/cli/pull/388)
+- Key the Cursor sink by workspace folder [#387](https://github.com/robot-council/cli/pull/387)
+- Add a wake-delivery seam for idle-seat harness adapters [#385](https://github.com/robot-council/cli/pull/385)
+
+### Maintenance and tooling
+- Fail the pre-loop test when `abandon()` leaves the reader running [#404](https://github.com/robot-council/cli/pull/404)
+- Pin the generator job to `ubuntu-24.04` [#399](https://github.com/robot-council/cli/pull/399)
+- Take the security-audit scope and package from the skill [#395](https://github.com/robot-council/cli/pull/395)
+- Require REST for any GitHub operation REST supports [#394](https://github.com/robot-council/cli/pull/394)
+- Say the release-notes copies are adapted per repository [#392](https://github.com/robot-council/cli/pull/392)
+- Say why the reader command-line control read empty [#391](https://github.com/robot-council/cli/pull/391)
+
 ## v0.4.33 — Windows Sink Agreement, Path-Free Work Locations, and a Codex Join Note (2026-10-30)
 
 Windows seats now share one sink between the bridge and the stop hook, `join` refuses a path as `work_location`, and a Codex session is told how to get the fleet's tools.
