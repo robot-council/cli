@@ -101,7 +101,7 @@ it('prints the response body and nothing else', function (): void {
 
     $output = new TwoStreamOutput;
 
-    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE], $output))->toBe(0);
+    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE], $output))->toBe(0);
 
     // Exactly the body and its newline. A harness may pipe this straight into an agent, so a stray
     // line would be parsed as part of the payload -- and `trim()` over a merged buffer would have
@@ -118,7 +118,7 @@ it('ends the session when the service answers an error', function (): void {
     enrolled();
     fakeSession(callStatus: 500, callBody: '{"message":"boom"}');
 
-    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(1)
+    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(1)
         ->and(endCalls())->toBe(1);
 });
 
@@ -137,7 +137,7 @@ it('ends the session when the call throws, which is what the finally is for', fu
         '*/api/tasks*' => fn () => throw new ConnectionException('Connection reset by peer'),
     ]);
 
-    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(1);
+    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(1);
 
     // The session was started, so leaving it open would hold its tasks and locks until the sweep
     expect(endCalls())->toBe(1);
@@ -147,7 +147,7 @@ it('ends the session exactly once on the happy path too', function (): void {
     enrolled();
     fakeSession();
 
-    Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE]);
+    Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE]);
 
     expect(endCalls())->toBe(1);
 });
@@ -156,7 +156,7 @@ it('starts exactly one session per invocation', function (): void {
     enrolled();
     fakeSession();
 
-    Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE]);
+    Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE]);
 
     $started = 0;
 
@@ -181,7 +181,7 @@ it('exits non-zero on a non-2xx, with the status off stdout', function (): void 
 
     $output = new TwoStreamOutput;
 
-    $code = Artisan::call('api', ['method' => 'POST', 'path' => '/api/tasks', '--service' => API_SERVICE], $output);
+    $code = Artisan::call('api', ['method' => 'POST', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE], $output);
 
     // Byte for byte: the body and its newline, and nothing after it.
     expect($code)->toBe(1)
@@ -195,7 +195,7 @@ it('never puts either credential in its output', function (): void {
 
     $streams = new TwoStreamOutput;
 
-    Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE], $streams);
+    Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE], $streams);
 
     // **Both streams, since #205.** Diagnostics moved to stderr, and they are the output most
     // likely to quote a credential -- so a check reading stdout alone would have kept passing while
@@ -229,7 +229,7 @@ it('refuses when this machine is not enrolled against that service', function ()
 
     $output = new TwoStreamOutput;
 
-    $code = Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE], $output);
+    $code = Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE], $output);
 
     // On stderr, and stdout empty. Read through `Artisan::output()` this passed whichever stream the
     // refusal went to, which is the blindness #205 was about.
@@ -245,7 +245,7 @@ it('reports a revoked credential rather than a bare failure', function (): void 
 
     $output = new TwoStreamOutput;
 
-    $code = Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE], $output);
+    $code = Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE], $output);
 
     // The credential must be absent from BOTH streams. Moving diagnostics to stderr moves the text
     // most likely to quote one, so a check that still read only stdout would have stopped covering
@@ -261,7 +261,7 @@ it('refuses a --body that is not JSON', function (): void {
     fakeSession();
 
     expect(Artisan::call('api', [
-        'method' => 'POST', 'path' => '/api/tasks', '--service' => API_SERVICE, '--body' => 'not json',
+        'method' => 'POST', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE, '--body' => 'not json',
     ], new TwoStreamOutput))->toBe(1);
 
     // And it refused before starting a session, so nothing was left open
@@ -273,7 +273,7 @@ it('sends the body it was given', function (): void {
     fakeSession(callStatus: 201, callBody: '{"id":9}');
 
     Artisan::call('api', [
-        'method' => 'POST', 'path' => '/api/tasks', '--service' => API_SERVICE,
+        'method' => 'POST', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE,
         '--body' => '{"title":"Do the thing","priority":5}',
     ]);
 
@@ -304,20 +304,20 @@ dataset('paths that print no body', [
             putenv('ROBOT_COUNCIL_SERVICE');
             enrolled();
 
-            return ['method' => 'GET', 'path' => '/api/tasks'];
+            return ['method' => 'GET', 'path' => '/robot-council/api/tasks'];
         },
         'Pass --service',
     ],
     'no credential for this harness' => [
         // Deliberately not enrolled, so `InstallationChoice` has nothing to choose.
-        fn (): array => ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE],
+        fn (): array => ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE],
         'This machine is not enrolled as `claude` against that fleet.',
     ],
     'a body that is not JSON' => [
         function (): array {
             enrolled();
 
-            return ['method' => 'POST', 'path' => '/api/tasks', '--service' => API_SERVICE, '--body' => 'not json'];
+            return ['method' => 'POST', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE, '--body' => 'not json'];
         },
         '--body must be valid JSON.',
     ],
@@ -326,7 +326,7 @@ dataset('paths that print no body', [
             enrolled();
             Http::fake(['*' => Http::response('{"message":"nope"}', 500)]);
 
-            return ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE];
+            return ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE];
         },
         'The service refused to start a session (HTTP 500).',
     ],
@@ -344,7 +344,7 @@ dataset('paths that print no body', [
                 '*/api/tasks' => fn (): never => throw new ConnectionException('the fleet is unreachable'),
             ]);
 
-            return ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE];
+            return ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE];
         },
         'The call did not complete.',
     ],
@@ -379,7 +379,7 @@ it('writes the response body and only the response body on a successful call', f
 
     $output = new TwoStreamOutput;
 
-    $code = Artisan::call('api', ['method' => 'GET', 'path' => '/api/tasks', '--service' => API_SERVICE], $output);
+    $code = Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/tasks', '--service' => API_SERVICE], $output);
 
     expect($code)->toBe(0)
         ->and($output->stdout())->toBe('{"tasks":[]}'.PHP_EOL)
@@ -402,7 +402,7 @@ it('starts an ephemeral session for a read, and still ends it', function (): voi
     enrolled();
     fakeSession();
 
-    expect(Artisan::call('api', ['method' => 'get', 'path' => '/api/events', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0);
+    expect(Artisan::call('api', ['method' => 'get', 'path' => '/robot-council/api/events', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0);
 
     // Lower-case on purpose: the method is normalized before the decision, so `get` is a read too
     expect(apiSessionStarts())->toHaveCount(1)
@@ -414,7 +414,7 @@ it('starts an ordinary session for a call that can change something, and ends it
     enrolled();
     fakeSession();
 
-    expect(Artisan::call('api', ['method' => $method, 'path' => '/api/tasks/1/claim', '--body' => '{}', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0);
+    expect(Artisan::call('api', ['method' => $method, 'path' => '/robot-council/api/tasks/1/claim', '--body' => '{}', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0);
 
     // The control for the test above: the same command, a different method, and the key absent
     // rather than false -- so the request is exactly what every core before #424 has been sent
@@ -434,8 +434,17 @@ it('keeps a read ephemeral when the service refuses the platform and the start i
         '*' => Http::response('{"events":[]}', 200),
     ]);
 
-    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/api/events', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0)
+    expect(Artisan::call('api', ['method' => 'GET', 'path' => '/robot-council/api/events', '--service' => API_SERVICE], new TwoStreamOutput))->toBe(0)
         ->and(apiSessionStarts())->toHaveCount(2)
         ->and(apiSessionStarts()[1])->not->toHaveKey('platform')
         ->and(apiSessionStarts()[1]['ephemeral'] ?? null)->toBeTrue();
+});
+
+it('documents a path that carries the service prefix', function (): void {
+    // The routes this repository calls all sit under `/robot-council`, so an example without it
+    // answers 404 on a real service (#407). The fakes above match either form, so only the text
+    // can pin it
+    Artisan::call('help', ['command_name' => 'api', '--no-ansi' => true]);
+
+    expect(Artisan::output())->toContain('such as /robot-council/api/events');
 });

@@ -31,7 +31,7 @@ use Throwable;
 #[Description('Perform one API call inside a session this command starts and ends')]
 #[Signature('api
     {method : The HTTP method, such as GET or POST}
-    {path : The path, such as /api/tasks}
+    {path : The path, such as /robot-council/api/events}
     {--service= : The service base URL, defaulting to ROBOT_COUNCIL_SERVICE}
     {--body= : A JSON body, for methods that take one}
     {--project= : The repository or workspace this call belongs to}
